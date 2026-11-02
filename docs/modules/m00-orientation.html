@@ -1,0 +1,746 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M00 · How This Practicum Works · Rust Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-rust.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-module="m00">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Orientation · Start here · Module 00</p>
+    <h1>How This Practicum Works</h1>
+    <p class="lede">You already use Pixi every day. This course takes you from writing Python to reading, changing, and
+      testing the Rust code that Pixi is made of. This first module shows you how the course runs Rust (in your
+      browser and through Pixi), how to read the compiler's error messages, which Python habits you will need to
+      change, and why every lesson reads one frozen copy of the Pixi source.</p>
+    <div class="lesson-meta"><span>⏱ ~1 hour</span><span>Prerequisites: working Python, Pixi installed</span></div>
+    <ul class="objectives">
+      <li>Explain why Pixi is written in Rust: speed, a single binary, correctness, and the conda/rattler ecosystem</li>
+      <li>Use the four kinds of code cell: Run, predict-the-output, "Compiler says no", and run-locally</li>
+      <li>Install a Rust toolchain into a Pixi workspace with <code>pixi add rust</code> and run <code>cargo</code> through <code>pixi run</code></li>
+      <li>Read a <code>rustc</code> error message: the error code, the primary span, the labels, and the <code>help:</code> and <code>note:</code> lines</li>
+      <li>Describe how exercises, quizzes, the ownership visualizer, and the capstones are graded</li>
+      <li>Explain what the frozen Pixi snapshot is and why every permalink points at one commit</li>
+      <li>Name the Python habits that change in Rust, and which module covers each</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="why-rust">
+    <h2>Why Rust, and why Pixi is written in it</h2>
+    <p>Pixi is a package manager and task runner for conda packages and PyPI packages. You type
+      <code>pixi add numpy</code>, and Pixi reads <code>pixi.toml</code>, downloads channel metadata, runs a
+      dependency solver, writes <code>pixi.lock</code>, downloads and unpacks packages, and links them into
+      <code>.pixi/envs/default</code>. All of that is written in <strong>Rust</strong>, a compiled language from the
+      same family as C and C++ that adds strong guarantees about memory and threads. If you want to fix a bug in
+      Pixi, review a pull request, or add a feature, you need to read and write Rust.</p>
+    <p>It is worth knowing <em>why</em> the Pixi authors chose Rust, because the same reasons explain most of the
+      rules you will meet in this course. There are four.</p>
+    <div class="card-grid">
+      <div class="card"><h4>Speed</h4><p>Rust compiles to native machine code, with no interpreter and no garbage
+        collector pausing the program. Solving an environment means checking hundreds of thousands of package
+        records; installing one means hashing and unpacking thousands of files, many at once on several threads.
+        That work is often ten to a hundred times faster in Rust than in Python, and it is the reason
+        <code>pixi install</code> feels quick.</p></div>
+      <div class="card"><h4>A single binary</h4><p>A Rust program builds into one executable file with its
+        dependencies compiled in. Pixi is one <code>pixi</code> file that you download and run. It does not need
+        Python to be installed, which matters for a tool whose job is to install Python. A package manager written
+        in Python has a chicken-and-egg problem: which Python runs the tool that installs Python?</p></div>
+      <div class="card"><h4>Correctness</h4><p>The Rust compiler rejects whole classes of bugs before the program
+        ever runs: using a value after it was freed, two threads writing the same data at once, forgetting that a
+        value can be missing, or ignoring an error. For a tool that rewrites files in your project and your
+        environments, "the compiler will not let you forget the error case" is worth a lot.</p></div>
+      <div class="card"><h4>The conda/rattler ecosystem</h4><p>Pixi is built on <strong>rattler</strong>, a family of
+        Rust crates (libraries) from the same team that implement the conda ecosystem: package records and match
+        specs (<code>rattler_conda_types</code>), the solver (<code>rattler_solve</code>, using the
+        <code>resolvo</code> solver), lock files (<code>rattler_lock</code>), and more. For PyPI packages Pixi reuses
+        crates from <code>uv</code>, which is also written in Rust. Choosing Rust means using these libraries
+        directly instead of shelling out to other programs.</p></div>
+    </div>
+    <p>Each of these benefits has a price, and you will pay it while learning. The compiler is strict. You must say
+      what type each value has, who is responsible for freeing it, and what happens when something fails. The course
+      is designed so that each strict rule arrives with the reason it exists and the Pixi code that depends on it.</p>
+    <p>Here is your first Rust program. Press <strong>Run</strong>. The code is sent to the official Rust Playground,
+      compiled, and run; the output appears below the cell.</p>
+    <div class="runnable" data-title="Your first Rust program">
+<textarea>
+fn main() {
+    let tool = "pixi";
+    let language = "Rust";
+    let crates = 60;
+    println!("{tool} is written in {language}, in about {crates} crates.");
+}
+</textarea>
+    </div>
+    <p>Even this tiny program shows three things you will see on every page. <code>fn main()</code> is where a
+      program starts (Python runs a file top to bottom; Rust starts at <code>main</code>). <code>let</code> creates a
+      variable. <code>println!</code> prints a line, and the <code>{tool}</code> inside the string is filled in from
+      the variable of that name, just like a Python f-string. The <code>!</code> marks <code>println!</code> as a
+      <strong>macro</strong>, code that the compiler expands into more code before compiling it; for now, read it as
+      "a function with a <code>!</code>".</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> Pixi is written in Rust for speed, for a single binary that
+      needs no Python, for compile-time correctness, and to use the rattler crates directly. The strict rules you are
+      about to learn are what buy those properties.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="the-path">
+    <h2>The path: from Python developer to Pixi contributor</h2>
+    <p>The course has three levels. Only Level 1 is published now; Levels 2 and 3 are on the
+      <a href="../reference/roadmap.html">roadmap</a>.</p>
+    <table>
+      <thead><tr><th>Level</th><th>You learn</th><th>You can then</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Level 1 · Reading Rust</strong></td><td>Cargo and modules, types, ownership and borrowing,
+          <code>Option</code> and <code>Result</code>, collections, traits, lifetimes, smart pointers, closures, crate
+          design, and testing</td><td>Read any function in Pixi and explain who owns what; write a small,
+          well-tested crate from a blank file (Capstone 1)</td></tr>
+        <tr><td>Level 2 · The Pixi stack</td><td>Errors with <code>thiserror</code> and <code>miette</code>, command
+          lines with <code>clap</code>, logging with <code>tracing</code>, <code>serde</code> and TOML, async Rust with
+          <code>tokio</code></td><td>Follow a Pixi command from the command line through to its output</td></tr>
+        <tr><td>Level 3 · Working in Pixi</td><td>The rattler crates, a tour of Pixi's architecture following
+          <code>pixi add</code>, building and testing Pixi itself</td><td>Make and test a change on a Pixi
+          checkout</td></tr>
+      </tbody>
+    </table>
+    <p>Every module teaches each idea in three steps. First, <strong>from Python</strong>: what you already do and
+      expect. Second, <strong>the Rust idea</strong>: what Rust does instead, why, and a cell you can run. Third,
+      <strong>in Pixi</strong>: where that idea appears in the real Pixi source, with a link to the exact lines. Every
+      module ends the same way: a "Reading Pixi" section, graded exercises, a mini-project you build on your own
+      machine, a quiz, and flashcards.</p>
+    <p>Plan on the times shown at the top of each module. They assume you run every cell, try to predict outputs
+      before you press Run, and finish the exercises. Reading alone is faster and leaves far less behind.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> Level 1 is about reading Rust fluently. Every idea goes
+      Python, then Rust, then Pixi.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="playground">
+    <h2>Code cells: the Rust Playground in your browser</h2>
+    <p>You do not need anything installed to follow the lessons. Code cells send their code to the official
+      <a href="https://play.rust-lang.org">Rust Playground</a> (play.rust-lang.org), which compiles it with Rust
+      stable, edition 2024, in debug mode. An <strong>edition</strong> is a named set of language rules (2015, 2018,
+      2021, 2024); new editions can change small details, and every crate says which edition it uses. Pixi uses
+      edition 2024, and so does this course. You can edit any cell and run it again; reloading the page restores the
+      original.</p>
+    <p>There are four kinds of cell.</p>
+    <h3>Run</h3>
+    <p>A plain cell, like the one above. Press <strong>Run</strong> and read the output. If the code has
+      <code>fn main</code>, it runs; if it has no <code>main</code>, the Playground compiles it as a library and
+      reports that it compiled.</p>
+    <h3>Predict the output</h3>
+    <p>A predict cell asks you to type what you think the program will print before it lets you run it. Then it
+      compares your prediction with the real output. Predicting is the fastest way to find out whether your mental
+      model is right, so take the prediction seriously. Try this one: <code>enumerate()</code> pairs each item with
+      its position, counting from 0, and <code>len()</code> is the number of items.</p>
+    <div class="runnable" data-title="Predict the output" data-predict>
+<textarea>
+fn main() {
+    let channels = vec!["conda-forge", "bioconda"];
+    for (i, channel) in channels.iter().enumerate() {
+        println!("{i}: {channel}");
+    }
+    println!("{} channels", channels.len());
+}
+</textarea>
+    </div>
+    <p><code>vec![...]</code> builds a <code>Vec</code>, Rust's growable list (Python's <code>list</code>). The
+      <code>for</code> loop and the tuple unpacking <code>(i, channel)</code> work much as they do in Python. The last
+      line uses <code>{}</code> with an expression after the string, because format strings can only capture plain
+      variable names, not method calls such as <code>channels.len()</code>.</p>
+    <h3>Compiler says no</h3>
+    <p>A cell labelled "Compiler says no" is <em>meant</em> to fail. Its button reads <strong>Compile</strong>, and
+      the point is the error message, which the text around the cell then explains. You will see many of these. In
+      Python you learn what a program does by running it; in Rust you also learn by reading why the compiler refused
+      to build it. The next section takes one of these errors apart in detail.</p>
+    <div class="runnable" data-title="Compile it and read the error" data-compile-fail>
+<textarea>
+fn main() {
+    let count = 0;
+    count += 1;
+    println!("{count}");
+}
+</textarea>
+    </div>
+    <p>The error is <code>E0384</code>, "cannot assign twice to immutable variable". In Rust, a variable created with
+      <code>let</code> cannot be changed. If you mean to change it, you say so with <code>let mut count = 0;</code>.
+      The compiler even suggests that fix in its <code>help:</code> line. Edit the cell, add <code>mut</code>, and
+      press Compile again.</p>
+    <h3>Run locally</h3>
+    <p>Some code cannot run on the Playground: code that uses Pixi's own crates, reads files from your disk, or is
+      split over several files. Those cells say why, and tell you to run them on your own machine in a Cargo project
+      (the next section shows how to make one).</p>
+    <div class="runnable" data-local="It uses pixi_manifest, one of Pixi's own crates, which is not on the Playground." data-title="Run locally">
+<textarea>
+use pixi_manifest::TaskName;
+
+fn main() {
+    let name = TaskName::from("build-debug");
+    println!("task: {name}");
+}
+</textarea>
+    </div>
+    <aside class="callout note"><p>The Playground also offers the most popular crates from crates.io, the public Rust
+      package registry (think PyPI). Level 1 sticks to the standard library, <code>std</code>, so everything you write
+      also works with nothing but a compiler.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> Run to see, predict to check your model, "Compiler says
+      no" to learn the rules, run-locally for real files and Pixi crates.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="toolchain">
+    <h2>Installing Rust with Pixi</h2>
+    <p>In Python you would install an interpreter, create an environment, and add packages to it. You already do that
+      with Pixi. Rust works the same way: conda-forge publishes the Rust toolchain as a conda package named
+      <code>rust</code>, so you add it to a Pixi workspace like any other dependency. The <strong>toolchain</strong>
+      is the set of programs you need:</p>
+    <ul>
+      <li><code>rustc</code>, the compiler, which turns <code>.rs</code> source files into a program.</li>
+      <li><code>cargo</code>, the build tool and package manager. It reads <code>Cargo.toml</code>, downloads crates,
+        calls <code>rustc</code> for you, and runs tests. You will almost never call <code>rustc</code> directly.</li>
+      <li><code>clippy</code>, a linter with several hundred checks, run as <code>cargo clippy</code> (think ruff's
+        lint rules).</li>
+      <li><code>rustfmt</code>, the formatter, run as <code>cargo fmt</code> (think <code>ruff format</code>).</li>
+    </ul>
+    <pre data-label="Terminal"><code class="language-bash">pixi init hello-rust &amp;&amp; cd hello-rust
+pixi add rust                    # rustc, cargo, clippy and rustfmt from conda-forge
+pixi run cargo init --name hello # creates Cargo.toml and src/main.rs in this directory
+pixi run cargo run               # compiles, then runs: Hello, world!</code></pre>
+    <p>Every Rust command goes through <code>pixi run</code>, the same way you run <code>pixi run python</code> or
+      <code>pixi run pytest</code>. That keeps the toolchain version recorded in <code>pixi.lock</code>: everyone who
+      clones your project gets the same compiler. This is also how Pixi itself is developed. Pixi's own
+      <code>pixi.toml</code> has a <code>rust</code> feature and tasks such as <code>pixi run build-debug</code>
+      (which runs <code>cargo build --workspace --bin pixi</code>) and <code>pixi run test-fast</code>.</p>
+    <aside class="callout pixi"><p>Use a version range to pin the compiler, the same way this course does. In this
+      repository's <code>pixi.toml</code> the line is <code>rust = "&gt;=1.95,&lt;1.96"</code>, which matches the
+      <code>1.95.0</code> that Pixi pins in its <code>rust-toolchain</code> file. You can do the same in your own
+      workspaces: <code>pixi add "rust&gt;=1.95,&lt;1.96"</code>.</p></aside>
+    <aside class="callout warn"><p>Rust's own website suggests a tool called <code>rustup</code>. You do not need it
+      for this course, and mixing two toolchain managers is a common source of "it works on my machine". Pixi already
+      manages the toolchain per project.</p></aside>
+    <p>Just enough Cargo to run things (<a href="m01-cargo-crates-modules.html">M01</a> covers it properly):</p>
+    <table>
+      <thead><tr><th>Command</th><th>What it does</th><th>Python analogy</th></tr></thead>
+      <tbody>
+        <tr><td><code>pixi run cargo run</code></td><td>Build the program if anything changed, then run it</td><td><code>pixi run python main.py</code></td></tr>
+        <tr><td><code>pixi run cargo check</code></td><td>Type-check without producing a program (fast)</td><td><code>mypy</code></td></tr>
+        <tr><td><code>pixi run cargo test</code></td><td>Build and run every <code>#[test]</code> function</td><td><code>pytest</code></td></tr>
+        <tr><td><code>pixi run cargo clippy</code></td><td>Lint</td><td><code>ruff check</code></td></tr>
+        <tr><td><code>pixi run cargo fmt</code></td><td>Format every file in place</td><td><code>ruff format</code></td></tr>
+      </tbody>
+    </table>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>pixi add rust</code> gives you the whole toolchain;
+      run every Cargo command as <code>pixi run cargo ...</code>.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="reading-errors">
+    <h2>Reading a compiler error</h2>
+    <p>Python reports most mistakes at run time, as a traceback, often far from where the mistake was made. Rust
+      reports most mistakes at compile time, before the program runs, and the messages are unusually helpful. Reading
+      them well is the single most useful skill in this course. Compile this cell.</p>
+    <div class="runnable" data-title="A moved value" data-compile-fail>
+<textarea>
+fn main() {
+    let a = String::from("conda-forge");
+    let b = a;
+    println!("{a} and {b}");
+}
+</textarea>
+    </div>
+    <p>The compiler prints this (the file name will differ on the Playground):</p>
+    <pre data-label="rustc output"><code class="language-bash">error[E0382]: borrow of moved value: `a`
+ --&gt; src/main.rs:4:16
+  |
+2 |     let a = String::from("conda-forge");
+  |         - move occurs because `a` has type `String`, which does not implement the `Copy` trait
+3 |     let b = a;
+  |             - value moved here
+4 |     println!("{a} and {b}");
+  |                ^ value borrowed here after move
+  |
+help: consider cloning the value if the performance cost is acceptable
+  |
+3 |     let b = a.clone();
+  |              ++++++++
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0382`.</code></pre>
+    <p>Read it in this order:</p>
+    <ol>
+      <li><strong>The headline and error code.</strong> <code>error[E0382]: borrow of moved value: `a`</code>. Every
+        error has a code of the form <code>E</code> plus four digits. The code is stable across compiler versions, so
+        it is what you search for, and each one has a long explanation with examples.</li>
+      <li><strong>The location.</strong> <code>--&gt; src/main.rs:4:16</code> is the file, line 4, column 16. Editors
+        make this clickable.</li>
+      <li><strong>The primary span.</strong> The <code>^</code> marks under the code show the exact place the error
+        happened: <code>a</code> inside the <code>println!</code>, labelled "value borrowed here after move".</li>
+      <li><strong>The secondary spans.</strong> The <code>-</code> marks show the related places, in line order, each
+        with a label. Read them as the story of how you got here: line 2 says <code>a</code> is a <code>String</code>
+        and is not <code>Copy</code>; line 3 says the value moved into <code>b</code>; line 4 is where you used
+        <code>a</code> anyway.</li>
+      <li><strong><code>help:</code> and <code>note:</code> lines.</strong> <code>help:</code> suggests a change, often
+        as a small diff where <code>+</code> marks what to add. <code>note:</code> gives background. A suggestion is a
+        way to make the code compile, not always the right design; here cloning works, but borrowing
+        (<a href="m03-ownership-borrowing.html">M03</a>) is often better.</li>
+      <li><strong>The footer.</strong> <code>rustc --explain E0382</code> prints the long explanation for the code.</li>
+    </ol>
+    <pre data-label="Terminal"><code class="language-bash">pixi run rustc --explain E0382    # the long explanation, with examples
+pixi run rustc --explain E0308</code></pre>
+    <p>The same explanations are online in the
+      <a href="https://doc.rust-lang.org/error_codes/error-index.html">Rust error codes index</a>.</p>
+    <p>Why did this fail at all? In Python, <code>b = a</code> makes two names for one object. In Rust,
+      <code>let b = a;</code> <strong>moves</strong> the string into <code>b</code>, and <code>a</code> can no longer be
+      used. That rule is how Rust knows exactly when to free memory without a garbage collector. Step through it with
+      the <strong>ownership visualizer</strong>, which you will use often in <a href="m03-ownership-borrowing.html">M03</a>:
+      press the step buttons and watch the owner arrow move from <code>a</code> to <code>b</code>.</p>
+    <div class="viz" data-viz="ownership" data-config='{"scenario": "move"}'></div>
+    <p>Here is one more error to read on your own. It is the most common one in Rust code written by Python
+      developers.</p>
+    <div class="runnable" data-title="One semicolon too many" data-compile-fail>
+<textarea>
+fn greeting(name: &str) -> String {
+    let message = format!("Hello, {name}!");
+    message;
+}
+
+fn main() {
+    println!("{}", greeting("pixi"));
+}
+</textarea>
+    </div>
+    <details class="reveal"><summary>How to read this error</summary>
+      <p>The headline is <code>error[E0308]: mismatched types</code>. The primary span points at the return type
+        <code>String</code> and says "expected <code>String</code>, found <code>()</code>". The type <code>()</code>,
+        pronounced "unit", means "no value", like a Python function that falls off the end and returns
+        <code>None</code>. A secondary label on <code>greeting</code> says the function "implicitly returns
+        <code>()</code> as its body has no tail or <code>return</code> expression", and the <code>help:</code> label
+        on line 3 says "remove this semicolon to return this value".</p>
+      <p>In Rust, the last expression in a function body, written <em>without</em> a semicolon, is the return value.
+        <code>message;</code> with a semicolon is a statement that throws the value away. Remove the semicolon and it
+        compiles. You will fix exactly this in the first exercise.</p>
+    </details>
+    <aside class="callout pro"><p>When a build prints many errors, fix the <em>first</em> one and compile again. Later
+      errors are often caused by the first. Run <code>pixi run cargo check</code> instead of <code>cargo build</code>
+      while you fix errors; it skips producing a program and is much faster.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> headline and code, location, primary span
+      (<code>^</code>), secondary spans (<code>-</code>) in order, then <code>help:</code>/<code>note:</code>. When in
+      doubt, <code>rustc --explain</code> the code.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="course-components">
+    <h2>Exercises, quizzes, and capstones</h2>
+    <h3>Exercises are graded by <code>cargo test</code></h3>
+    <p>Each module has three to six graded exercises. An exercise gives you starter code, usually with function
+      bodies written as <code>todo!()</code>, a macro that compiles anywhere and panics (crashes with a message) if it
+      runs. You replace each <code>todo!()</code> with real code and press <strong>Check</strong>.</p>
+    <p>Check sends your code to the Playground with a hidden test module appended, and runs
+      <code>cargo test</code>. Each test is an ordinary Rust test function, marked <code>#[test]</code>, like a pytest
+      function. A test passes if it returns normally and fails if it panics. The tests use
+      <code>assert_eq!(actual, expected, "message")</code>, Rust's version of <code>assert actual == expected,
+      "message"</code>, and the message is written for you. Here is the shape:</p>
+    <pre><code class="language-rust">#[test]
+fn greets_by_name() {
+    assert_eq!(greeting("pixi"), "Hello, pixi!", "greeting(\"pixi\") should be \"Hello, pixi!\"");
+}</code></pre>
+    <p>Only return values and state are graded, not what you print. Each exercise also has a hint and a solution;
+      try for a while before you open them. Some exercises start with code that does <em>not</em> compile, because
+      the task is to fix it; the prompt always says so. Your progress is saved in your browser.</p>
+    <h3>Quizzes</h3>
+    <p>Each module ends with a quiz of 10 to 15 questions. There are four kinds: pick one answer, pick all correct
+      answers, type the exact output of a program, and type a short answer such as an error code. Every question has
+      an explanation; read it even when you are right. Many questions ask "does this compile?", which is the best
+      test of whether you understand the rules.</p>
+    <h3>Mini-projects</h3>
+    <p>Each module has a mini-project that you build on your own machine, in a Cargo project inside a Pixi workspace
+      you create yourself. Mini-projects are not graded; they come with acceptance criteria as a checklist you tick
+      off. They are where you get used to the real loop of editing, <code>cargo check</code>, <code>cargo test</code>,
+      <code>cargo clippy</code>, and <code>cargo fmt</code>.</p>
+    <h3>Capstones</h3>
+    <p>Each level ends with a capstone: a whole crate you build from a starter, graded by integration tests. Level 1
+      ends with <strong>Capstone 1: Manifest Reader</strong>, which reads a simplified <code>pixi.toml</code> into Rust
+      types. Capstones live in this course's repository and run through its Pixi tasks:</p>
+    <pre data-label="Terminal"><code class="language-bash">git clone https://github.com/millsks/rust-practicum.git
+cd rust-practicum
+pixi install          # includes Rust 1.95 from conda-forge
+pixi run projects     # list the capstones and whether you have started them
+pixi run start c1     # copy the starter crate into work/
+pixi run grade c1     # run the capstone's cargo tests against your crate in work/</code></pre>
+    <p>The grading tests are copied next to your code only while grading runs, so your working copy in
+      <code>work/</code> never contains them and you cannot edit them by accident. Run <code>pixi run grade c1</code>
+      as often as you like; read the first failing test, fix it, and grade again.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> exercises and capstones are graded by real
+      <code>cargo test</code> runs; quizzes and flashcards check understanding; mini-projects build the local habit.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="snapshot">
+    <h2>The frozen Pixi snapshot</h2>
+    <p>Pixi changes every day. Files are renamed, functions move, and line numbers shift with every merged pull
+      request. A course that linked to "the current" Pixi would have broken links and quotes that no longer match
+      within weeks. So every reference to Pixi in this course points at <strong>one commit</strong>:</p>
+    <pre data-label="Pixi snapshot"><code class="language-bash">commit 451aa9596402530f1a4d8a50b5fe137570ad42a5   (pixi 0.81.0 development, 2026-09-18)</code></pre>
+    <p>A <strong>permalink</strong> is a GitHub link that includes a commit hash, so it always shows the file exactly as
+      it was at that commit. Every "Reading Pixi" link in this course has the form:</p>
+    <pre><code class="language-bash">https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/&lt;path&gt;#L&lt;start&gt;-L&lt;end&gt;</code></pre>
+    <p>Here are two small files from the snapshot that this course relies on. The first is Pixi's
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/rust-toolchain"><code>rust-toolchain</code></a>
+      file, which pins the compiler that Pixi builds with:</p>
+    <pre data-label="rust-toolchain"><code class="language-bash">1.95.0</code></pre>
+    <p>The second is the shared package settings in Pixi's top-level
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/Cargo.toml#L18-L25"><code>Cargo.toml</code></a>,
+      which every crate in the workspace inherits:</p>
+    <pre data-label="Cargo.toml (lines 18-25)"><code class="language-toml">[workspace.package]
+authors = ["pixi contributors &lt;hi@prefix.dev&gt;"]
+edition = "2024"
+rust-version = "1.90"
+readme = "README.md"
+homepage = "https://github.com/prefix-dev/pixi"
+repository = "https://github.com/prefix-dev/pixi"
+license = "BSD-3-Clause"</code></pre>
+    <p><code>edition = "2024"</code> is why this course teaches edition 2024. <code>rust-version = "1.90"</code> is the
+      oldest compiler that may build Pixi, while <code>rust-toolchain</code> says which one Pixi's developers actually
+      use (1.95). The course uses 1.95 everywhere. <code>license = "BSD-3-Clause"</code> is what allows the course to
+      quote Pixi's code, with attribution.</p>
+    <aside class="callout think"><p>When the course says "Pixi does X", it means "Pixi did X at commit 451aa959". The
+      current Pixi may have changed since then. Why is that still the right thing to teach from? (Because the goal is
+      to learn to read the code; the patterns change far more slowly than the details, and a frozen copy lets you
+      check every claim yourself.)</p></aside>
+    <p>If you want the snapshot on your own machine, so you can search it and open files in your editor:</p>
+    <pre data-label="Terminal"><code class="language-bash">git clone https://github.com/prefix-dev/pixi.git
+cd pixi
+git checkout 451aa9596402530f1a4d8a50b5fe137570ad42a5</code></pre>
+    <p>In Level 1 you only read Pixi's code. In Level 3 you will build it and make a change on a copy of this same
+      snapshot, so that the instructions keep working.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> one commit, <code>451aa959</code>, for every quote and
+      link, so nothing drifts. Pixi uses Rust 1.95, edition 2024.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="python-habits">
+    <h2>Python habits that change in Rust</h2>
+    <p>Most of what you know transfers: functions, loops, modules, tests, and good naming. Some habits do not, and
+      they cause most of the early frustration. Here is the map. You do not need to understand the right-hand column
+      yet; come back to this table as you go.</p>
+    <table>
+      <thead><tr><th>In Python you...</th><th>In Rust you...</th><th>Where</th></tr></thead>
+      <tbody>
+        <tr><td>Never write types, or write optional hints that nothing enforces</td><td>Every value has one type,
+          checked at compile time; local types are usually inferred, function signatures are always written</td><td><a href="m02-types-structs-enums.html">M02</a></td></tr>
+        <tr><td>Reassign any variable</td><td>Variables are immutable unless declared <code>let mut</code>; you can
+          also <em>shadow</em> a name with a new <code>let</code></td><td><a href="m02-types-structs-enums.html">M02</a></td></tr>
+        <tr><td>Return with <code>return</code>, or get <code>None</code> by falling off the end</td><td>The last
+          expression without a semicolon is the return value</td><td>This module, <a href="m02-types-structs-enums.html">M02</a></td></tr>
+        <tr><td>Write <code>b = a</code> to get two names for one object</td><td><code>let b = a;</code> moves the
+          value; you borrow with <code>&amp;a</code> or copy with <code>.clone()</code></td><td><a href="m03-ownership-borrowing.html">M03</a></td></tr>
+        <tr><td>Rely on the garbage collector</td><td>Each value has one owner and is freed when the owner goes out
+          of scope</td><td><a href="m03-ownership-borrowing.html">M03</a></td></tr>
+        <tr><td>Use <code>None</code> for "missing" and check (or forget to)</td><td>Use <code>Option&lt;T&gt;</code>;
+          the compiler makes you handle the missing case</td><td><a href="m04-option-result.html">M04</a></td></tr>
+        <tr><td>Raise and catch exceptions</td><td>Return <code>Result&lt;T, E&gt;</code> and pass errors up with
+          <code>?</code></td><td><a href="m04-option-result.html">M04</a></td></tr>
+        <tr><td>Use dicts as ad-hoc records</td><td>Define a <code>struct</code> with named, typed fields</td><td><a href="m02-types-structs-enums.html">M02</a></td></tr>
+        <tr><td>Use strings or class hierarchies for "one of several kinds"</td><td>Define an <code>enum</code>
+          whose variants carry data, and <code>match</code> on it</td><td><a href="m02-types-structs-enums.html">M02</a></td></tr>
+        <tr><td>Rely on duck typing and inheritance</td><td>Use traits and generics; there is no class
+          inheritance</td><td><a href="m06-traits-generics.html">M06</a></td></tr>
+        <tr><td>Write list comprehensions</td><td>Chain iterator adapters such as <code>.map()</code> and
+          <code>.filter()</code>, then <code>.collect()</code></td><td><a href="m05-collections-iterators.html">M05</a></td></tr>
+        <tr><td><code>pixi add</code> a PyPI or conda package</td><td>Add a crate to <code>Cargo.toml</code> with
+          <code>cargo add</code></td><td><a href="m01-cargo-crates-modules.html">M01</a></td></tr>
+        <tr><td>Run pytest, ruff, and mypy</td><td>Run <code>cargo test</code>, <code>cargo clippy</code>,
+          <code>cargo fmt</code>; the type checker is the compiler</td><td><a href="m01-cargo-crates-modules.html">M01</a>, <a href="m11-testing.html">M11</a></td></tr>
+        <tr><td>Use indentation for blocks</td><td>Use braces; indentation is for humans, and <code>cargo fmt</code>
+          maintains it</td><td>Everywhere</td></tr>
+      </tbody>
+    </table>
+    <p>Two of these are visible right now. In this cell, <code>total</code> is <code>mut</code> because it changes,
+      and <code>double</code> returns its last expression without a <code>return</code> keyword.</p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">def double(n: int) -&gt; int:
+    return n * 2
+
+total = 0
+for n in [1, 2, 3]:
+    total += double(n)
+print(f"total = {total}")</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">fn double(n: i32) -&gt; i32 {
+    n * 2
+}
+
+fn main() {
+    let mut total = 0;
+    for n in [1, 2, 3] {
+        total += double(n);
+    }
+    println!("total = {total}");
+}</code></pre></div>
+    </div>
+    <div class="runnable" data-title="Predict the total" data-predict>
+<textarea>
+fn double(n: i32) -> i32 {
+    n * 2
+}
+
+fn main() {
+    let mut total = 0;
+    for n in [1, 2, 3] {
+        total += double(n);
+    }
+    println!("total = {total}");
+}
+</textarea>
+    </div>
+    <aside class="callout think"><p>Delete <code>mut</code> from the cell above and compile it. Which error code do you
+      get, and what does its <code>help:</code> line suggest?</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> immutable by default, last expression is the return
+      value, values move, missing values and errors are types. Everything else you know about writing clear code
+      still applies.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="practice">
+    <h2>Practice</h2>
+    <p>Three short exercises to try the Check button. The first and third start with code that does not compile, on
+      purpose: the first Check shows the compiler error, which is your clue.</p>
+
+    <div class="exercise" data-id="m00-e1" data-title="Fix the missing return value">
+      <div class="exercise-prompt">
+        <p>This starter does <strong>not compile</strong>. Press Check first and read the <code>E0308</code> error.
+          Then fix <code>greeting</code> so that <code>greeting("pixi")</code> returns <code>"Hello, pixi!"</code>.
+          Change one character.</p>
+      </div>
+<textarea class="starter">
+fn greeting(name: &str) -> String {
+    let message = format!("Hello, {name}!");
+    message;
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn greets_pixi() {
+    assert_eq!(greeting("pixi"), "Hello, pixi!", "greeting(\"pixi\") should return \"Hello, pixi!\"");
+}
+
+#[test]
+fn greets_anyone() {
+    assert_eq!(greeting("rattler"), "Hello, rattler!", "greeting(\"rattler\") should return \"Hello, rattler!\"");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Read the <code>help:</code> label in the error. The last
+        expression of a function body is its return value only if it has no semicolon.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn greeting(name: &amp;str) -&gt; String {
+    let message = format!("Hello, {name}!");
+    message
+}</code></pre>
+        <p>Removing the semicolon turns <code>message;</code> (a statement, value discarded) into
+          <code>message</code> (the tail expression, which is returned). You could also write
+          <code>format!("Hello, {name}!")</code> as the whole body.</p>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m00-e2" data-title="Write a function">
+      <div class="exercise-prompt">
+        <p>Write <code>run_command(task: &amp;str) -&gt; String</code> that returns the command a person would type to
+          run a Pixi task. For example, <code>run_command("test")</code> returns <code>"pixi run test"</code>.</p>
+      </div>
+<textarea class="starter">
+fn run_command(task: &str) -> String {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn builds_test_command() {
+    assert_eq!(run_command("test"), "pixi run test", "run_command(\"test\") should return \"pixi run test\"");
+}
+
+#[test]
+fn builds_other_commands() {
+    assert_eq!(run_command("build-debug"), "pixi run build-debug", "run_command(\"build-debug\") should return \"pixi run build-debug\"");
+    assert_eq!(run_command("lint"), "pixi run lint", "run_command(\"lint\") should return \"pixi run lint\"");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>format!</code> works like <code>println!</code> but
+        returns the <code>String</code> instead of printing it: <code>format!("pixi run {task}")</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn run_command(task: &amp;str) -&gt; String {
+    format!("pixi run {task}")
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m00-e3" data-title="Make it mutable">
+      <div class="exercise-prompt">
+        <p>This starter does <strong>not compile</strong>. <code>countdown(n)</code> should return the numbers from
+          <code>n</code> down to 1, so <code>countdown(3)</code> is <code>[3, 2, 1]</code>. Press Check, read the errors
+          (there are two, with codes <code>E0596</code> and <code>E0384</code>), and fix them by changing only the
+          <code>let</code> lines.</p>
+      </div>
+<textarea class="starter">
+fn countdown(n: u32) -> Vec<u32> {
+    let out = Vec::new();
+    let i = n;
+    while i > 0 {
+        out.push(i);
+        i -= 1;
+    }
+    out
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn counts_down_from_three() {
+    assert_eq!(countdown(3), vec![3, 2, 1], "countdown(3) should be [3, 2, 1]");
+}
+
+#[test]
+fn zero_gives_empty() {
+    assert_eq!(countdown(0), Vec::<u32>::new(), "countdown(0) should be an empty Vec");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Both <code>out</code> (you push to it) and <code>i</code> (you
+        subtract from it) change after they are created. Each needs <code>let mut</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn countdown(n: u32) -&gt; Vec&lt;u32&gt; {
+    let mut out = Vec::new();
+    let mut i = n;
+    while i &gt; 0 {
+        out.push(i);
+        i -= 1;
+    }
+    out
+}</code></pre>
+        <p><code>E0596</code> ("cannot borrow <code>out</code> as mutable") is about <code>push</code>, which needs to
+          change the vector. <code>E0384</code> is the reassignment of <code>i</code>. Rust wants every change
+          declared up front, so a reader can see at the <code>let</code> which values will change.</p>
+      </details>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="mini-project">
+    <h2>Mini-project: your first Cargo project with Pixi</h2>
+    <div class="project-box">
+      <div class="widget-head"><span class="w-kind">Mini-project</span><span class="w-title">hello-rust: install Rust with Pixi and run the whole toolchain</span></div>
+      <div class="widget-body">
+        <p>Set up the local workflow you will use for every mini-project in the course: a Pixi workspace that owns the
+          Rust toolchain, with a Cargo project inside it.</p>
+        <pre data-label="Terminal"><code class="language-bash">pixi init hello-rust &amp;&amp; cd hello-rust
+pixi add rust
+pixi run cargo init --name hello
+pixi run cargo run</code></pre>
+        <p><strong>What to do</strong></p>
+        <ol>
+          <li>Run the commands above. <code>cargo init</code> creates <code>Cargo.toml</code> and
+            <code>src/main.rs</code>; <code>cargo run</code> prints <code>Hello, world!</code>. Look at
+            <code>pixi.toml</code> and find the <code>rust</code> dependency that <code>pixi add</code> wrote.</li>
+          <li>Run <code>pixi run rustc --version</code> and <code>pixi run cargo --version</code> and note the
+            versions.</li>
+          <li>Edit <code>src/main.rs</code> so it prints a greeting that uses a variable inside the format string, and
+            a second line built with a function that returns a <code>String</code> (reuse <code>greeting</code> from
+            exercise 1).</li>
+          <li>Break it on purpose: add a semicolon after the function's last expression, run
+            <code>pixi run cargo check</code>, and read the error using the anatomy from this module. Then run
+            <code>pixi run rustc --explain E0308</code>. Fix it.</li>
+          <li>Run the linter: <code>pixi run cargo clippy --all-targets -- -D warnings</code>. The <code>-D
+            warnings</code> part turns every warning into an error, which is how Pixi's own checks run. To see a
+            warning, add <code>let unused = 5;</code> inside <code>main</code> and run it again.</li>
+          <li>Mess up the indentation of <code>main.rs</code>, then run <code>pixi run cargo fmt</code> and look at
+            the file again.</li>
+        </ol>
+        <ul class="checklist" data-id="m00-mini">
+          <li><code>pixi.toml</code> lists <code>rust</code> as a dependency, and <code>pixi.lock</code> pins its version</li>
+          <li><code>pixi run cargo run</code> prints your two lines</li>
+          <li>You read an <code>E0308</code> error and could point at its primary span and its <code>help:</code> line</li>
+          <li><code>pixi run cargo clippy --all-targets -- -D warnings</code> finishes with no warnings</li>
+          <li><code>pixi run cargo fmt</code> leaves the file formatted (running it a second time changes nothing)</li>
+          <li>No Rust tool was installed outside Pixi</li>
+        </ul>
+        <p><strong>Stretch goals:</strong> add Pixi tasks so that <code>pixi run start</code> runs
+          <code>cargo run</code> and <code>pixi run lint</code> runs clippy and <code>cargo fmt --check</code> (look at
+          how Pixi's own <code>pixi.toml</code> defines <code>build-debug</code> for the shape); run
+          <code>pixi run cargo build --release</code> and compare the size and speed of
+          <code>target/release/hello</code> with <code>target/debug/hello</code>; clone the Pixi snapshot and open
+          <code>crates/pixi/src/main.rs</code>, the start of the whole <code>pixi</code> program.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="quiz">
+    <h2>Quiz</h2>
+    <div class="quiz" data-id="m00-quiz">
+      <script type="application/json">
+      {"title": "Orientation quiz", "passScore": 0.7, "questions": [
+        {"type": "multi", "prompt": "Which of these are reasons Pixi is written in Rust?", "options": ["It builds into a single binary that does not need Python installed", "It runs native code with no interpreter or garbage collector", "The compiler catches errors such as ignoring a failure or using freed memory before the program runs", "Rust programs do not need to be compiled", "It can use the rattler crates for conda types, solving, and lock files directly"], "answer": [0, 1, 2, 4],
+         "explanation": "<p>Speed, a single binary, correctness, and the rattler ecosystem. Rust is a compiled language; compilation is exactly what produces the fast single binary.</p>"},
+        {"type": "single", "prompt": "How do you get a Rust toolchain for a mini-project in this course?", "options": ["Install rustup with curl", "<code>pip install rust</code>", "<code>pixi add rust</code> in a Pixi workspace, then <code>pixi run cargo ...</code>", "Download rustc from the Rust website"], "answer": 2,
+         "explanation": "<p>conda-forge publishes the toolchain as the <code>rust</code> package. Adding it to the workspace records the version in <code>pixi.lock</code>, and <code>pixi run</code> puts <code>cargo</code>, <code>rustc</code>, <code>clippy</code> and <code>rustfmt</code> on the path.</p>"},
+        {"type": "output", "prompt": "What does this print?", "code": "fn main() {\n    let channels = vec![\"conda-forge\", \"bioconda\"];\n    for (i, channel) in channels.iter().enumerate() {\n        println!(\"{i}: {channel}\");\n    }\n    println!(\"{} channels\", channels.len());\n}", "answer": "0: conda-forge\n1: bioconda\n2 channels",
+         "explanation": "<p><code>enumerate()</code> counts from 0, and <code>len()</code> is 2.</p>"},
+        {"type": "text", "prompt": "Which command prints the long explanation of error <code>E0382</code>? (Leave out <code>pixi run</code>.)", "answer": ["rustc --explain E0382"],
+         "explanation": "<p><code>rustc --explain</code> followed by the code. Run it as <code>pixi run rustc --explain E0382</code>.</p>"},
+        {"type": "single", "prompt": "In a rustc error, what do the <code>^^^</code> marks show?", "options": ["The primary span: exactly where the error happened", "Lines that were deleted", "Code the compiler suggests adding", "Lines that compiled successfully"], "answer": 0,
+         "explanation": "<p><code>^</code> marks the primary span. <code>-</code> marks secondary spans (related places), and in a <code>help:</code> diff, <code>+</code> marks code to add.</p>"},
+        {"type": "single", "prompt": "Does this compile?", "code": "fn main() {\n    let count = 0;\n    count += 1;\n    println!(\"{count}\");\n}", "options": ["Yes, it prints 1", "No: E0384, cannot assign twice to immutable variable", "No: E0308, mismatched types", "Yes, but it prints 0"], "answer": 1,
+         "explanation": "<p>Variables are immutable by default. Declare <code>let mut count = 0;</code> to change it.</p>"},
+        {"type": "single", "prompt": "Does this compile?", "code": "fn double(n: i32) -> i32 {\n    n * 2;\n}", "options": ["Yes", "No: the semicolon makes the body return <code>()</code> instead of <code>i32</code> (E0308)", "No: <code>n</code> must be <code>mut</code>"], "answer": 1,
+         "explanation": "<p>The tail expression without a semicolon is the return value. With the semicolon the body ends in a statement and returns <code>()</code>, which does not match <code>i32</code>.</p>"},
+        {"type": "single", "prompt": "Why does every Pixi link in this course point at commit <code>451aa959...</code>?", "options": ["It is the only commit that compiles", "So quoted code and line numbers never drift as Pixi changes", "Because later commits are not open source", "It is the latest release"], "answer": 1,
+         "explanation": "<p>A permalink with a commit hash always shows the same content. Pixi changes daily, so links to the current code would break or show different lines.</p>"},
+        {"type": "single", "prompt": "How is an exercise graded when you press Check?", "options": ["A person reviews it", "Your printed output is compared with an expected string", "A hidden module of <code>#[test]</code> functions is appended and <code>cargo test</code> runs it", "The code is only type-checked"], "answer": 2,
+         "explanation": "<p>Each <code>#[test]</code> function is one check; it fails if it panics, for example when an <code>assert_eq!</code> does not hold. Printed output is not graded.</p>"},
+        {"type": "multi", "prompt": "Which commands work with a capstone in this course's repository?", "options": ["<code>pixi run projects</code>", "<code>pixi run start c1</code>", "<code>pixi run grade c1</code>", "<code>cargo install c1</code>"], "answer": [0, 1, 2],
+         "explanation": "<p><code>projects</code> lists the capstones, <code>start</code> copies the starter crate into <code>work/</code>, and <code>grade</code> runs the grading tests against your copy.</p>"},
+        {"type": "single", "prompt": "In Python, <code>b = a</code> makes two names for one list. What does <code>let b = a;</code> do with a <code>String</code> in Rust?", "options": ["The same: two names for one string", "Copies the string automatically", "Moves the string into <code>b</code>; <code>a</code> can no longer be used", "It is a compile error"], "answer": 2,
+         "explanation": "<p>That is a move. Using <code>a</code> afterwards is error E0382. M03 covers moves, borrows and clones in depth.</p>"},
+        {"type": "text", "prompt": "Which edition of Rust does Pixi (and this course) use? Give the year.", "answer": ["2024", "edition 2024"],
+         "explanation": "<p>Pixi's workspace <code>Cargo.toml</code> sets <code>edition = \"2024\"</code>, and its <code>rust-toolchain</code> pins Rust 1.95.0.</p>"}
+      ]}
+      </script>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="recap">
+    <h2>Recap</h2>
+    <ul>
+      <li>Pixi is written in Rust for speed, a single self-contained binary, compile-time correctness, and direct use
+        of the rattler (conda) and uv (PyPI) crates.</li>
+      <li>Code cells compile on the official Rust Playground (stable, edition 2024). Run, predict, "Compiler says no",
+        and run-locally are the four kinds.</li>
+      <li><code>pixi add rust</code> installs <code>rustc</code>, <code>cargo</code>, <code>clippy</code> and
+        <code>rustfmt</code>; every command runs as <code>pixi run cargo ...</code>.</li>
+      <li>Read errors in order: headline and code, location, primary span (<code>^</code>), secondary spans
+        (<code>-</code>), <code>help:</code> and <code>note:</code>. Use <code>rustc --explain</code> for the code.</li>
+      <li>Exercises and capstones are graded by <code>cargo test</code>; capstones use <code>pixi run start c1</code>
+        and <code>pixi run grade c1</code>.</li>
+      <li>Every Pixi quote and link uses commit <code>451aa959</code>, so nothing drifts.</li>
+      <li>Biggest habit changes: immutable by default, tail expressions as return values, moves instead of shared
+        references, <code>Option</code> instead of <code>None</code> checks, <code>Result</code> instead of exceptions.</li>
+    </ul>
+    <div class="flashcards" data-title="Orientation">
+      <script type="application/json">
+      [{"front": "Four reasons Pixi is written in Rust", "back": "Speed (native code, no GC), a single binary that needs no Python, compile-time correctness, and the rattler crates."},
+       {"front": "How to get Rust for a project", "back": "<code>pixi add rust</code>, then <code>pixi run cargo ...</code>. Never rustup in this course."},
+       {"front": "<code>cargo check</code> vs <code>cargo build</code>", "back": "<code>check</code> type-checks without producing a program, so it is much faster while fixing errors."},
+       {"front": "Parts of a rustc error", "back": "Headline with code (<code>E0382</code>), location (<code>--&gt; file:line:col</code>), primary span (<code>^</code>), secondary spans (<code>-</code>), <code>help:</code>/<code>note:</code>, and the <code>--explain</code> footer."},
+       {"front": "<code>rustc --explain E0308</code>", "back": "Prints the long explanation, with examples, for an error code."},
+       {"front": "<code>E0384</code>", "back": "Cannot assign twice to an immutable variable. Fix: <code>let mut</code>."},
+       {"front": "<code>E0308</code> with \"found <code>()</code>\"", "back": "Often a stray semicolon after the last expression, so the function returns unit instead of a value."},
+       {"front": "<code>todo!()</code>", "back": "A macro that compiles anywhere and panics if it runs. Exercise starters use it for bodies you must write."},
+       {"front": "The frozen snapshot", "back": "Pixi commit <code>451aa9596402530f1a4d8a50b5fe137570ad42a5</code>. Every permalink uses it so quotes and line numbers never drift."},
+       {"front": "Capstone commands", "back": "<code>pixi run projects</code>, <code>pixi run start c1</code>, <code>pixi run grade c1</code>."}]
+      </script>
+    </div>
+    <h3>Going further</h3>
+    <ul>
+      <li><a href="https://doc.rust-lang.org/book/ch01-00-getting-started.html">The Rust Book, chapter 1: Getting Started</a> (skip the rustup instructions; you have Pixi)</li>
+      <li><a href="https://doc.rust-lang.org/rust-by-example/hello.html">Rust by Example: Hello World</a></li>
+      <li><a href="https://doc.rust-lang.org/std/">The standard library documentation</a> and <a href="https://doc.rust-lang.org/reference/">the Rust Reference</a></li>
+      <li><a href="https://doc.rust-lang.org/error_codes/error-index.html">The Rust error codes index</a></li>
+      <li><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5">Pixi at the snapshot commit</a>, and the <a href="../reference/python-to-rust.html">Python to Rust cheat sheet</a></li>
+      <li>Next: <a href="m01-cargo-crates-modules.html">M01 Cargo, Crates &amp; Modules</a></li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

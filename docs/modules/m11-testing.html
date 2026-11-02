@@ -1,0 +1,1365 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M11 · Testing Like Pixi Does · Rust Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-rust.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-module="m11">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Stage 2 · Idiomatic Rust · Module 11</p>
+    <h1>Testing Like Pixi Does</h1>
+    <p class="lede">At the snapshot, Pixi's crates contain about 2,300 <code>#[test]</code> functions, about 660
+      <code>#[tokio::test]</code> functions, and around 390 snapshot files. No pull request lands without tests, and
+      most reviews start by reading them. This module teaches Rust's built-in test tools from the pytest you already
+      know, then the three things Pixi adds on top: snapshot testing with <code>insta</code>, shared fixtures, and
+      <code>cargo nextest</code>.</p>
+    <div class="lesson-meta"><span>⏱ ~2 hours</span><span>Prerequisites: <a href="m04-option-result.html">M04 Option, Result &amp; ?</a>, <a href="m10-crate-design.html">M10 Visibility, Features &amp; Crate Design</a></span></div>
+    <ul class="objectives">
+      <li>Write unit tests with <code>#[test]</code>, <code>assert!</code>, <code>assert_eq!</code>, and <code>assert_ne!</code>, with messages a reviewer can act on</li>
+      <li>Test failure paths with <code>#[should_panic(expected = ..)]</code> and tests that return <code>Result</code></li>
+      <li>Explain the difference between unit tests in <code>mod tests</code>, integration tests in <code>tests/</code>, and doc tests, and what each can see</li>
+      <li>Build test helpers and fixtures: builders, temporary directories, test data paths, and <code>rstest</code> cases</li>
+      <li>Read and maintain <code>insta</code> snapshot tests, and keep snapshots deterministic</li>
+      <li>Run Pixi's suites with <code>cargo nextest</code> and its <code>test-fast</code>/<code>test-slow</code> tasks, and finish with clippy and rustfmt</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="first-tests">
+    <h2>#[test] and the assert macros</h2>
+    <p>With pytest, a test is a function whose name starts with <code>test_</code>, and a failing
+      <code>assert</code> fails it. Rust's built-in harness works the same way with one difference: a test is any
+      function marked with the <code>#[test]</code> <strong>attribute</strong> (its name does not matter), and a test
+      fails when it <strong>panics</strong>.</p>
+    <div class="tabs">
+      <div class="tab" data-label="Python">
+        <pre><code class="language-python"># test_spec.py
+from spec import split_spec
+
+def test_splits_name_and_constraint():
+    assert split_spec("numpy &gt;=1.26") == ("numpy", "&gt;=1.26")
+
+def test_no_constraint():
+    name, constraint = split_spec("python")
+    assert constraint == "*", "a bare name means any version"</code></pre>
+      </div>
+      <div class="tab" data-label="Rust">
+        <pre><code class="language-rust">// src/spec.rs
+pub fn split_spec(spec: &amp;str) -&gt; (&amp;str, &amp;str) {
+    spec.split_once(' ').unwrap_or((spec, "*"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splits_name_and_constraint() {
+        assert_eq!(split_spec("numpy &gt;=1.26"), ("numpy", "&gt;=1.26"));
+    }
+
+    #[test]
+    fn no_constraint() {
+        let (_, constraint) = split_spec("python");
+        assert_eq!(constraint, "*", "a bare name means any version");
+    }
+}</code></pre>
+      </div>
+    </div>
+    <p>Three macros cover most assertions:</p>
+    <ul>
+      <li><code>assert!(cond)</code> panics if <code>cond</code> is false.</li>
+      <li><code>assert_eq!(left, right)</code> panics if they differ, and prints both values with <code>Debug</code>.
+        So both types must implement <code>PartialEq</code> with each other and <code>Debug</code>.</li>
+      <li><code>assert_ne!(left, right)</code> is the opposite.</li>
+    </ul>
+    <p>Every one of them accepts an optional message after the values, written like <code>format!</code>:
+      <code>assert!(name.starts_with(".pixi"), "expected prefix `.pixi`, got `{name}`")</code>. Unlike pytest, Rust
+      does not rewrite your expression to show intermediate values, so a good message is the difference between a
+      failure you understand from the CI log and one you have to reproduce locally. Run this cell and read the
+      failure:</p>
+    <div class="runnable" data-title="What a failed assert_eq! prints">
+<textarea>
+fn normalize(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+fn main() {
+    assert_eq!(normalize(" NumPy "), "numpy", "trims and lowercases");
+    println!("first check passed");
+    let input = "Scikit_Learn";
+    assert_eq!(normalize(input), "scikit-learn", "normalizing {input:?}");
+    println!("never printed");
+}
+</textarea>
+    </div>
+    <p>The panic message on stderr shows <code>assertion `left == right` failed: normalizing "Scikit_Learn"</code>,
+      then <code>left: "scikit_learn"</code> and <code>right: "scikit-learn"</code>. By convention put the actual value
+      on the left and the expected value on the right, so "left" always means "what the code did".</p>
+    <p>Notice that <code>normalize</code> returns a <code>String</code> and it is compared with a <code>&amp;str</code>
+      literal. That works because <code>String: PartialEq&lt;&amp;str&gt;</code>. What does not work is comparing a type
+      that has no <code>Debug</code>:</p>
+    <div class="runnable" data-title="assert_eq! needs Debug" data-compile-fail>
+<textarea>
+#[derive(PartialEq)]
+struct Spec {
+    name: String,
+}
+
+fn main() {
+    let a = Spec { name: "numpy".into() };
+    let b = Spec { name: "numpy".into() };
+    assert_eq!(a, b);
+}
+</textarea>
+    </div>
+    <p><code>E0277</code>: "<code>Spec</code> doesn't implement <code>Debug</code>", pointing into the macro, with a
+      <code>help:</code> to add <code>#[derive(Debug)]</code>. This is one reason nearly every type in Pixi derives
+      <code>Debug</code>: tests need to print it.</p>
+    <aside class="callout note" data-title="Running tests"><p><code>pixi run cargo test</code> builds a test binary per
+      crate target and runs every <code>#[test]</code> in parallel threads. Useful variations:
+      <code>cargo test spec</code> (only tests whose path contains "spec"), <code>cargo test -- --nocapture</code> (show
+      <code>println!</code> output from passing tests, which is captured by default), <code>cargo test --lib</code> (unit
+      tests only), <code>cargo test -- --test-threads=1</code> (run serially, for tests that share global state such as
+      environment variables).</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>#[test]</code> marks a test; a panic fails it.
+      <code>assert_eq!(actual, expected, "message {context}")</code>, and derive <code>Debug</code> on what you
+      compare.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="failure-paths">
+    <h2>Testing failures: should_panic, Result, and ignore</h2>
+    <p>pytest has <code>with pytest.raises(ValueError, match="..."):</code>. Rust has two tools, depending on whether the
+      failure is a panic or an <code>Err</code>.</p>
+    <h3>Panics: #[should_panic]</h3>
+    <pre><code class="language-rust">#[test]
+#[should_panic(expected = "at most 100")]
+fn rejects_large_percentages() {
+    Percentage::new(150);
+}</code></pre>
+    <p>The test passes only if the body panics and the panic message <em>contains</em> the <code>expected</code> text.
+      Always give <code>expected</code>: without it, any panic passes the test, including an unrelated
+      <code>unwrap</code> on <code>None</code> three lines earlier.</p>
+    <h3>Errors: assert on the Result, or return one</h3>
+    <p>Most failures in Pixi are <code>Result</code>s, not panics, so most failure tests look like this:</p>
+    <pre><code class="language-rust">#[test]
+fn rejects_empty_name() {
+    let err = PackageName::new("").unwrap_err();     // panics (fails the test) if it was Ok
+    assert_eq!(err.to_string(), "package name is empty");
+    assert!(matches!(err, NameError::Empty), "unexpected error: {err:?}");
+}</code></pre>
+    <p>A test may also <em>return</em> a <code>Result</code>. Then <code>?</code> works inside it, and an
+      <code>Err</code> fails the test with the error's <code>Debug</code> output. This keeps the happy path free of
+      <code>unwrap</code>s:</p>
+    <pre><code class="language-rust">#[test]
+fn parses_full_spec() -&gt; Result&lt;(), String&gt; {
+    let spec = Spec::parse("numpy &gt;=1.26")?;
+    assert_eq!(spec.name, "numpy");
+    Ok(())
+}</code></pre>
+    <p>Pixi's tests mostly use <code>.unwrap()</code> instead, which is fine in tests: a test is exactly the place where
+      "panic if this is not what I expect" is the desired behavior. Pick one style per file.</p>
+    <div class="runnable" data-title="matches! for checking an error's shape" data-predict>
+<textarea>
+#[derive(Debug, PartialEq)]
+enum NameError {
+    Empty,
+    BadChar(char),
+}
+
+fn check(name: &str) -> Result<&str, NameError> {
+    if name.is_empty() {
+        return Err(NameError::Empty);
+    }
+    match name.chars().find(|c| !(c.is_ascii_alphanumeric() || *c == '-')) {
+        Some(c) => Err(NameError::BadChar(c)),
+        None => Ok(name),
+    }
+}
+
+fn main() {
+    println!("{}", matches!(check(""), Err(NameError::Empty)));
+    println!("{}", matches!(check("numpy>=1"), Err(NameError::BadChar('>'))));
+    println!("{:?}", check("scikit-learn"));
+}
+</textarea>
+    </div>
+    <h3>Skipping: #[ignore]</h3>
+    <p><code>#[ignore]</code> skips a test unless you run <code>cargo test -- --ignored</code> (only ignored ones) or
+      <code>-- --include-ignored</code>. Pixi combines it with <code>cfg_attr</code> from <a href="m10-crate-design.html">M10</a>
+      so slow tests are skipped by default and enabled by a Cargo feature
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi/tests/integration_rust/install_tests.rs#L730-L735">crates/pixi/tests/integration_rust/install_tests.rs</a>):</p>
+    <pre><code class="language-rust">#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[cfg_attr(not(feature = "slow_integration_tests"), ignore)]
+/// Test full prefix install for an old lock file to see if it still works.
+/// Makes sure the lock file isn't touched and the environment is still
+/// installed.
+async fn test_old_lock_install() {</code></pre>
+    <p>The same pattern with <code>online_tests</code> marks tests that need the internet. Without the feature they
+      show as "ignored", so a contributor on a plane can still run the whole suite.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>#[should_panic(expected = "..")]</code> for panics,
+      <code>unwrap_err()</code> plus asserts (or <code>matches!</code>) for <code>Err</code>s, <code>-&gt; Result</code>
+      to use <code>?</code>, and <code>#[cfg_attr(not(feature = ".."), ignore)]</code> for opt-in tests.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="test-layout">
+    <h2>Unit tests, integration tests, and what they can see</h2>
+    <p>Rust has two places for tests, and the difference is about visibility (M10).</p>
+    <table>
+      <thead><tr><th></th><th>Unit tests</th><th>Integration tests</th></tr></thead>
+      <tbody>
+        <tr><td>Where</td><td>inside the source file, in <code>#[cfg(test)] mod tests { use super::*; .. }</code></td><td>files in the crate's <code>tests/</code> directory</td></tr>
+        <tr><td>Compiled as</td><td>part of the crate, only under <code>cfg(test)</code></td><td>a separate crate per file, depending on yours</td></tr>
+        <tr><td>Can use</td><td>everything in the module, including private items</td><td>only the <code>pub</code> API, like any other user</td></tr>
+        <tr><td>Good for</td><td>the details of one module</td><td>whole features through the public API</td></tr>
+      </tbody>
+    </table>
+    <p><code>use super::*;</code> works for private items because <code>tests</code> is a child module, and private means
+      "this module and its descendants". Pytest has no equivalent: Python tests can poke at anything.
+      <code>#[cfg(test)]</code> means the module and its test-only dependencies (<code>[dev-dependencies]</code> such as
+      <code>insta</code> and <code>tempfile</code>) are compiled only for <code>cargo test</code>.</p>
+    <pre data-label="Layout"><code class="language-bash">crates/pixi_glob/
+  Cargo.toml          # [dev-dependencies] insta, rstest, ...
+  src/
+    lib.rs
+    glob_hash.rs      # ends with #[cfg(test)] mod test { ... }
+    snapshots/        # insta snapshot files for the unit tests
+crates/pixi/
+  tests/
+    integration_rust/
+      main.rs         # one integration-test binary...
+      add_tests.rs    # ...whose modules are the test files
+      install_tests.rs
+      common/         # shared helpers (PixiControl, builders)</code></pre>
+    <aside class="callout pixi"><p>Pixi's main integration suite is <em>one</em> test crate,
+      <code>crates/pixi/tests/integration_rust/main.rs</code>, which declares <code>mod add_tests; mod install_tests;
+      ...</code> (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi/tests/integration_rust/main.rs#L1-L39">main.rs</a>).
+      Each top-level file directly in <code>tests/</code> would be a separate binary, and each binary links against
+      all of Pixi; with twenty files that is twenty multi-second link steps. One binary with modules links once. It
+      also lets helpers live in <code>mod common</code> without being compiled twenty times. The same file sets up
+      tracing once for the whole run with a <code>std::sync::Once</code> (M08).</p></aside>
+    <aside class="callout note"><p>Pixi names its unit-test module <code>test</code> in some files and
+      <code>tests</code> in others. The name is only a convention; the <code>#[cfg(test)]</code> attribute is what
+      matters. Follow whatever the file you are editing already does.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> unit tests sit next to the code and see private items;
+      integration tests in <code>tests/</code> see only <code>pub</code>. Prefer one integration binary with modules for
+      large crates.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="doc-tests">
+    <h2>Doc tests</h2>
+    <p>M10 showed <code># Examples</code> sections in doc comments. Code blocks there are <strong>doc tests</strong>:
+      <code>cargo test</code> extracts each one, wraps it in a <code>fn main</code>, compiles it as an external user of
+      your crate, and runs it. An example that no longer compiles or whose assert fails is a failing test, so
+      documentation cannot silently rot. Python's <code>doctest</code> module is the same idea, but checks printed output
+      instead of running asserts.</p>
+    <pre><code class="language-rust">/// Splits a match spec into name and constraint.
+///
+/// ```
+/// use spec_core::split_spec;
+/// assert_eq!(split_spec("numpy &gt;=1.26"), ("numpy", "&gt;=1.26"));
+/// assert_eq!(split_spec("python").1, "*");
+/// ```
+///
+/// Lines starting with `#` run but are hidden from the rendered docs:
+///
+/// ```
+/// # use spec_core::split_spec;
+/// let (name, _) = split_spec("pip");
+/// assert_eq!(name, "pip");
+/// ```
+pub fn split_spec(spec: &amp;str) -&gt; (&amp;str, &amp;str) { /* ... */ }</code></pre>
+    <p>Fence annotations change what happens to a block:</p>
+    <table>
+      <thead><tr><th>Fence</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>```</code> (or <code>```rust</code>)</td><td>compile and run</td></tr>
+        <tr><td><code>```no_run</code></td><td>compile only (for examples that touch the network or filesystem)</td></tr>
+        <tr><td><code>```should_panic</code></td><td>must panic when run</td></tr>
+        <tr><td><code>```compile_fail</code></td><td>must <em>not</em> compile (shows misuse of an API)</td></tr>
+        <tr><td><code>```ignore</code></td><td>skipped (prefer one of the above)</td></tr>
+        <tr><td><code>```text</code>, <code>```toml</code></td><td>not Rust; never compiled</td></tr>
+      </tbody>
+    </table>
+    <pre data-label="Terminal"><code class="language-bash">pixi run cargo test --doc          # only doc tests
+pixi run cargo test -p pixi_glob   # unit, integration and doc tests of one crate</code></pre>
+    <aside class="callout warn"><p>Doc tests run only for library crates, and <strong><code>cargo nextest</code> does not
+      run doc tests at all</strong>. A project that tests with nextest (like Pixi) needs a separate
+      <code>cargo test --doc</code> step to cover them. Pixi's code mostly uses doc comments for prose and keeps its
+      examples in ordinary tests, so this is rarely an issue there.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> doc examples are compiled and run as an external user of
+      the crate. Hide setup lines with <code># </code>; use <code>no_run</code> for side effects.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="fixtures">
+    <h2>Test helpers and fixtures</h2>
+    <p>Pytest fixtures are functions that build what a test needs, injected by name. Rust has no injection in the
+      standard harness. You call helper functions directly, and Rust's ownership rules give you clean-up for free: a
+      value's <code>Drop</code> runs when the test ends, whether it passed or panicked.</p>
+    <h3>Helpers and builders</h3>
+    <p>The simplest fixture is a function in <code>mod tests</code> that returns test data. When tests need many
+      small variations, a <strong>builder</strong> (a struct with chained setter methods and a final
+      <code>build</code>) keeps each test to the lines that matter. Pixi's integration tests use builders for
+      <code>pixi add</code> and <code>pixi install</code> invocations, and a <code>PixiControl</code> type that owns a
+      temporary workspace:</p>
+    <pre><code class="language-rust">// From crates/pixi/tests/integration_rust/common/mod.rs (simplified)
+pub struct PixiControl {
+    tmpdir: TempDir,      // deleted when PixiControl is dropped
+    // ...
+}
+
+impl PixiControl {
+    /// Creates a new PixiControl instance from an existing manifest
+    pub fn from_manifest(manifest: &amp;str) -&gt; miette::Result&lt;PixiControl&gt; {
+        let pixi = Self::new()?;
+        fs_err::write(pixi.manifest_path(), manifest)
+            .into_diagnostic()
+            .context("failed to write pixi.toml")?;
+        Ok(pixi)
+    }
+}</code></pre>
+    <p>(<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi/tests/integration_rust/common/mod.rs#L383-L390">common/mod.rs, lines 383-390</a>.)</p>
+    <h3>Temporary directories</h3>
+    <p>The <code>tempfile</code> crate (a dependency of about half of Pixi's crates, used in a few hundred places)
+      creates a fresh directory and deletes it when the guard is dropped:</p>
+    <pre><code class="language-rust">#[test]
+fn test_temp_file_created_in_same_dir_when_writable() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("pixi.toml");
+
+    let temp = temp_file_for(&amp;target, None).unwrap();
+
+    assert_eq!(temp.path().parent().unwrap(), dir.path());
+}   // `dir` is dropped here: the directory and everything in it is removed</code></pre>
+    <p>(<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_utils/src/atomic_write.rs#L114-L122">pixi_utils/src/atomic_write.rs, lines 114-122</a>.)
+      A common bug: <code>let path = tempfile::tempdir().unwrap().path().to_path_buf();</code> drops the guard at the end
+      of the statement, so the directory is already gone on the next line. Keep the guard in a variable for as long as you
+      use the path.</p>
+    <p>You can write the same RAII guard with only <code>std</code>, which shows there is no magic:</p>
+    <div class="runnable" data-local="It creates and deletes a directory on your filesystem." data-title="A std-only temporary directory guard">
+<textarea>
+use std::fs;
+use std::path::{Path, PathBuf};
+
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(name: &str) -> std::io::Result<TempDir> {
+        let path = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        fs::create_dir_all(&path)?;
+        Ok(TempDir(path))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        // Ignore errors in Drop: there is nobody to return them to.
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn main() -> std::io::Result<()> {
+    let dir = TempDir::new("pixi-test")?;
+    fs::write(dir.path().join("pixi.toml"), "[workspace]\nname = \"demo\"\n")?;
+    println!("exists: {}", dir.path().join("pixi.toml").exists());
+    let kept = dir.path().to_path_buf();
+    drop(dir);
+    println!("after drop: {}", kept.exists());
+    Ok(())
+}
+</textarea>
+    </div>
+    <h3>Test data on disk</h3>
+    <p>Larger inputs live in files. Paths are built from <code>env!("CARGO_MANIFEST_DIR")</code>, a compile-time
+      constant holding the directory of the crate's <code>Cargo.toml</code>, so tests work no matter where
+      <code>cargo test</code> is run from. Pixi keeps shared test workspaces in the repository's
+      <code>tests/data/</code>:</p>
+    <pre><code class="language-rust">let test_data_root = dunce::canonicalize(
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/data/workspace-discovery"),
+)
+.unwrap();</code></pre>
+    <p>(<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/discovery.rs#L737-L740">pixi_manifest/src/discovery.rs</a>.)</p>
+    <h3>Shared helpers: pixi_test_utils</h3>
+    <p>Helpers needed by several crates live in their own crate, <code>pixi_test_utils</code>, which other crates list
+      under <code>[dev-dependencies]</code>. Its <code>lib.rs</code> exposes <code>format_parse_error</code> and
+      <code>format_diagnostic</code> (render an error as plain, stable text for snapshots), <code>MockRepoData</code> and
+      <code>PackageBuilder</code> (fake conda channels for solver tests), and <code>GitRepoFixture</code> (a throwaway git
+      repository). You will read <code>format_diagnostic</code> in the snapshot section.</p>
+    <h3>Parametrized tests: rstest</h3>
+    <p>Pytest's <code>@pytest.mark.parametrize</code> and fixtures have a Rust counterpart in the <code>rstest</code>
+      crate, which Pixi uses in a dozen crates. Each <code>#[case]</code> becomes a separately named test, and a
+      <code>#[fixture]</code> function is injected by parameter name, much like pytest
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_glob/src/glob_hash.rs#L174-L185">pixi_glob/src/glob_hash.rs</a>):</p>
+    <pre><code class="language-rust">#[fixture]
+pub fn testname() -&gt; String {
+    let thread_name = std::thread::current().name().unwrap().to_string();
+    let test_name = thread_name.rsplit("::").next().unwrap_or(&amp;thread_name);
+    format!("glob_hash_{test_name}")
+}
+
+#[rstest]
+#[case::satisfiability(vec!["tests/data/satisfiability/source-dependency/**/*"])]
+#[case::non_glob(vec!["tests/data/satisfiability/source-dependency/pixi.toml"])]
+fn test_input_hash(testname: String, #[case] globs: Vec&lt;&amp;str&gt;) {
+    // ...
+}</code></pre>
+    <p>Without <code>rstest</code>, the std-only version of a parametrized test is a table and a loop. You lose one test
+      per case, so put the case in every assert message:</p>
+    <div class="runnable" data-title="A table-driven test with std only">
+<textarea>
+fn is_valid_platform(p: &str) -> bool {
+    matches!(p, "linux-64" | "linux-aarch64" | "osx-64" | "osx-arm64" | "win-64" | "noarch")
+}
+
+fn main() {
+    let cases = [
+        ("linux-64", true),
+        ("osx-arm64", true),
+        ("win-32", false),
+        ("Linux-64", false),
+    ];
+    for (input, expected) in cases {
+        assert_eq!(is_valid_platform(input), expected, "case {input:?}");
+    }
+    println!("all {} cases passed", cases.len());
+}
+</textarea>
+    </div>
+    <aside class="callout tip"><p><strong>Remember:</strong> fixtures are plain functions and builders; clean-up is
+      <code>Drop</code>. Keep <code>TempDir</code> guards alive, build paths from <code>CARGO_MANIFEST_DIR</code>, and
+      put shared helpers in a test-utils crate.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="snapshots">
+    <h2>Snapshot testing with insta</h2>
+    <p>Some outputs are too big to write as an <code>assert_eq!</code> by hand: a rendered error message with source
+      spans, a parsed manifest's full <code>Debug</code> tree, a lock file. <strong>Snapshot testing</strong> records the
+      output once, stores it next to the test, and fails if a later run produces something different. You review the
+      recorded output like any other code. Python has <code>syrupy</code> and <code>pytest-snapshot</code>; in Rust the
+      standard is <a href="https://insta.rs">insta</a>, and about half of Pixi's crates use it (around 630 snapshot
+      assertions at the snapshot).</p>
+    <h3>The macros</h3>
+    <ul>
+      <li><code>insta::assert_snapshot!(value)</code>: <code>value</code> is anything that implements
+        <code>Display</code> (usually a <code>String</code> you built).</li>
+      <li><code>insta::assert_debug_snapshot!(value)</code>: records the pretty-printed <code>Debug</code> output,
+        <code>{:#?}</code>.</li>
+      <li><code>assert_yaml_snapshot!</code>, <code>assert_json_snapshot!</code>: serialize with serde (Level 2).</li>
+    </ul>
+    <p>A snapshot is stored in one of two places:</p>
+    <ul>
+      <li><strong>Inline</strong>: <code>assert_snapshot!(value, @"expected text")</code>. The expected text lives in the
+        test itself, usually as a raw string <code>@r###"..."###</code>. Good for short output.</li>
+      <li><strong>In a file</strong>: <code>assert_snapshot!(value)</code> with no <code>@</code>. The file goes in a
+        <code>snapshots/</code> directory next to the source file, named
+        <code>&lt;crate&gt;__&lt;module path&gt;__&lt;test name&gt;.snap</code> (with any <code>test_</code> prefix
+        dropped), for example
+        <code>crates/pixi_manifest/src/snapshots/pixi_manifest__discovery__test__workspace_discoverer.snap</code>.</li>
+    </ul>
+    <p>Here is a real inline snapshot test, from Pixi's channel parser
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/toml/channel.rs#L208-L223">pixi_manifest/src/toml/channel.rs, lines 208-223</a>).
+      It snapshots the user-facing error for a channel table without a name:</p>
+    <pre><code class="language-rust">#[test]
+fn test_without_name() {
+    let input = r#"
+    channel = { priority = 10 }
+    "#;
+    let error = TopLevel::from_toml_str(input).unwrap_err();
+    assert_snapshot!(format_parse_error(input, error), @r###"
+     × missing field 'channel' in table
+      ╭─[pixi.toml:2:19]
+    1 │
+    2 │         channel = { priority = 10 }
+      ·                   ─────────────────
+    3 │
+      ╰────
+    "###);
+}</code></pre>
+    <p>That one test checks the error kind, its wording, and the exact span it points at, which would be a dozen
+      fragile asserts written by hand. A file snapshot looks like this; the header records where it came from
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_glob/src/snapshots/pixi_glob__glob_hash__test__glob_hash_case_1_satisfiability.snap">pixi_glob/src/snapshots/...case_1_satisfiability.snap</a>):</p>
+    <pre data-label="pixi_glob__glob_hash__test__glob_hash_case_1_satisfiability.snap"><code class="language-yaml">---
+source: crates/pixi_glob/src/glob_hash.rs
+expression: snapshot
+---
+Globs:
+- tests/data/satisfiability/source-dependency/**/*
+Hash: d8110813232260680c4d6f66a70849132b265539d100068626fd970d158bb3ff
+Matched files:
+- tests/data/satisfiability/source-dependency/child-package/pixi.toml
+- tests/data/satisfiability/source-dependency/pixi.lock
+- tests/data/satisfiability/source-dependency/pixi.toml</code></pre>
+    <h3>The review workflow</h3>
+    <p>When output changes (or a new snapshot has no stored value yet), the test fails and insta writes the new
+      value next to the old one: a <code>.snap.new</code> file, or a <code>.pending-snap</code> file for inline snapshots.
+      Then you review:</p>
+    <pre data-label="Terminal"><code class="language-bash">pixi run cargo test -p pixi_manifest        # fails, writes pending snapshots
+pixi run cargo insta review                 # interactive diff: a(ccept), r(eject), s(kip)
+pixi run cargo insta test --review          # run the tests and review in one step
+pixi run cargo insta accept                 # accept everything pending (only after reading it!)
+# in Pixi's checkout, the rust-test environment wraps these:
+pixi run insta-review</code></pre>
+    <p>Accepting rewrites the <code>.snap</code> file or the inline literal in your source, and the change shows up in
+      your diff. Reviewers read snapshot diffs as carefully as code: a snapshot diff is a precise description of how
+      your change alters behavior. <code>cargo insta</code> is a separate tool (the <code>cargo-insta</code> package;
+      Pixi's <code>rust-test</code> environment installs it from conda-forge). In CI, insta never writes files; a
+      mismatch is simply a failure.</p>
+    <p>What <code>assert_debug_snapshot!</code> records is exactly <code>format!("{value:#?}")</code>. Predict the
+      pretty-printed form of this value; this is the text that would land in the snapshot:</p>
+    <div class="runnable" data-title="What a debug snapshot stores" data-predict>
+<textarea>
+#[derive(Debug)]
+struct Channel {
+    name: String,
+    priority: Option<i32>,
+}
+
+fn main() {
+    let c = Channel { name: "conda-forge".into(), priority: Some(10) };
+    println!("{c:#?}");
+}
+</textarea>
+    </div>
+    <h3>Deterministic snapshots</h3>
+    <p>A snapshot test is only useful if the same code always produces the same text, on every machine. The usual
+      enemies, and the fixes:</p>
+    <ul>
+      <li><strong>Absolute paths</strong> (<code>/home/alice/pixi/...</code> vs <code>C:\Users\bob\...</code>): replace
+        the machine-specific prefix with a placeholder, and backslashes with slashes.</li>
+      <li><strong>Versions</strong> that change every release: replace with a placeholder.</li>
+      <li><strong><code>HashMap</code> order</strong>: sort first, or use <code>BTreeMap</code>/<code>IndexMap</code>.</li>
+      <li><strong>Colors and terminal width</strong>: render with a fixed, colorless theme.</li>
+      <li><strong>Timestamps, hashes of temp paths</strong>: insta's <em>redactions</em> and <em>filters</em> features
+        replace them by pattern.</li>
+    </ul>
+    <p>Pixi's <code>format_diagnostic</code> does the first four in one place
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_test_utils/src/lib.rs#L25-L61">crates/pixi_test_utils/src/lib.rs</a>);
+      you will implement its normalization in exercise 3:</p>
+    <pre><code class="language-rust">pub fn format_diagnostic(error: &amp;dyn Diagnostic) -&gt; String {
+    // Disable colors in tests
+    let mut s = String::new();
+    let report_handler = GraphicalReportHandler::new()
+        .with_cause_chain()
+        .with_break_words(false)
+        .with_theme(GraphicalTheme::unicode_nocolor());
+    report_handler.render_report(&amp;mut s, error).unwrap();
+    // ... strip ANSI escape codes ...
+
+    // Strip machine specific paths
+    // (cargo_root: the repository root, computed from CARGO_MANIFEST_DIR)
+    s = s.replace(&amp;cargo_root, "&lt;CARGO_ROOT&gt;");
+
+    // Replace pixi version with a placeholder so snapshots don't need updating on releases
+    s = s.replace(PIXI_VERSION, "&lt;PIXI_VERSION&gt;");
+
+    // Replace backslashes with forward slashes
+    s = s.replace("\\", "/");
+
+    // Remove trailing whitespace in the error message.
+    s.lines()
+        .map(|line| line.trim_end())
+        .format("\n")
+        .to_string()
+}</code></pre>
+    <div class="runnable" data-local="It uses the insta crate as a dev-dependency in a Cargo project." data-title="Your first insta test">
+<textarea>
+// In a crate with: pixi run cargo add --dev insta
+pub fn render_task_list(mut tasks: Vec<&str>) -> String {
+    tasks.sort();
+    tasks.iter().map(|t| format!("- {t}")).collect::<Vec<_>>().join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renders_sorted() {
+        // First run: leave the @"" empty, run `pixi run cargo insta test --review`,
+        // and accept. insta fills in the literal for you.
+        insta::assert_snapshot!(render_task_list(vec!["test", "build", "lint"]), @r"
+        - build
+        - lint
+        - test
+        ");
+    }
+}
+</textarea>
+    </div>
+    <aside class="callout warn"><p>Never accept a snapshot you have not read. "Update the snapshots" is the most common
+      way a regression sneaks into a pull request, because the diff looks like routine churn. If a snapshot changes and
+      your change was not supposed to affect that output, that is a bug report, not a chore.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>assert_snapshot!</code> (Display) and
+      <code>assert_debug_snapshot!</code> (<code>{:#?}</code>), inline with <code>@r"..."</code> or in
+      <code>snapshots/*.snap</code>. Review with <code>cargo insta review</code>. Normalize paths, versions, order, and
+      colors first.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="async-tests">
+    <h2>#[tokio::test]: a preview</h2>
+    <p>About a fifth of Pixi's tests are <code>async fn</code>s, because the code under test downloads, solves, and
+      installs asynchronously. A plain <code>#[test]</code> cannot be <code>async</code>: something has to drive the future
+      to completion. <code>#[tokio::test]</code> wraps the body in a Tokio runtime, the way <code>pytest-asyncio</code>'s
+      <code>@pytest.mark.asyncio</code> runs a coroutine in an event loop:</p>
+    <pre><code class="language-rust">#[tokio::test]
+async fn resolves_channel() {
+    let client = test_client();
+    let repodata = client.fetch("conda-forge", "noarch").await.unwrap();
+    assert!(!repodata.is_empty(), "noarch repodata should list packages");
+}
+
+// Some Pixi tests need a multi-threaded runtime, for code that spawns blocking work:
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_old_lock_install() { /* ... */ }</code></pre>
+    <p>Everything else in this module applies unchanged: asserts, <code>should_panic</code>, <code>Result</code> returns,
+      <code>cfg_attr</code> ignores, and snapshots. Async Rust is Level 2; for now, read <code>#[tokio::test] async
+      fn</code> as "a test whose body may use <code>.await</code>".</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>#[tokio::test]</code> = <code>#[test]</code> plus a
+      runtime for <code>.await</code>. The <code>flavor</code> argument picks a multi-threaded runtime when the code needs
+      one.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="nextest">
+    <h2>cargo nextest and Pixi's test tasks</h2>
+    <p><code>cargo test</code> runs all tests of a binary as threads in one process. <a href="https://nexte.st">cargo
+      nextest</a> is a drop-in replacement runner that runs <strong>each test in its own process</strong>, in parallel
+      across all test binaries. For a big workspace that buys:</p>
+    <ul>
+      <li><strong>Isolation.</strong> A test that changes an environment variable, the current directory, or a global
+        cannot affect another test, because they no longer share a process.</li>
+      <li><strong>Speed.</strong> Scheduling is across the whole workspace, so one slow binary does not leave the other
+        cores idle.</li>
+      <li><strong>Readable output.</strong> One line per test with its time, failures printed together at the end, slow
+        tests flagged, and retries for flaky tests.</li>
+    </ul>
+    <p>The cost: nextest does not run doc tests (use <code>cargo test --doc</code>), and process-per-test startup is
+      slower for suites of many tiny tests in one binary.</p>
+    <p>Pixi's tasks for the Rust suite live in its <code>rust-test</code> environment
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/pixi.toml#L589-L596">pixi.toml, lines 589-596</a>):</p>
+    <pre data-label="pixi.toml (Pixi's own)"><code class="language-toml">test-fast = {
+  cmd = """RUST_LOG="debug,resolvo=info" cargo nextest run --workspace --all-targets""",
+  description = "Run fast Rust tests",
+}
+test-slow = {
+  cmd = """RUST_LOG="debug,resolvo=info" cargo nextest run --workspace --all-targets --features slow_integration_tests,online_tests --status-level skip --failure-output immediate-final --no-fail-fast --final-status-level slow""",
+  description = "Run slow Rust tests with integration and online features",
+}</code></pre>
+    <ul>
+      <li><code>--workspace --all-targets</code>: every crate, and every target (lib, bins, <code>tests/</code>,
+        examples, benches).</li>
+      <li><code>test-slow</code> adds the two features from <a href="m10-crate-design.html">M10</a>, which flip the
+        <code>cfg_attr(.., ignore)</code> tests back on. <code>--no-fail-fast</code> keeps going after a failure so one
+        run reports everything.</li>
+      <li><code>RUST_LOG</code> configures the tracing output shown for failing tests: debug for Pixi, quieter for the
+        <code>resolvo</code> solver.</li>
+    </ul>
+    <pre data-label="Terminal (in your own project)"><code class="language-bash">pixi add cargo-nextest                      # conda-forge has it
+pixi run cargo nextest run                  # all tests
+pixi run cargo nextest run spec             # filter by name
+pixi run cargo nextest run --no-capture     # show output, like -- --nocapture
+pixi run cargo test --doc                   # doc tests, which nextest skips</code></pre>
+    <aside class="callout pixi"><p>To run part of Pixi's suite while working on one crate, run nextest through Pixi's
+      own environment with a package filter: <code>pixi run -e rust-test cargo nextest run -p pixi_manifest</code>. Running
+      the whole workspace takes a while; the narrow loop is what you use while developing, and <code>test-fast</code> is
+      what you run before pushing. Building and running Pixi's suite is Level 3; for now, know what the tasks
+      mean.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> nextest = one process per test, parallel across the
+      workspace, no doc tests. Pixi's <code>test-fast</code> is <code>cargo nextest run --workspace --all-targets</code>;
+      <code>test-slow</code> adds <code>slow_integration_tests,online_tests</code>.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="definition-of-done">
+    <h2>The definition of done: clippy and rustfmt</h2>
+    <p>Passing tests is necessary, not sufficient. In Pixi a change is ready when it is formatted, lint-free, and
+      tested. Two tools ship with the <code>rust</code> package from conda-forge:</p>
+    <ul>
+      <li><strong>rustfmt</strong> (<code>cargo fmt</code>) formats code to the one community style. Like
+        <code>ruff format</code>, it ends style debates; reviewers do not comment on formatting.</li>
+      <li><strong>clippy</strong> (<code>cargo clippy</code>) is a linter with hundreds of lints: correctness bugs,
+        needless clones and collects, non-idiomatic patterns. <code>-- -D warnings</code> turns every warning into an
+        error, so nothing slips through in CI.</li>
+    </ul>
+    <p>Pixi's tasks
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/pixi.toml#L257-L268">pixi.toml, lines 257-268</a>):</p>
+    <pre data-label="pixi.toml (Pixi's own)"><code class="language-toml">cargo-clippy = {
+  cmd = "cargo clippy --all-targets --workspace -- -D warnings",
+  description = "Run clippy on all targets",
+}
+# ...
+cargo-fmt = {
+  cmd = "cargo fmt --all",
+  description = "Format Rust code",
+}</code></pre>
+    <p><code>pixi run lint</code> in Pixi's checkout runs these through <strong>lefthook</strong>, a git-hook runner:
+      formatting, <code>typos</code> (a spell checker for code), and <code>cargo-shear</code> (unused dependencies) on the
+      fast <code>pre-commit</code> stage, and clippy and <code>cargo-deny</code> (license checks) on the slower
+      <code>pre-push</code> stage. Note <code>--all-targets</code> on clippy: tests are linted too.</p>
+    <pre data-label="Terminal: your definition of done"><code class="language-bash">pixi run cargo fmt --check                          # formatted? (fmt without --check fixes it)
+pixi run cargo clippy --all-targets -- -D warnings  # lint-free, tests included
+pixi run cargo test                                 # or: cargo nextest run, plus cargo test --doc</code></pre>
+    <aside class="callout pro"><p>Habits Pixi reviewers look for in tests: one behavior per test, named for the
+      behavior (<code>rejects_empty_name</code>, not <code>test1</code>); assert messages that say what was expected;
+      a regression test for every bug fix, failing before the fix; snapshot tests for anything user-facing (error
+      messages, CLI output); and no sleeps or network in fast tests.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> fmt, clippy with <code>-D warnings</code> on all targets, then
+      tests. In Pixi: <code>pixi run lint</code> and <code>pixi run test-fast</code>.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="pixi-reading">
+    <h2>Reading Pixi</h2>
+    <h3>Excerpt 1: a test module with inline snapshots</h3>
+    <p>The top of the channel parser's test module
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/toml/channel.rs#L110-L154">crates/pixi_manifest/src/toml/channel.rs, lines 110-154</a>):</p>
+    <pre><code class="language-rust">#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::toml::FromTomlStr;
+    use insta::{assert_debug_snapshot, assert_snapshot};
+    use pixi_test_utils::format_parse_error;
+    use toml_span::Value;
+
+    #[allow(dead_code)]
+    #[derive(Debug)]
+    struct TopLevel {
+        channel: TomlPrioritizedChannel,
+    }
+
+    impl&lt;'de&gt; toml_span::Deserialize&lt;'de&gt; for TopLevel {
+        fn deserialize(value: &amp;mut Value&lt;'de&gt;) -&gt; Result&lt;Self, DeserError&gt; {
+            let mut th = TableHelper::new(value)?;
+            let channel = th.required("channel")?;
+            th.finalize(None)?;
+            Ok(TopLevel { channel })
+        }
+    }
+
+    #[test]
+    fn test_map() {
+        let channel = TopLevel::from_toml_str(
+            r#"
+        channel = { channel = "some-channel" }
+        "#,
+        )
+        .unwrap();
+        assert_debug_snapshot!(channel, @r###"
+        TopLevel {
+            channel: Map(
+                PrioritizedChannel {
+                    channel: Name(
+                        "some-channel",
+                    ),
+                    priority: None,
+                    exclude_newer: None,
+                },
+            ),
+        }
+        "###);
+    }</code></pre>
+    <ul>
+      <li><code>#[cfg(test)] mod test</code> with <code>use super::*;</code>: a unit-test module that sees the parser's
+        private types such as <code>TomlPrioritizedChannel</code>.</li>
+      <li>The imports show the dev-dependencies at work: <code>insta</code> for snapshots and
+        <code>pixi_test_utils</code> for the shared error formatter.</li>
+      <li><code>TopLevel</code> is a test-only fixture type: the channel value cannot be parsed on its own, so the test
+        wraps it in a one-field table. <code>#[allow(dead_code)]</code> silences the warning that the field is never
+        read (only <code>Debug</code> uses it, and dead-code analysis ignores derived impls).</li>
+      <li>The <code>toml_span::Deserialize</code> impl is how Pixi parses TOML with spans for error messages (Level 2).
+        <code>th.required("channel")?</code> errors if the key is missing; that is the error the
+        <code>test_without_name</code> snapshot captured earlier.</li>
+      <li><code>assert_debug_snapshot!(channel, @r###"..."###)</code>: the whole parsed tree, inline. Reading it tells you
+        that a table-form channel becomes <code>Map(PrioritizedChannel { .. })</code> with <code>priority: None</code>,
+        without opening the parser.</li>
+    </ul>
+    <h3>Excerpt 2: rstest cases feeding file snapshots</h3>
+    <p>From <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_glob/src/glob_hash.rs#L181-L203">crates/pixi_glob/src/glob_hash.rs, lines 181-203</a>:</p>
+    <pre><code class="language-rust">    #[rstest]
+    #[case::satisfiability(vec!["tests/data/satisfiability/source-dependency/**/*"])]
+    #[case::satisfiability_ignore_lock(vec!["tests/data/satisfiability/source-dependency/**/*", "!tests/data/satisfiability/source-dependency/**/*.lock"])]
+    #[case::non_glob(vec!["tests/data/satisfiability/source-dependency/pixi.toml"])]
+    fn test_input_hash(testname: String, #[case] globs: Vec&lt;&amp;str&gt;) {
+        let root_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .unwrap();
+        let glob_hash = GlobHash::from_patterns(root_dir, globs.iter().copied()).unwrap();
+        let snapshot = format!(
+            "Globs:\n{}\nHash: {}\nMatched files:\n{}",
+            globs
+                .iter()
+                .format_with("\n", |glob, f| f(&amp;format_args!("- {glob}"))),
+            hex::encode(glob_hash.hash),
+            glob_hash
+                .matching_files
+                .iter()
+                .format_with("\n", |glob, f| f(&amp;format_args!("- {glob}")))
+        );
+        insta::assert_snapshot!(testname, snapshot);
+    }</code></pre>
+    <ul>
+      <li>Three <code>#[case::name(..)]</code> lines generate three tests; the <code>globs</code> parameter receives each
+        case's vector.</li>
+      <li><code>testname</code> is injected by the <code>#[fixture]</code> you saw earlier. It turns the test thread's name
+        (rstest names it <code>case_1_satisfiability</code> and so on) into a snapshot name.</li>
+      <li><code>CARGO_MANIFEST_DIR</code> is <code>crates/pixi_glob</code>; two <code>parent()</code> calls reach the
+        repository root, where <code>tests/data</code> lives. <code>and_then(Path::parent)</code> passes a method as the
+        closure (M09).</li>
+      <li>The snapshot text is built with M09's <code>format_with</code>, so it is readable in review, and
+        <code>assert_snapshot!(name, value)</code> stores it in
+        <code>snapshots/pixi_glob__glob_hash__test__glob_hash_case_1_satisfiability.snap</code>, the file shown
+        earlier.</li>
+    </ul>
+    <details class="reveal"><summary>Question 1: in excerpt 2, the snapshot includes a SHA-256 hash of files on disk. Is that deterministic across machines?</summary>
+      <p>It is, provided the hashed files have identical bytes everywhere. The globbed files are committed test data,
+        and a sibling test, <code>test_normalize_line_endings</code>, shows that Pixi normalizes <code>\r\n</code> to
+        <code>\n</code> before hashing, so a Windows checkout with converted line endings still produces the same hash.
+        Without that, this snapshot would fail on Windows.</p></details>
+    <details class="reveal"><summary>Question 2: you change the error wording for a missing channel name. What fails, and what do you do?</summary>
+      <p><code>test_without_name</code> fails with a diff between the inline literal and the new output, and insta writes a
+        pending snapshot. Run <code>cargo insta review</code> (Pixi: <code>pixi run insta-review</code>), read the diff,
+        accept if it is exactly the change you intended, and commit the updated test file together with the code
+        change. Grep for other snapshots containing the old wording too; any of them may change.</p></details>
+    <details class="reveal"><summary>Question 3: why might <code>TopLevel</code> live in the test module instead of the parser module?</summary>
+      <p>It exists only to make the channel value parseable in isolation. Under <code>#[cfg(test)]</code> it is not
+        compiled into Pixi at all, cannot be used by production code by accident, and does not need to be documented or
+        kept stable.</p></details>
+  </section>
+
+  <section class="lesson-section" id="practice">
+    <h2>Practice</h2>
+    <p>These are graded by <code>cargo test</code> like every exercise, and here the tests are also examples of the
+      techniques in this module: <code>should_panic</code>, <code>Result</code>-returning tests, table-driven cases, and
+      hand-written inline "snapshots".</p>
+
+    <div class="exercise" data-id="m11-e1" data-title="Panics and Results">
+      <div class="exercise-prompt">
+        <p>Implement <code>Percentage::new</code>, which panics with the message <code>"percentage must be at most 100, got
+          {n}"</code> when <code>n &gt; 100</code>, and <code>Percentage::try_new</code>, which returns
+          <code>Err</code> with the same message instead. Read the tests: one uses
+          <code>#[should_panic(expected = ..)]</code>, which checks that the panic message <em>contains</em> the given text,
+          and one returns <code>Result</code> so that it can use <code>?</code>.</p>
+      </div>
+<textarea class="starter">
+#[derive(Debug, PartialEq, Clone, Copy)]
+struct Percentage(u8);
+
+impl Percentage {
+    fn new(n: u8) -> Percentage {
+        todo!()
+    }
+
+    fn try_new(n: u8) -> Result<Percentage, String> {
+        todo!()
+    }
+
+    fn value(self) -> u8 {
+        self.0
+    }
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn accepts_bounds() {
+    assert_eq!(Percentage::new(0).value(), 0, "0 is a valid percentage");
+    assert_eq!(Percentage::new(100).value(), 100, "100 is a valid percentage");
+}
+
+#[test]
+#[should_panic(expected = "percentage must be at most 100, got 150")]
+fn new_panics_above_100() {
+    Percentage::new(150);
+}
+
+#[test]
+fn try_new_returns_err() {
+    assert_eq!(
+        Percentage::try_new(101),
+        Err("percentage must be at most 100, got 101".to_string()),
+        "try_new reports the problem instead of panicking"
+    );
+}
+
+#[test]
+fn try_new_with_question_mark() -> Result<(), String> {
+    let p = Percentage::try_new(42)?;
+    assert_eq!(p.value(), 42, "try_new(42) wraps 42");
+    Ok(())
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Write <code>try_new</code> first, then
+        <code>new</code> as <code>Self::try_new(n).unwrap_or_else(|e| panic!("{e}"))</code>, so the message is defined in
+        one place.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">#[derive(Debug, PartialEq, Clone, Copy)]
+struct Percentage(u8);
+
+impl Percentage {
+    fn new(n: u8) -&gt; Percentage {
+        Self::try_new(n).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    fn try_new(n: u8) -&gt; Result&lt;Percentage, String&gt; {
+        if n &gt; 100 {
+            Err(format!("percentage must be at most 100, got {n}"))
+        } else {
+            Ok(Percentage(n))
+        }
+    }
+
+    fn value(self) -&gt; u8 {
+        self.0
+    }
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m11-e2" data-title="An assertion helper with a useful message">
+      <div class="exercise-prompt">
+        <p>Write a test helper <code>assert_sorted_unique(items, context)</code> that does nothing when
+          <code>items</code> is strictly increasing, and otherwise panics with a message that contains
+          <code>context</code> and the first offending pair, formatted exactly as
+          <code>"{context}: {a:?} is not before {b:?}"</code>. Pixi's output is sorted and unique in many places, and a
+          helper like this turns a bare "assertion failed" into a message you can act on. The tests capture the panic
+          with <code>std::panic::catch_unwind</code> to check its message.</p>
+      </div>
+<textarea class="starter">
+fn assert_sorted_unique(items: &[&str], context: &str) {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+fn panic_message(f: impl FnOnce() + std::panic::UnwindSafe) -> Option<String> {
+    let err = std::panic::catch_unwind(f).err()?;
+    err.downcast_ref::<String>()
+        .cloned()
+        .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+}
+
+#[test]
+fn accepts_sorted() {
+    assert_eq!(panic_message(|| assert_sorted_unique(&["a", "b", "c"], "tasks")), None, "sorted input must not panic");
+    assert_eq!(panic_message(|| assert_sorted_unique(&[], "tasks")), None, "empty input must not panic");
+}
+
+#[test]
+fn reports_unsorted_pair() {
+    let msg = panic_message(|| assert_sorted_unique(&["build", "test", "lint"], "available tasks"));
+    assert_eq!(msg.as_deref(), Some("available tasks: \"test\" is not before \"lint\""), "message names the first bad pair");
+}
+
+#[test]
+fn reports_duplicates() {
+    let msg = panic_message(|| assert_sorted_unique(&["numpy", "numpy"], "deps"));
+    assert_eq!(msg.as_deref(), Some("deps: \"numpy\" is not before \"numpy\""), "duplicates are not strictly increasing");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>items.windows(2)</code> gives every adjacent pair (M09). For
+        the first pair with <code>w[0] &gt;= w[1]</code>, <code>panic!("{context}: {:?} is not before {:?}", w[0],
+        w[1])</code>. A <code>for</code> loop over the windows is clearest.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn assert_sorted_unique(items: &amp;[&amp;str], context: &amp;str) {
+    for w in items.windows(2) {
+        if w[0] &gt;= w[1] {
+            panic!("{context}: {:?} is not before {:?}", w[0], w[1]);
+        }
+    }
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m11-e3" data-title="Normalize output for a snapshot">
+      <div class="exercise-prompt">
+        <p>Implement the normalization step of Pixi's <code>format_diagnostic</code>:
+          <code>normalize_for_snapshot(output, cargo_root, version)</code> must, in this order, replace every occurrence
+          of <code>cargo_root</code> with <code>&lt;CARGO_ROOT&gt;</code>, replace every occurrence of
+          <code>version</code> with <code>&lt;PIXI_VERSION&gt;</code>, replace backslashes with forward slashes, and trim
+          trailing whitespace from every line, joining lines with <code>"\n"</code>. The order matters: the root is
+          replaced before backslashes change, so a Windows root still matches.</p>
+      </div>
+<textarea class="starter">
+fn normalize_for_snapshot(output: &str, cargo_root: &str, version: &str) -> String {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn unix_paths_and_version() {
+    let raw = "  × pixi 0.81.0 failed   \n  ╭─[/home/ci/pixi/tests/data/pixi.toml:2:1]\n";
+    let got = normalize_for_snapshot(raw, "/home/ci/pixi", "0.81.0");
+    assert_eq!(got, "  × pixi <PIXI_VERSION> failed\n  ╭─[<CARGO_ROOT>/tests/data/pixi.toml:2:1]", "root and version are replaced, trailing spaces trimmed");
+}
+
+#[test]
+fn windows_paths() {
+    let raw = "error in C:\\work\\pixi\\tests\\data\\pixi.toml";
+    let got = normalize_for_snapshot(raw, "C:\\work\\pixi", "0.81.0");
+    assert_eq!(got, "error in <CARGO_ROOT>/tests/data/pixi.toml", "replace the root before converting backslashes");
+}
+
+#[test]
+fn identical_on_both_platforms() {
+    let unix = normalize_for_snapshot("at /r/a/b.toml ", "/r", "1.0");
+    let windows = normalize_for_snapshot("at D:\\r\\a\\b.toml", "D:\\r", "1.0");
+    assert_eq!(unix, windows, "the point of normalizing: one snapshot for every machine");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Chain three <code>replace</code> calls (each returns a new
+        <code>String</code>), then <code>s.lines().map(str::trim_end).collect::&lt;Vec&lt;_&gt;&gt;().join("\n")</code>.
+        Note that <code>lines()</code> drops a final empty line, which is what the first test expects.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn normalize_for_snapshot(output: &amp;str, cargo_root: &amp;str, version: &amp;str) -&gt; String {
+    let s = output
+        .replace(cargo_root, "&lt;CARGO_ROOT&gt;")
+        .replace(version, "&lt;PIXI_VERSION&gt;")
+        .replace('\\', "/");
+    s.lines().map(str::trim_end).collect::&lt;Vec&lt;_&gt;&gt;().join("\n")
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m11-e4" data-title="A fixture builder for manifests">
+      <div class="exercise-prompt">
+        <p>Tests that need a <code>pixi.toml</code> should not each paste twenty lines of TOML. Write a
+          <code>ManifestBuilder</code> fixture: <code>new(name)</code>, chained <code>channel</code>,
+          <code>platform</code>, and <code>dependency(name, spec)</code> methods that take and return <code>self</code>,
+          and <code>build()</code> that renders the TOML exactly as the test's inline "snapshot" shows. Channels and
+          platforms keep insertion order; dependencies are sorted by name (use a <code>BTreeMap</code>) so output never
+          depends on call order. With no channels, default to <code>["conda-forge"]</code>; with no platforms, default to
+          <code>["linux-64"]</code>. Omit the <code>[dependencies]</code> section when there are none.</p>
+      </div>
+<textarea class="starter">
+use std::collections::BTreeMap;
+
+struct ManifestBuilder {
+    name: String,
+    channels: Vec<String>,
+    platforms: Vec<String>,
+    dependencies: BTreeMap<String, String>,
+}
+
+impl ManifestBuilder {
+    fn new(name: &str) -> Self {
+        todo!()
+    }
+
+    fn channel(mut self, channel: &str) -> Self {
+        todo!()
+    }
+
+    fn platform(mut self, platform: &str) -> Self {
+        todo!()
+    }
+
+    fn dependency(mut self, name: &str, spec: &str) -> Self {
+        todo!()
+    }
+
+    fn build(&self) -> String {
+        todo!()
+    }
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn full_manifest() {
+    let toml = ManifestBuilder::new("demo")
+        .channel("conda-forge")
+        .channel("bioconda")
+        .platform("osx-arm64")
+        .platform("linux-64")
+        .dependency("python", "3.14.*")
+        .dependency("numpy", ">=2")
+        .build();
+    let expected = "[workspace]\nname = \"demo\"\nchannels = [\"conda-forge\", \"bioconda\"]\nplatforms = [\"osx-arm64\", \"linux-64\"]\n\n[dependencies]\nnumpy = \">=2\"\npython = \"3.14.*\"\n";
+    assert_eq!(toml, expected, "rendered manifest; dependencies are sorted by name");
+}
+
+#[test]
+fn defaults() {
+    let toml = ManifestBuilder::new("empty").build();
+    let expected = "[workspace]\nname = \"empty\"\nchannels = [\"conda-forge\"]\nplatforms = [\"linux-64\"]\n";
+    assert_eq!(toml, expected, "default channel and platform, no [dependencies] section");
+}
+
+#[test]
+fn later_dependency_wins() {
+    let toml = ManifestBuilder::new("x").dependency("pip", "*").dependency("pip", ">=25").build();
+    assert!(toml.ends_with("[dependencies]\npip = \">=25\"\n"), "adding the same dependency twice keeps the last spec, got:\n{toml}");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Write a small helper that renders a list:
+        <code>items.iter().map(|s| format!("\"{s}\"")).collect::&lt;Vec&lt;_&gt;&gt;().join(", ")</code>, wrapped in
+        brackets. In <code>build</code>, choose the defaults with <code>if self.channels.is_empty()</code>, then push
+        lines onto a <code>String</code> with <code>push_str</code> or <code>writeln!</code> (that needs <code>use
+        std::fmt::Write;</code>).</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">use std::collections::BTreeMap;
+
+struct ManifestBuilder {
+    name: String,
+    channels: Vec&lt;String&gt;,
+    platforms: Vec&lt;String&gt;,
+    dependencies: BTreeMap&lt;String, String&gt;,
+}
+
+fn toml_list(items: &amp;[String], default: &amp;str) -&gt; String {
+    let rendered: Vec&lt;String&gt; = if items.is_empty() {
+        vec![format!("\"{default}\"")]
+    } else {
+        items.iter().map(|s| format!("\"{s}\"")).collect()
+    };
+    format!("[{}]", rendered.join(", "))
+}
+
+impl ManifestBuilder {
+    fn new(name: &amp;str) -&gt; Self {
+        ManifestBuilder {
+            name: name.to_string(),
+            channels: Vec::new(),
+            platforms: Vec::new(),
+            dependencies: BTreeMap::new(),
+        }
+    }
+
+    fn channel(mut self, channel: &amp;str) -&gt; Self {
+        self.channels.push(channel.to_string());
+        self
+    }
+
+    fn platform(mut self, platform: &amp;str) -&gt; Self {
+        self.platforms.push(platform.to_string());
+        self
+    }
+
+    fn dependency(mut self, name: &amp;str, spec: &amp;str) -&gt; Self {
+        self.dependencies.insert(name.to_string(), spec.to_string());
+        self
+    }
+
+    fn build(&amp;self) -&gt; String {
+        let mut out = String::from("[workspace]\n");
+        out.push_str(&amp;format!("name = \"{}\"\n", self.name));
+        out.push_str(&amp;format!("channels = {}\n", toml_list(&amp;self.channels, "conda-forge")));
+        out.push_str(&amp;format!("platforms = {}\n", toml_list(&amp;self.platforms, "linux-64")));
+        if !self.dependencies.is_empty() {
+            out.push_str("\n[dependencies]\n");
+            for (name, spec) in &amp;self.dependencies {
+                out.push_str(&amp;format!("{name} = \"{spec}\"\n"));
+            }
+        }
+        out
+    }
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m11-e5" data-title="Glob matching, tested case by case">
+      <div class="exercise-prompt">
+        <p>Pixi hashes files selected by glob patterns (excerpt 2). Implement a small matcher,
+          <code>glob_match(pattern, path)</code>, where <code>?</code> matches one character other than <code>/</code>,
+          <code>*</code> matches any run of characters (possibly empty) not containing <code>/</code>, <code>**</code>
+          matches any run of characters including <code>/</code>, and every other character matches itself. The whole
+          path must match. The tests are a table of cases in the std-only style from this module; each failure names its
+          case.</p>
+      </div>
+<textarea class="starter">
+fn glob_match(pattern: &str, path: &str) -> bool {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+fn check(cases: &[(&str, &str, bool)]) {
+    for &(pattern, path, expected) in cases {
+        assert_eq!(glob_match(pattern, path), expected, "glob_match({pattern:?}, {path:?})");
+    }
+}
+
+#[test]
+fn literals_and_question_mark() {
+    check(&[
+        ("pixi.toml", "pixi.toml", true),
+        ("pixi.toml", "pixi.lock", false),
+        ("pixi.???k", "pixi.lock", true),
+        ("a?c", "a/c", false),
+        ("pixi.toml", "sub/pixi.toml", false),
+    ]);
+}
+
+#[test]
+fn single_star() {
+    check(&[
+        ("*.toml", "pixi.toml", true),
+        ("*.toml", ".toml", true),
+        ("*.toml", "src/pixi.toml", false),
+        ("src/*.rs", "src/lib.rs", true),
+        ("src/*", "src/a/b.rs", false),
+    ]);
+}
+
+#[test]
+fn double_star() {
+    check(&[
+        ("**/*.toml", "a/b/pixi.toml", true),
+        ("src/**", "src/a/b.rs", true),
+        ("**/*.lock", "pixi.toml", false),
+        ("tests/**/*.lock", "tests/data/x/pixi.lock", true),
+        ("tests/**/*.lock", "src/pixi.lock", false),
+    ]);
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Work on <code>Vec&lt;char&gt;</code> (or byte slices) with a recursive
+        helper <code>fn m(p: &amp;[char], s: &amp;[char]) -&gt; bool</code>. If <code>p</code> starts with
+        <code>**</code>, try matching the rest of the pattern at every position of <code>s</code>
+        (<code>(0..=s.len()).any(|i| m(&amp;p[2..], &amp;s[i..]))</code>). For a single <code>*</code>, do the same but stop
+        before the first <code>/</code>. Careful with <code>**/</code>: <code>"**/*.toml"</code> must not match
+        <code>"pixi.toml"</code> in this simplified version, only paths with a <code>/</code>, which falls out naturally
+        if you treat the <code>/</code> after <code>**</code> as a literal.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn glob_match(pattern: &amp;str, path: &amp;str) -&gt; bool {
+    fn m(p: &amp;[char], s: &amp;[char]) -&gt; bool {
+        match p {
+            [] =&gt; s.is_empty(),
+            ['*', '*', rest @ ..] =&gt; (0..=s.len()).any(|i| m(rest, &amp;s[i..])),
+            ['*', rest @ ..] =&gt; {
+                let limit = s.iter().position(|&amp;c| c == '/').unwrap_or(s.len());
+                (0..=limit).any(|i| m(rest, &amp;s[i..]))
+            }
+            ['?', rest @ ..] =&gt; matches!(s, [c, ..] if *c != '/') &amp;&amp; m(rest, &amp;s[1..]),
+            [c, rest @ ..] =&gt; s.first() == Some(c) &amp;&amp; m(rest, &amp;s[1..]),
+        }
+    }
+    let p: Vec&lt;char&gt; = pattern.chars().collect();
+    let s: Vec&lt;char&gt; = path.chars().collect();
+    m(&amp;p, &amp;s)
+}</code></pre>
+      </details>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="mini-project">
+    <h2>Mini-project: test a crate the way Pixi would</h2>
+    <div class="project-box">
+      <div class="widget-head"><span class="w-kind">Mini-project</span><span class="w-title">Give the M10 spec_core crate a Pixi-grade test suite</span></div>
+      <div class="widget-body">
+        <p>Take the <code>spec_core</code> library from the M10 mini-project (or any small library crate you wrote) and
+          give it every kind of test from this module, with the same tools Pixi uses.</p>
+        <pre data-label="Terminal"><code class="language-bash">cd specs-ws
+pixi add cargo-nextest cargo-insta          # both are on conda-forge
+pixi run cargo add --dev -p spec_core insta tempfile rstest
+pixi run cargo nextest run --workspace --all-targets
+pixi run cargo test --doc --workspace
+pixi run cargo insta review</code></pre>
+        <p><strong>What to build</strong></p>
+        <ul>
+          <li>Unit tests in <code>#[cfg(test)] mod tests</code> for every module, including at least one test of a
+            private helper.</li>
+          <li>An integration test file, <code>crates/spec_core/tests/api.rs</code>, that uses only the public API (and
+            would fail to compile if it reached for a private item).</li>
+          <li>Doc tests in <code># Examples</code> sections for <code>PackageName::new</code> and <code>Spec::parse</code>,
+            one using a hidden <code># use</code> line.</li>
+          <li>An <code>insta</code> inline snapshot for a rendered error message, and a file snapshot for the
+            <code>{:#?}</code> of a parsed spec list.</li>
+          <li>An <code>rstest</code> parametrized test with at least five <code>#[case::name(..)]</code> lines.</li>
+          <li>A <code>tempfile</code> test that writes a spec file into a temp directory and reads it back through your
+            API.</li>
+          <li>A <code>pixi.toml</code> with tasks <code>test-fast</code> (<code>cargo nextest run --workspace
+            --all-targets</code>), <code>test-doc</code>, <code>lint</code> (fmt check and clippy with <code>-D
+            warnings</code>), and <code>check</code> depending on all three.</li>
+        </ul>
+        <ul class="checklist" data-id="m11-mini">
+          <li>Unit, integration, doc, snapshot, rstest, and tempfile tests all exist and pass</li>
+          <li>Every <code>assert!</code> and <code>assert_eq!</code> in your tests has a message</li>
+          <li>Every <code>#[should_panic]</code> has an <code>expected = ".."</code></li>
+          <li>Snapshots contain no absolute paths, no versions, and no <code>HashMap</code> ordering</li>
+          <li>Deliberately changing an error message makes exactly the expected snapshot fail, and <code>cargo insta review</code> shows a readable diff</li>
+          <li><code>pixi run check</code> passes: formatted, clippy-clean on all targets, all tests green</li>
+        </ul>
+        <p><strong>Stretch goals:</strong> add an opt-in slow test behind a <code>slow_tests</code> feature with
+          <code>#[cfg_attr(not(feature = "slow_tests"), ignore)]</code> and a <code>test-slow</code> task that enables it;
+          write a small <code>test_utils</code> module (or crate) with a builder fixture shared by the unit and integration
+          tests; add a nextest profile in <code>.config/nextest.toml</code> that retries failing tests once.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="quiz">
+    <h2>Quiz</h2>
+    <div class="quiz" data-id="m11-quiz">
+<script type="application/json">
+{"title": "Testing like Pixi does", "passScore": 0.7, "questions": [
+  {"type": "single", "prompt": "What makes a function a test in Rust's built-in harness?", "options": ["Its name starts with <code>test_</code>", "The <code>#[test]</code> attribute", "Being inside a <code>tests/</code> directory"], "answer": 1, "explanation": "<p>Only the attribute matters. Pixi happens to prefix many test names with <code>test_</code>, but <code>fn rejects_empty_name()</code> with <code>#[test]</code> is just as much a test.</p>"},
+  {"type": "single", "prompt": "Does this compile?", "code": "struct Version(u32);\n\nfn main() {\n    assert_eq!(Version(1).0, 1);\n    assert_eq!(Version(1), Version(1));\n}", "options": ["Yes", "No: <code>Version</code> implements neither <code>PartialEq</code> nor <code>Debug</code>, which <code>assert_eq!</code> needs for the second line", "No: the first line compares a field"], "answer": 1, "explanation": "<p>The first assert compares two <code>u32</code>s and is fine. The second needs <code>Version: PartialEq + Debug</code>. Add <code>#[derive(Debug, PartialEq)]</code>.</p>"},
+  {"type": "single", "prompt": "Why should <code>#[should_panic]</code> always have <code>expected = \"...\"</code>?", "options": ["It is required syntax", "Without it, any panic passes the test, including an unrelated <code>unwrap</code> failure before the code you meant to test", "It makes the test faster"], "answer": 1, "explanation": "<p><code>expected</code> checks that the panic message contains the given text, so the test fails if the code panics for the wrong reason.</p>"},
+  {"type": "multi", "prompt": "Which are true of a unit test module written as <code>#[cfg(test)] mod tests { use super::*; }</code> at the bottom of <code>src/spec.rs</code>?", "options": ["It can call private functions of <code>spec</code>", "It is compiled into the release binary", "It can use <code>[dev-dependencies]</code> such as <code>insta</code>", "It runs with <code>cargo test</code>"], "answer": [0, 2, 3], "explanation": "<p>A child module sees its parent's private items. <code>cfg(test)</code> means it is compiled only for tests, where dev-dependencies are available; it never reaches the shipped binary.</p>"},
+  {"type": "single", "prompt": "A test in <code>crates/foo/tests/api.rs</code> tries to call a <code>pub(crate)</code> function of <code>foo</code>. What happens?", "options": ["It works: tests can see everything", "It fails to compile: integration tests are a separate crate and see only <code>pub</code> items", "It works only under <code>cargo nextest</code>"], "answer": 1, "explanation": "<p>Each file in <code>tests/</code> is its own crate depending on <code>foo</code>, so it has exactly the access any other user has.</p>"},
+  {"type": "single", "prompt": "Why does Pixi put its integration tests in one <code>tests/integration_rust/main.rs</code> with modules, rather than many files directly in <code>tests/</code>?", "options": ["Cargo only allows one integration test file", "Each top-level file in <code>tests/</code> is a separate binary that links all of Pixi; one binary links once and shares helpers", "So that tests run serially"], "answer": 1, "explanation": "<p>Link time dominates for large crates. One binary with <code>mod</code>s pays it once and compiles <code>common</code> once.</p>"},
+  {"type": "text", "prompt": "Which <code>cargo test</code> flag runs only the doc tests? (include the dashes)", "answer": ["--doc"], "explanation": "<p><code>cargo test --doc</code>. It matters for Pixi-style setups because <code>cargo nextest</code> does not run doc tests.</p>"},
+  {"type": "single", "prompt": "What does <code>assert_snapshot!(value, @r\"...\")</code> do on its first run when the literal is empty?", "options": ["Passes, and the test is skipped from then on", "Fails, and insta records the actual output as a pending snapshot that <code>cargo insta review</code> can write into the literal", "Panics with a compile error"], "answer": 1, "explanation": "<p>A missing or different snapshot is a failure. insta writes a pending snapshot; reviewing and accepting it updates your source file, which you then commit.</p>"},
+  {"type": "output", "prompt": "<code>assert_debug_snapshot!(spec)</code> stores what this prints. What is it?", "code": "#[derive(Debug)]\nstruct Spec {\n    name: &'static str,\n    build: Option<u32>,\n}\n\nfn main() {\n    println!(\"{:#?}\", Spec { name: \"pip\", build: None });\n}", "answer": "Spec {\n    name: \"pip\",\n    build: None,\n}", "explanation": "<p>Pretty <code>Debug</code> puts each field on its own line, indented four spaces, with a trailing comma. That stable layout is what makes debug snapshots readable in diffs.</p>"},
+  {"type": "multi", "prompt": "Which make a snapshot non-deterministic and need normalizing before it is recorded?", "options": ["An absolute path to the repository", "The Pixi version number", "Iterating a <code>HashMap</code> to build the text", "A sorted list of package names"], "answer": [0, 1, 2], "explanation": "<p>Paths differ per machine, versions change every release, and <code>HashMap</code> order varies between runs. A sorted list is stable. Pixi's <code>format_diagnostic</code> replaces the root and version with placeholders.</p>"},
+  {"type": "single", "prompt": "Pixi's <code>test-fast</code> task is <code>cargo nextest run --workspace --all-targets</code>. What is one thing it does <em>not</em> run?", "options": ["Integration tests in <code>tests/</code>", "Doc tests", "Tests in binary crates"], "answer": 1, "explanation": "<p>nextest runs every test binary (<code>--all-targets</code> includes integration tests and bins) but never doc tests.</p>"},
+  {"type": "single", "prompt": "A test is marked <code>#[cfg_attr(not(feature = \"online_tests\"), ignore)]</code>. How do you run it?", "options": ["<code>cargo test -- --ignored</code> or enable the feature, e.g. <code>--features online_tests</code> (as Pixi's <code>test-slow</code> does)", "It cannot be run", "<code>cargo test --release</code>"], "answer": 0, "explanation": "<p>Without the feature the test carries <code>#[ignore]</code>, so <code>--ignored</code>/<code>--include-ignored</code> runs it; with the feature the attribute is not applied and it runs normally.</p>"},
+  {"type": "text", "prompt": "Which cargo subcommand do Pixi's tasks run with <code>-- -D warnings</code> on <code>--all-targets --workspace</code>?", "answer": ["clippy", "cargo clippy"], "explanation": "<p><code>cargo clippy --all-targets --workspace -- -D warnings</code>: lint everything, tests included, and treat every warning as an error.</p>"}
+]}
+</script>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="recap">
+    <h2>Recap</h2>
+    <ul>
+      <li><code>#[test]</code> marks a test; a panic fails it. <code>assert!</code>, <code>assert_eq!</code>,
+        <code>assert_ne!</code> take a <code>format!</code>-style message; compared types need <code>PartialEq</code> and
+        <code>Debug</code>.</li>
+      <li><code>#[should_panic(expected = "..")]</code> for panics; <code>unwrap_err()</code> and <code>matches!</code> for
+        <code>Err</code>s; tests may return <code>Result</code> and use <code>?</code>.
+        <code>#[cfg_attr(not(feature = ".."), ignore)]</code> makes tests opt-in.</li>
+      <li>Unit tests live in <code>#[cfg(test)] mod tests</code> and see private items; integration tests in
+        <code>tests/</code> see only <code>pub</code>. Doc tests run your examples as an external user.</li>
+      <li>Fixtures are functions and builders; <code>Drop</code> cleans up (<code>tempfile::tempdir()</code>). Paths come
+        from <code>CARGO_MANIFEST_DIR</code>; shared helpers live in <code>pixi_test_utils</code>; <code>rstest</code>
+        gives cases and fixtures.</li>
+      <li><code>insta</code>: <code>assert_snapshot!</code>/<code>assert_debug_snapshot!</code>, inline <code>@r"..."</code>
+        or <code>snapshots/*.snap</code>, reviewed with <code>cargo insta review</code>. Normalize first.</li>
+      <li><code>cargo nextest</code> runs each test in its own process, in parallel, but skips doc tests. Pixi:
+        <code>test-fast</code>, <code>test-slow</code>, then <code>lint</code> (fmt, clippy <code>-D warnings</code>).</li>
+    </ul>
+    <div class="flashcards" data-title="Testing">
+<script type="application/json">
+[{"front": "What fails a Rust test?", "back": "A panic (a failed assert, an <code>unwrap</code> on <code>None</code>/<code>Err</code>), or returning <code>Err</code> from a test that returns <code>Result</code>."},
+ {"front": "Convention for <code>assert_eq!</code> argument order", "back": "Actual first (left), expected second (right), then a message."},
+ {"front": "<code>#[should_panic(expected = \"x\")]</code>", "back": "Passes only if the body panics with a message containing <code>x</code>."},
+ {"front": "Why can <code>mod tests</code> call private functions?", "back": "It is a child module, and private means visible in the module and its descendants."},
+ {"front": "Integration tests (<code>tests/*.rs</code>)", "back": "Each file is a separate crate that sees only the <code>pub</code> API."},
+ {"front": "<code>```no_run</code> in a doc comment", "back": "The example is compiled but not run."},
+ {"front": "<code>tempfile::tempdir()</code> pitfall", "back": "Keep the guard in a variable; dropping it deletes the directory."},
+ {"front": "Where do insta file snapshots live?", "back": "In <code>snapshots/</code> next to the source file, as <code>crate__module__test.snap</code>."},
+ {"front": "<code>cargo insta review</code>", "back": "Interactively accept or reject pending snapshots; accepted ones rewrite <code>.snap</code> files or inline literals."},
+ {"front": "What does nextest not run?", "back": "Doc tests. Run <code>cargo test --doc</code> separately."},
+ {"front": "Pixi's <code>test-fast</code>", "back": "<code>cargo nextest run --workspace --all-targets</code> (with <code>RUST_LOG</code> set)."},
+ {"front": "Definition of done", "back": "<code>cargo fmt</code>, <code>cargo clippy --all-targets -- -D warnings</code>, and green tests (in Pixi: <code>pixi run lint</code>, <code>pixi run test-fast</code>)."}]
+</script>
+    </div>
+    <h3>Going further</h3>
+    <ul>
+      <li><a href="https://doc.rust-lang.org/book/ch11-00-testing.html">The Rust Book, chapter 11: Writing Automated Tests</a></li>
+      <li><a href="https://doc.rust-lang.org/rust-by-example/testing.html">Rust by Example: Testing</a> (unit, doc, and integration tests)</li>
+      <li><a href="https://doc.rust-lang.org/std/macro.assert_eq.html">std docs: <code>assert_eq!</code></a> and <a href="https://doc.rust-lang.org/reference/attributes/testing.html">the Rust Reference: testing attributes</a></li>
+      <li><a href="https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html">The rustdoc book: Documentation tests</a></li>
+      <li><a href="https://insta.rs/docs/">insta documentation</a>, <a href="https://nexte.st/">cargo-nextest</a>, and <a href="https://docs.rs/rstest">rstest</a></li>
+      <li>Pixi source: <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_test_utils/src/lib.rs">pixi_test_utils</a>, <a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/snapshots">pixi_manifest snapshots</a>, and <a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi/tests/integration_rust">the integration suite</a></li>
+      <li>Next: <a href="../projects/c1-manifest-reader.html">Capstone 1: Manifest Reader</a></li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

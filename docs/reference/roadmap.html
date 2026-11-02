@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roadmap · Rust Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-rust.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-page="ref-roadmap">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Reference · The path</p>
+    <h1>Roadmap: Levels 1-3</h1>
+    <p class="lede">The practicum is eight stages in three levels, each level ending in a capstone. Level 1 teaches you
+      to read Rust: any function in Pixi, who owns what, and why it compiles. Level 2 teaches the libraries the Pixi
+      codebase is built on. Level 3 puts you inside the Pixi codebase itself, ending with a realistic change on a fork.
+      This page shows the whole path, how long each part takes, and the gate you should pass before moving on.</p>
+    <div class="lesson-meta"><span>⏱ About 95-120 hours end to end</span><span>Level 1 available now; Levels 2-3 planned</span></div>
+    <ul class="objectives">
+      <li>See every stage and capstone in order, with approximate hours</li>
+      <li>Know which level is available now and which is planned</li>
+      <li>See which crates and tools of the Pixi codebase each later stage covers</li>
+      <li>Check yourself against the gate between levels before moving on</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="overview">
+    <h2>The whole path at a glance</h2>
+    <pre class="mermaid">
+flowchart TD
+  M0[M00 Orientation] --> S1
+  subgraph L1[Level 1 Reading Rust - available]
+    S1[Stage 1 The core language] --> S2[Stage 2 Idiomatic Rust] --> C1[Capstone 1 Manifest reader]
+  end
+  C1 --> G1{{Gate 1}}
+  G1 --> S3
+  subgraph L2[Level 2 The Pixi stack - planned]
+    S3[Stage 3 Errors and the CLI] --> S4[Stage 4 serde and TOML] --> S5[Stage 5 Async] --> C2[Capstone 2 mini-pixi]
+  end
+  C2 --> G2{{Gate 2}}
+  G2 --> S6
+  subgraph L3[Level 3 Working in the Pixi codebase - planned]
+    S6[Stage 6 The rattler ecosystem] --> S7[Stage 7 Architecture tour] --> S8[Stage 8 Contributing] --> C3[Capstone 3 A change on a Pixi fork]
+  end
+</pre>
+    <table>
+      <thead><tr><th>Level</th><th>Stages</th><th>Capstone</th><th>Approx. hours</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td>1 Reading Rust</td><td>M00, 1 The core language, 2 Idiomatic Rust</td><td>Manifest reader</td><td>30-35</td><td><span class="tag">available</span></td></tr>
+        <tr><td>2 The Pixi stack</td><td>3 Errors and the CLI, 4 serde and TOML, 5 Async</td><td>mini-pixi</td><td>35-45</td><td><span class="tag">planned</span></td></tr>
+        <tr><td>3 Working in the Pixi codebase</td><td>6 The rattler ecosystem, 7 Architecture tour, 8 Contributing</td><td>A realistic change on a Pixi fork</td><td>30-40</td><td><span class="tag">planned</span></td></tr>
+      </tbody>
+    </table>
+    <p>Hours are for a developer who already writes Python every day and does every exercise, mini-project, and quiz.
+      They include the capstone. Reading alone is much faster, but Rust is learned by fighting the compiler, so the
+      exercises are where the hours go and where the learning happens.</p>
+    <aside class="callout note"><p>Level 1 runs in your browser on the Rust Playground, with mini-projects and the capstone
+      run locally through Pixi (<code>pixi add rust</code>, then <code>pixi run cargo ...</code>). Levels 2 and 3 move to
+      local Cargo projects, because the libraries they teach (tokio, reqwest, rattler) need the network, the filesystem,
+      or crates the Playground does not carry. See <a href="../modules/m00-orientation.html">M00</a> for how the course
+      works.</p></aside>
+    <aside class="callout pixi"><p>Every lesson reads one frozen commit of Pixi,
+      <a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5"><code>451aa959</code></a>
+      (pixi 0.81.0 development). The <a href="pixi-codebase-map.html">Pixi codebase map</a> describes its crates; Level 3
+      is a guided tour of the same snapshot, so links never drift while you learn.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="level-1">
+    <h2>Level 1 · Reading Rust <span class="tag">available</span></h2>
+    <p><strong>Outcome:</strong> you can open any function in Pixi and explain what it does, who owns each value, why
+      each borrow is allowed, and how errors flow out of it. You can also write a small, well-tested crate from a blank
+      file.</p>
+
+    <h3 id="orientation">Orientation (about 1 h)</h3>
+    <ul>
+      <li><a href="../modules/m00-orientation.html">M00 How This Practicum Works</a>: why Rust for a Pixi maintainer, the Playground, installing Rust with Pixi, reading a compiler error, the frozen snapshot</li>
+    </ul>
+
+    <h3 id="stage-1">Stage 1 · The core language (12-14 h)</h3>
+    <p>Enough syntax and semantics to read any function body in Pixi. Ownership is the center of the stage: the rest
+      of Rust is built on it.</p>
+    <ul>
+      <li><a href="../modules/m01-cargo-crates-modules.html">M01 Cargo, Crates &amp; Modules</a>: <code>cargo</code> commands, <code>Cargo.toml</code>, packages and crates, <code>mod</code> and <code>use</code>, workspaces</li>
+      <li><a href="../modules/m02-types-structs-enums.html">M02 Types, Structs &amp; Enums</a>: scalars, <code>String</code> vs <code>&amp;str</code>, <code>impl</code> blocks, enums with data, exhaustive <code>match</code></li>
+      <li><a href="../modules/m03-ownership-borrowing.html">M03 Ownership &amp; Borrowing</a>: moves, <code>Copy</code> and <code>Clone</code>, <code>&amp;T</code> and <code>&amp;mut T</code>, slices, borrow-checker errors</li>
+      <li><a href="../modules/m04-option-result.html">M04 Option, Result &amp; ?</a>: absence and failure as values, combinators, the <code>?</code> operator, custom error enums</li>
+      <li><a href="../modules/m05-collections-iterators.html">M05 Collections &amp; Iterators</a>: <code>Vec</code>, <code>HashMap</code>, <code>BTreeMap</code>, the entry API, adapters and <code>collect</code></li>
+    </ul>
+
+    <h3 id="stage-2">Stage 2 · Idiomatic Rust (12-14 h)</h3>
+    <p>The patterns that fill the Pixi codebase: traits everywhere, <code>Arc</code> passed between threads, long
+      iterator chains, and nearly 400 insta snapshot files.</p>
+    <ul>
+      <li><a href="../modules/m06-traits-generics.html">M06 Traits &amp; Generics</a>: traits, bounds, <code>impl Trait</code>, <code>dyn Trait</code>, derive, conversion traits</li>
+      <li><a href="../modules/m07-lifetimes.html">M07 Lifetimes in Practice</a>: what <code>'a</code> means, elision, structs that borrow, <code>'static</code></li>
+      <li><a href="../modules/m08-smart-pointers.html">M08 Smart Pointers &amp; Shared State</a>: <code>Box</code>, <code>Rc</code>/<code>Arc</code>, <code>RefCell</code>/<code>Mutex</code>, <code>Cow</code>, <code>OnceLock</code>/<code>LazyLock</code></li>
+      <li><a href="../modules/m09-closures-iterators.html">M09 Closures &amp; Iterator Chains</a>: <code>Fn</code>/<code>FnMut</code>/<code>FnOnce</code>, your own iterator, itertools</li>
+      <li><a href="../modules/m10-crate-design.html">M10 Visibility, Features &amp; Crate Design</a>: <code>pub(crate)</code>, re-exports, Cargo features, <code>cfg</code>, doc comments</li>
+      <li><a href="../modules/m11-testing.html">M11 Testing Like Pixi Does</a>: unit, integration and doc tests, insta snapshots, cargo nextest</li>
+    </ul>
+
+    <h3 id="capstone-1">Capstone 1 · Manifest reader (5-6 h)</h3>
+    <p><a href="../projects/c1-manifest-reader.html">Build a crate</a> that turns a simplified <code>pixi.toml</code>
+      into typed structs with clear errors, resolves each environment's dependencies from its features, and orders
+      tasks by <code>depends-on</code>. It is graded by <code>cargo test</code> with <code>pixi run grade c1</code>.</p>
+  </section>
+
+  <section class="lesson-section" id="gate-1">
+    <h2>Gate 1: ready for Level 2?</h2>
+    <p>Before moving on, you should be able to do all of these without looking anything up:</p>
+    <ul class="checklist" data-id="roadmap-gate-1">
+      <li>Create, build, test, lint, and format a crate with <code>pixi run cargo ...</code>, and split it into modules</li>
+      <li>Say for any variable in a function whether it is owned, borrowed shared, or borrowed mutably, and when it is dropped</li>
+      <li>Read E0382, E0499, E0502, E0505, and E0106 and fix the code without adding <code>.clone()</code> blindly</li>
+      <li>Write a custom error enum with <code>Display</code>, <code>std::error::Error</code>, and <code>From</code>, and propagate it with <code>?</code></li>
+      <li>Choose between a generic, <code>impl Trait</code>, and <code>dyn Trait</code>, and explain the trade-off</li>
+      <li>Explain why Pixi passes <code>Arc&lt;...&gt;</code> between tasks instead of references</li>
+      <li>Read a ten-step iterator chain in Pixi and say what it produces</li>
+      <li>Write unit tests, an integration test, and an insta snapshot test, and review a snapshot change</li>
+      <li>Pass all of Capstone 1's graded checks</li>
+    </ul>
+  </section>
+
+  <section class="lesson-section" id="level-2">
+    <h2>Level 2 · The Pixi stack <span class="tag">planned</span></h2>
+    <p><strong>Outcome:</strong> you know the third-party crates every Pixi file imports well enough to change code that
+      uses them: error reporting, command-line parsing, logging, (de)serialization, format-preserving TOML edits, and
+      async I/O.</p>
+
+    <h3 id="stage-3">Stage 3 · Errors and the CLI (9-11 h)</h3>
+    <p>Pixi's errors are a product feature: a bad <code>pixi.toml</code> produces a message that points at the exact
+      span. This stage teaches the crates behind that, and the CLI layer around it.</p>
+    <ul>
+      <li><code>thiserror</code>: deriving <code>Display</code>, <code>Error</code>, and <code>From</code> for error enums (what you wrote by hand in <a href="../modules/m04-option-result.html">M04</a>)</li>
+      <li><code>miette</code>: diagnostics with codes, labels, source spans, and <code>help</code> text; <code>miette::Result</code> and <code>IntoDiagnostic</code>; when to use <code>thiserror</code> and when <code>miette</code></li>
+      <li><code>clap</code> derive: <code>#[derive(Parser)]</code>, subcommands as an enum, flattened argument groups, as in <code>pixi_cli</code>'s <code>Command</code> enum</li>
+      <li><code>tracing</code>: spans and events, levels, <code>RUST_LOG</code> filters, and how <code>pixi -v</code> maps to a level filter</li>
+      <li><strong>Lab:</strong> a small CLI with two subcommands whose errors render as miette diagnostics</li>
+    </ul>
+
+    <h3 id="stage-4">Stage 4 · serde and TOML (9-11 h)</h3>
+    <p>Every manifest, lock file, and config file Pixi touches goes through one of these crates, and Pixi uses three
+      different TOML crates for three different jobs.</p>
+    <ul>
+      <li><code>serde</code> derive: <code>Serialize</code>/<code>Deserialize</code>, field attributes (<code>rename</code>, <code>default</code>, <code>flatten</code>, <code>untagged</code>), serde_json and serde_yaml</li>
+      <li>Custom deserializers: visitors, <code>deserialize_with</code>, and accepting "a string or a table" for one field</li>
+      <li><code>toml-span</code>: parsing with spans kept on every value, so an error can point at a line and column (Pixi's <code>pixi_toml</code> and <code>pixi_manifest</code> crates)</li>
+      <li><code>toml_edit</code>: changing a document while keeping comments, order, and formatting, which is what <code>pixi add</code> does to your <code>pixi.toml</code> (Pixi's <code>pixi_toml_edit</code> crate)</li>
+      <li><strong>Lab:</strong> rewrite part of Capstone 1 with serde, then report errors with spans</li>
+    </ul>
+
+    <h3 id="stage-5">Stage 5 · Async (10-13 h)</h3>
+    <p>Pixi downloads repodata and packages concurrently, so most of its code is <code>async</code>. This stage
+      teaches enough to read and change that code with confidence.</p>
+    <ul>
+      <li>Futures: what <code>async fn</code> returns, <code>.await</code>, and why nothing runs until a future is polled</li>
+      <li><code>tokio</code>: the runtime, <code>#[tokio::main]</code> and <code>#[tokio::test]</code>, spawning tasks, <code>JoinSet</code>, channels, <code>spawn_blocking</code></li>
+      <li><code>Send</code> and <code>Sync</code> in async code: why a future that holds a non-<code>Send</code> value across an <code>.await</code> cannot be spawned</li>
+      <li>Bounded concurrency: <code>futures::stream</code>, <code>buffer_unordered</code>, and semaphores</li>
+      <li><code>async-trait</code> and native <code>async fn</code> in traits, and why Pixi uses both</li>
+      <li><code>reqwest</code>: HTTP clients, streaming bodies, middleware, and retries</li>
+      <li>Enough <code>Pin</code> to read the errors it produces, and why Pixi writes <code>Box::pin(...)</code> around large futures</li>
+    </ul>
+
+    <h3 id="capstone-2">Capstone 2 · mini-pixi (7-10 h)</h3>
+    <p>A small command-line tool that reads a <code>pixi.toml</code>, fetches conda-forge repodata for one platform (from
+      a recorded fixture in tests, so the grader never hits the network), checks that a requested package exists, and
+      adds it to the manifest with <code>toml_edit</code> without disturbing comments or formatting. Errors render as
+      miette diagnostics, and behavior is pinned with insta snapshot tests.</p>
+  </section>
+
+  <section class="lesson-section" id="gate-2">
+    <h2>Gate 2: ready for Level 3?</h2>
+    <ul class="checklist" data-id="roadmap-gate-2">
+      <li>Define an error type with <code>thiserror</code> and turn it into a miette diagnostic with a labeled span</li>
+      <li>Add a subcommand with clap derive and log its work with <code>tracing</code></li>
+      <li>Deserialize a TOML table with serde, including one field that needs a custom deserializer</li>
+      <li>Explain when Pixi uses <code>toml-span</code>, <code>toml_edit</code>, and <code>toml</code>, and why it needs all three</li>
+      <li>Run a bounded number of HTTP requests concurrently with tokio and reqwest, and test it without the network</li>
+      <li>Read a "future is not <code>Send</code>" error and fix it</li>
+      <li>Pass Capstone 2</li>
+    </ul>
+  </section>
+
+  <section class="lesson-section" id="level-3">
+    <h2>Level 3 · Working in the Pixi codebase <span class="tag">planned</span></h2>
+    <p><strong>Outcome:</strong> you can find where a behavior lives in Pixi, change it, test it the way the maintainers
+      do, and open a pull request that passes review.</p>
+
+    <h3 id="stage-6">Stage 6 · The rattler ecosystem (7-9 h)</h3>
+    <p>Rattler is the set of Rust crates that implement conda: package names, versions, specs, repodata, solving, and
+      lock files. Pixi is mostly orchestration over rattler.</p>
+    <ul>
+      <li><code>rattler_conda_types</code>: <code>PackageName</code>, <code>Version</code> and <code>VersionSpec</code>, <code>MatchSpec</code>, <code>Platform</code>, <code>RepoDataRecord</code></li>
+      <li><code>rattler_repodata_gateway</code>: fetching and caching repodata, sharded repodata, and querying only the records a solve needs</li>
+      <li><code>rattler_solve</code>: turning specs and records into a solution with the resolvo solver</li>
+      <li><code>rattler_lock</code>: reading and writing <code>pixi.lock</code></li>
+      <li><strong>Lab:</strong> parse match specs and versions, then solve a tiny environment from fixture repodata</li>
+    </ul>
+
+    <h3 id="stage-7">Stage 7 · Architecture tour (8-10 h)</h3>
+    <p>Follow one command, <code>pixi add</code>, from the terminal to the lock file, and meet each layer on the way.
+      The <a href="pixi-codebase-map.html#pixi-add">codebase map</a> has the first version of this trace.</p>
+    <ul>
+      <li><code>pixi</code> and <code>pixi_cli</code>: the binary, the tokio runtime, the clap <code>Command</code> enum, and <code>add::execute</code></li>
+      <li><code>pixi_api</code> and <code>pixi_core</code>: locating the workspace, <code>WorkspaceMut</code>, and <code>update_dependencies</code></li>
+      <li><code>pixi_manifest</code>: the parsed manifest and the TOML document edited in place</li>
+      <li><code>pixi_command_dispatcher</code> and <code>pixi_compute_engine</code>: the graph of deduplicated, cached work behind solving and building</li>
+      <li>Updating the lock file: <code>pixi_core::lock_file</code>, satisfiability checks, and writing <code>pixi.lock</code></li>
+      <li>Build backends: <code>pixi_build_frontend</code>, <code>pixi_build_types</code>, and backends such as <code>pixi_build_python</code> and <code>pixi_build_rust</code></li>
+    </ul>
+
+    <h3 id="stage-8">Stage 8 · Contributing (6-8 h)</h3>
+    <ul>
+      <li>Building and testing Pixi with Pixi: the <code>rust-test</code> environment, <code>pixi run build-debug</code>, <code>pixi run test-fast</code></li>
+      <li><code>cargo nextest</code>: filtering tests, reading failures, and the slow test features</li>
+      <li>insta review: <code>pixi run insta-review</code>, accepting and rejecting snapshots, and keeping snapshot diffs reviewable</li>
+      <li>House rules: <code>clippy.toml</code> (no <code>std::fs</code>, use <code>fs-err</code>), <code>lefthook.yaml</code> hooks, <code>typos</code>, <code>cargo deny</code></li>
+      <li>Approaching an issue: reproducing it, finding the code with the codebase map, writing the failing test first, and writing a pull request description</li>
+    </ul>
+
+    <h3 id="capstone-3">Capstone 3 · A realistic change on a fork (9-13 h)</h3>
+    <p>On a fork of Pixi pinned to the frozen snapshot <code>451aa959</code>, make a realistic change: a bug fix or a
+      small feature in a CLI command, with a failing test written first, snapshot tests updated and reviewed, and
+      <code>pixi run lint</code> and <code>pixi run test-fast</code> passing. You finish with a branch and a pull request
+      description that a Pixi maintainer could review.</p>
+  </section>
+
+  <section class="lesson-section" id="gate-3">
+    <h2>Gate 3: maintainer-ready</h2>
+    <ul class="checklist" data-id="roadmap-gate-3">
+      <li>Build Pixi from source with <code>pixi run build-debug</code> and run its fast test suite</li>
+      <li>Trace any CLI command to the crate and function that does the work</li>
+      <li>Explain how a <code>MatchSpec</code> in <code>pixi.toml</code> becomes a locked package in <code>pixi.lock</code></li>
+      <li>Change behavior behind a snapshot test and review the snapshot diff</li>
+      <li>Pass the lefthook checks (formatting, clippy, typos) without help</li>
+      <li>Pass Capstone 3</li>
+    </ul>
+  </section>
+
+  <section class="lesson-section" id="hours">
+    <h2>Time budget</h2>
+    <table>
+      <thead><tr><th>Part</th><th>Approx. hours</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td>M00 Orientation</td><td>1</td><td><span class="tag">available</span></td></tr>
+        <tr><td>Stage 1 The core language</td><td>12-14</td><td><span class="tag">available</span></td></tr>
+        <tr><td>Stage 2 Idiomatic Rust</td><td>12-14</td><td><span class="tag">available</span></td></tr>
+        <tr><td>Capstone 1 Manifest reader</td><td>5-6</td><td><span class="tag">available</span></td></tr>
+        <tr><td>Stage 3 Errors and the CLI</td><td>9-11</td><td><span class="tag">planned</span></td></tr>
+        <tr><td>Stage 4 serde and TOML</td><td>9-11</td><td><span class="tag">planned</span></td></tr>
+        <tr><td>Stage 5 Async</td><td>10-13</td><td><span class="tag">planned</span></td></tr>
+        <tr><td>Capstone 2 mini-pixi</td><td>7-10</td><td><span class="tag">planned</span></td></tr>
+        <tr><td>Stage 6 The rattler ecosystem</td><td>7-9</td><td><span class="tag">planned</span></td></tr>
+        <tr><td>Stage 7 Architecture tour</td><td>8-10</td><td><span class="tag">planned</span></td></tr>
+        <tr><td>Stage 8 Contributing</td><td>6-8</td><td><span class="tag">planned</span></td></tr>
+        <tr><td>Capstone 3 A change on a fork</td><td>9-13</td><td><span class="tag">planned</span></td></tr>
+        <tr><td><strong>Total</strong></td><td><strong>about 95-120, plus review</strong></td><td></td></tr>
+      </tbody>
+    </table>
+    <aside class="callout tip"><p>Five to eight hours a week finishes Level 1 in about five weeks. Do not skip the gates:
+      Level 2 assumes ownership and traits are automatic, and Level 3 assumes you can read async code without
+      stopping.</p></aside>
+    <aside class="callout pro"><p>You do not need to finish Level 3 to start reading Pixi pull requests. After Level 1,
+      pick a merged PR that touches one crate, read the diff with the <a href="pixi-codebase-map.html">codebase map</a>
+      open, and note every crate or idiom you do not recognize. That list is your personal Level 2 syllabus.</p></aside>
+  </section>
+</main>
+</body>
+</html>

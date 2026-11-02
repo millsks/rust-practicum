@@ -1,0 +1,4 @@
+id = "c1"
+title = "Capstone 1: Manifest Reader"
+part = 2
+package = "manifest_reader"

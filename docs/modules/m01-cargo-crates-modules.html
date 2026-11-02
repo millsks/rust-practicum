@@ -1,0 +1,1148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M01 · Cargo, Crates &amp; Modules · Rust Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-rust.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-module="m01">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Stage 1 · The Core Language · Module 01</p>
+    <h1>Cargo, Crates &amp; Modules</h1>
+    <p class="lede">Before you can read a single Pixi function you need to know where it lives: which crate, which
+      module, which file, and how the name you see in a <code>use</code> line finds it. This module teaches Cargo, the
+      tool that builds every Rust project, and the module system that organizes code inside a crate. It ends with
+      Pixi's own workspace of 59 crates, which you will be able to navigate by the end.</p>
+    <div class="lesson-meta"><span>⏱ ~2 hours</span><span>Prerequisites: <a href="m00-orientation.html">M00 How This Practicum Works</a></span></div>
+    <ul class="objectives">
+      <li>Create, build, run, check, test, lint, and format a project with <code>pixi run cargo ...</code></li>
+      <li>Read a <code>Cargo.toml</code>: <code>[package]</code>, <code>[dependencies]</code>, <code>[dev-dependencies]</code>, and version requirements</li>
+      <li>Explain the difference between a package and a crate, and between a library crate and a binary crate</li>
+      <li>Split a crate into modules, inline and in files, using both the <code>foo.rs</code> + <code>foo/</code> layout and <code>foo/mod.rs</code></li>
+      <li>Write <code>use</code> paths with <code>crate::</code>, <code>super::</code>, and <code>self::</code>, and fix private-item and unresolved-import errors</li>
+      <li>Explain what <code>Cargo.lock</code> records and why Pixi commits it</li>
+      <li>Read a Cargo workspace: <code>members</code>, <code>[workspace.package]</code>, <code>[workspace.dependencies]</code>, and <code>workspace = true</code> in Pixi's crates</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="cargo-basics">
+    <h2>Cargo: one tool for building, testing, and dependencies</h2>
+    <p>In Python you use several tools for one project: Pixi (or pip) installs dependencies, the interpreter runs
+      code, pytest runs tests, ruff lints and formats, and a build backend such as hatchling makes a wheel. In Rust,
+      <strong>Cargo</strong> does almost all of that. It reads the project's <code>Cargo.toml</code>, downloads the
+      libraries it needs from <a href="https://crates.io">crates.io</a> (Rust's PyPI), calls the compiler
+      <code>rustc</code> with the right options, and runs the result.</p>
+    <p>You still get Cargo itself from Pixi, as in <a href="m00-orientation.html">M00</a>. Here is a full session:</p>
+    <pre data-label="Terminal"><code class="language-bash">pixi init envtool &amp;&amp; cd envtool
+pixi add rust
+pixi run cargo init --name envtool    # Cargo.toml + src/main.rs in the current directory
+pixi run cargo run                    # build (if needed) and run: Hello, world!</code></pre>
+    <p><code>cargo init</code> sets up a project in the current directory, which is what you want inside a Pixi
+      workspace. <code>cargo new name</code> does the same in a new directory called <code>name</code>. Either way you
+      get two files:</p>
+    <div class="two-col">
+      <pre data-label="Cargo.toml"><code class="language-toml">[package]
+name = "envtool"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]</code></pre>
+      <pre data-label="src/main.rs"><code class="language-rust">fn main() {
+    println!("Hello, world!");
+}</code></pre>
+    </div>
+    <p>The commands you will use every day:</p>
+    <table>
+      <thead><tr><th>Command</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><code>pixi run cargo build</code></td><td>Compile into <code>target/debug/</code>. Only changed code is recompiled.</td></tr>
+        <tr><td><code>pixi run cargo run</code></td><td>Build, then run the program. Arguments after <code>--</code> go to your program: <code>cargo run -- --verbose</code>.</td></tr>
+        <tr><td><code>pixi run cargo check</code></td><td>Type-check and borrow-check, but do not produce a program. Much faster than <code>build</code>; use it while you edit.</td></tr>
+        <tr><td><code>pixi run cargo test</code></td><td>Compile a test build and run every <code>#[test]</code> function.</td></tr>
+        <tr><td><code>pixi run cargo clippy --all-targets -- -D warnings</code></td><td>Lint all code including tests, and fail on any warning.</td></tr>
+        <tr><td><code>pixi run cargo fmt</code></td><td>Reformat every file with rustfmt. <code>cargo fmt --check</code> only reports.</td></tr>
+        <tr><td><code>pixi run cargo build --release</code></td><td>Optimized build into <code>target/release/</code>. Slower to compile, much faster to run.</td></tr>
+      </tbody>
+    </table>
+    <p>Why are there two build modes? A <strong>debug</strong> build (the default, also called the <code>dev</code>
+      profile) compiles quickly, keeps debugging information, and checks integer overflow at run time. A
+      <strong>release</strong> build spends much longer optimizing. Pixi's binaries on GitHub are release builds;
+      while working on Pixi you use debug builds (<code>pixi run build-debug</code> in Pixi's own workspace).</p>
+    <p>A test in Rust is a function marked with the <strong>attribute</strong> <code>#[test]</code>. Attributes are
+      annotations in <code>#[...]</code> that tell the compiler something about the item that follows, a little like
+      Python decorators. Tests usually live in the same file as the code, in a module that is only compiled for
+      tests:</p>
+    <pre data-label="src/main.rs"><code class="language-rust">fn subdir(os: &amp;str, arch: &amp;str) -&gt; String {
+    format!("{os}-{arch}")
+}
+
+fn main() {
+    println!("{}", subdir("linux", "64"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn joins_os_and_arch() {
+        assert_eq!(subdir("osx", "arm64"), "osx-arm64");
+    }
+}</code></pre>
+    <p><code>#[cfg(test)]</code> means "only compile this when testing", and <code>mod tests</code> is a module, which
+      the rest of this page explains. <a href="m11-testing.html">M11</a> covers testing in depth. For now:
+      <code>pixi run cargo test</code> finds and runs <code>joins_os_and_arch</code>.</p>
+    <aside class="callout pro"><p>Pixi treats clippy and rustfmt as part of "done": its <code>pixi run lint</code> task
+      runs both, through lefthook, along with other checks. Get used to running
+      <code>cargo fmt</code> and <code>cargo clippy --all-targets -- -D warnings</code> before you consider any change
+      finished. Clippy's suggestions are also a good way to learn idiomatic Rust.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>check</code> while editing, <code>test</code> to
+      verify, <code>clippy</code> and <code>fmt</code> before you are done, <code>run</code> to try it. Output goes in
+      <code>target/</code>, which you never commit.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="cargo-toml">
+    <h2>Cargo.toml: package and dependencies</h2>
+    <p><code>Cargo.toml</code> is the manifest of a Rust project, the counterpart of the <code>[project]</code> table in
+      a <code>pyproject.toml</code>, or of <code>pixi.toml</code>. It is TOML, the same format as <code>pixi.toml</code>.
+      The three tables you will meet in every crate are:</p>
+    <ul>
+      <li><code>[package]</code>: the name, version, and <code>edition</code> (the set of language rules; 2024 for
+        everything in this course). Optional fields such as <code>description</code> and <code>license</code> matter
+        when you publish.</li>
+      <li><code>[dependencies]</code>: libraries your code uses, available everywhere in the crate.</li>
+      <li><code>[dev-dependencies]</code>: libraries used only by tests, examples, and benchmarks, like a Pixi
+        <code>test</code> feature. They are not compiled into your program.</li>
+    </ul>
+    <p>You add a dependency with <code>cargo add</code>, which edits <code>Cargo.toml</code> for you (Pixi's own
+      <code>pixi add</code> plays the same role for <code>pixi.toml</code>):</p>
+    <pre data-label="Terminal"><code class="language-bash">pixi run cargo add itertools                       # a normal dependency
+pixi run cargo add serde --features derive         # with an optional feature turned on
+pixi run cargo add --dev tempfile                  # a dev-dependency</code></pre>
+    <pre data-label="Cargo.toml"><code class="language-toml">[package]
+name = "envtool"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+itertools = "0.15.0"
+serde = { version = "1.0.218", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3.20.0"</code></pre>
+    <p>(The versions you get will be whatever is newest on crates.io when you run the command.)</p>
+    <h3>Version requirements mean "compatible with"</h3>
+    <p>A plain version in <code>Cargo.toml</code> is a <strong>caret requirement</strong>. <code>itertools =
+      "0.15.0"</code> means "0.15.0 or any later version that is semver-compatible with it", that is
+      <code>&gt;=0.15.0, &lt;0.16.0</code>. For a version 1.0 or later, <code>serde = "1.0.218"</code> means
+      <code>&gt;=1.0.218, &lt;2.0.0</code>. Semver (semantic versioning) is the rule that breaking changes bump the
+      leftmost non-zero number, so these ranges accept bug fixes and new features but not breaking changes.</p>
+    <aside class="callout warn"><p>This is not how <code>pixi.toml</code> reads versions. In Pixi,
+      <code>numpy = "1.26"</code> is a conda match spec meaning <code>1.26.*</code>, and <code>"&gt;=1.26"</code> has no
+      upper bound. In <code>Cargo.toml</code>, <code>"1.26"</code> means <code>&gt;=1.26.0, &lt;2.0.0</code>. Same file
+      format, different meaning: read version strings in the context of the tool that owns the file.</p></aside>
+    <h3>Crate names and the hyphen rule</h3>
+    <p>Package names on crates.io may contain hyphens, but Rust identifiers may not. Cargo converts them: the package
+      <code>fs-err</code> is used in code as <code>fs_err</code>. Pixi depends on <code>fs-err</code> and writes
+      <code>use fs_err as fs;</code> (in
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_docs/src/main.rs#L2"><code>pixi_docs/src/main.rs</code></a>),
+      which also renames it locally to <code>fs</code>.</p>
+    <aside class="callout think"><p>In <code>Cargo.toml</code>, <code>regex = "1.11"</code>. Will Cargo accept
+      regex 1.12.0? 1.11.0? 2.0.0? (Yes; yes; no. A caret requirement allows any compatible version at or above the one
+      written.)</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>[package]</code> says what you are,
+      <code>[dependencies]</code> what you use, <code>[dev-dependencies]</code> what only tests use. A bare version is a
+      caret requirement: "this or any compatible later version".</p></aside>
+  </section>
+
+  <section class="lesson-section" id="packages-crates">
+    <h2>Packages and crates; libraries and binaries</h2>
+    <p>Python uses "package" loosely: a directory with an <code>__init__.py</code>, or a thing you
+      <code>pip install</code>. Rust has two precise words.</p>
+    <ul>
+      <li>A <strong>crate</strong> is the unit the compiler builds: one tree of modules compiled together into either a
+        library or a program. Every crate has a <strong>crate root</strong>, the file where compilation starts.</li>
+      <li>A <strong>package</strong> is a directory with a <code>Cargo.toml</code>. It contains one or more crates:
+        at most one library crate, and any number of binary crates.</li>
+    </ul>
+    <table>
+      <thead><tr><th>Kind</th><th>Crate root</th><th>Produces</th><th>Python analogy</th></tr></thead>
+      <tbody>
+        <tr><td>Library crate</td><td><code>src/lib.rs</code></td><td>Code other crates can <code>use</code>; no <code>main</code></td><td>An importable package</td></tr>
+        <tr><td>Binary crate</td><td><code>src/main.rs</code></td><td>An executable named after the package</td><td>A console script entry point</td></tr>
+        <tr><td>Extra binaries</td><td><code>src/bin/name.rs</code></td><td>An executable called <code>name</code></td><td>More entry points</td></tr>
+      </tbody>
+    </table>
+    <p>Cargo finds these by convention, so most <code>Cargo.toml</code> files have no <code>[lib]</code> or
+      <code>[[bin]]</code> sections. A package with both <code>src/lib.rs</code> and <code>src/main.rs</code> is very
+      common: the library holds the logic and the tests, and <code>main.rs</code> is a thin layer that calls it. The
+      binary uses the library by the package name, like any other dependency:</p>
+    <div class="runnable" data-local="It is a package with two crates in two files (src/lib.rs and src/main.rs). Create it with pixi run cargo init --name envtool and add src/lib.rs." data-title="A library and a binary in one package">
+<textarea>
+// src/lib.rs (the library crate root)
+pub fn subdir(os: &str, arch: &str) -> String {
+    format!("{os}-{arch}")
+}
+
+// src/main.rs (the binary crate root)
+fn main() {
+    println!("{}", envtool::subdir("linux", "64"));
+}
+</textarea>
+    </div>
+    <p>Why split them? Integration tests (files in <code>tests/</code>) and other crates can only use a library.
+      Keeping <code>main.rs</code> thin means almost all of your code is testable. Pixi takes this to the extreme: the
+      <code>pixi</code> package's <code>main.rs</code> sets up a thread and an async runtime and then calls
+      <code>pixi_cli::execute()</code>, a function in a separate library crate. You will read it in the
+      <a href="#pixi-reading">Reading Pixi</a> section.</p>
+    <aside class="callout note"><p>People often say "crate" when they mean "package", especially for things on
+      crates.io ("the <code>serde</code> crate"). That is fine in conversation. When it matters, as in "the library
+      crate of the <code>pixi_manifest</code> package", the precise words help.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> a package is a <code>Cargo.toml</code>; a crate is one
+      compiled unit. <code>src/lib.rs</code> is the library root, <code>src/main.rs</code> the binary root, and the
+      binary reaches the library through the package name.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="modules">
+    <h2>Modules: organizing code inside a crate</h2>
+    <p>In Python every file is a module automatically, and <code>import</code> finds it by searching paths at run
+      time. Rust is explicit. A <strong>module</strong> is a named scope declared with <code>mod</code>, and every
+      module lives in a tree rooted at the crate root. A file that is not declared with <code>mod</code> somewhere is
+      not part of the crate at all: the compiler never reads it.</p>
+    <p>The simplest module is inline, with its body in braces. Run this:</p>
+    <div class="runnable" data-title="An inline module">
+<textarea>
+mod platform {
+    pub fn current() -> &'static str {
+        "linux-64"
+    }
+
+    pub fn is_unix(name: &str) -> bool {
+        !name.starts_with("win")
+    }
+}
+
+fn main() {
+    let p = platform::current();
+    println!("current platform: {p}");
+    println!("unix? {}", platform::is_unix(p));
+    println!("unix? {}", platform::is_unix("win-64"));
+}
+</textarea>
+    </div>
+    <p>Three things to notice. <code>platform::current()</code> is a <strong>path</strong>: module name, then
+      <code>::</code>, then the item, much like <code>platform.current()</code> after <code>import platform</code>. The
+      <code>pub</code> keyword makes a function visible outside its module. And <code>&amp;'static str</code> is the
+      type of a string literal (a borrowed string that lives for the whole program); <a href="m02-types-structs-enums.html">M02</a>
+      explains it.</p>
+    <h3>Private by default</h3>
+    <p>Python's privacy is a convention: a leading underscore says "please do not use this", but nothing stops you.
+      Rust's is enforced. Every item (function, struct, constant, module) is <strong>private</strong> unless marked
+      <code>pub</code>, and a private item can be used only inside the module that defines it and that module's
+      descendants. Compile this:</p>
+    <div class="runnable" data-title="Calling a private function" data-compile-fail>
+<textarea>
+mod platform {
+    pub fn current() -> &'static str {
+        detect()
+    }
+
+    fn detect() -> &'static str {
+        "linux-64"
+    }
+}
+
+fn main() {
+    println!("{}", platform::detect());
+}
+</textarea>
+    </div>
+    <p>The error is <code>E0603: function `detect` is private</code>. The primary span points at
+      <code>detect</code> in <code>main</code>, and a <code>note:</code> points at its definition. Inside
+      <code>platform</code>, <code>current</code> calls <code>detect</code> with no problem, because both are in the same
+      module. From <code>main</code>, which is in the crate root, it is off limits. Change the call to
+      <code>platform::current()</code> and it compiles.</p>
+    <p>Why enforce this? Privacy is what lets a maintainer change the inside of a module without breaking the code
+      that uses it. In a 59-crate codebase like Pixi, "nothing outside this module can call this" is a promise you can
+      rely on when you refactor. <a href="m10-crate-design.html">M10</a> adds the finer levels
+      <code>pub(crate)</code> and <code>pub(super)</code>; you will already see <code>pub(crate)</code> in Pixi below.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> declare modules with <code>mod</code>; reach items with
+      <code>::</code> paths; everything is private unless <code>pub</code>, and privacy is checked by the compiler
+      (<code>E0603</code>).</p></aside>
+  </section>
+
+  <section class="lesson-section" id="module-files">
+    <h2>Modules in files: <code>foo.rs</code>, <code>foo/</code>, and <code>mod.rs</code></h2>
+    <p>Inline modules are fine for a few lines. Real crates put each module in its own file. You still write the
+      <code>mod</code> declaration in the parent, but end it with a semicolon instead of a body:</p>
+    <pre data-label="src/lib.rs"><code class="language-rust">pub mod platform;   // the body is in src/platform.rs (or src/platform/mod.rs)
+mod environment;    // the body is in src/environment.rs</code></pre>
+    <p><code>mod platform;</code> means "there is a module called <code>platform</code>; load its body from a file".
+      Cargo does not scan the directory for <code>.rs</code> files. If you create <code>src/environment.rs</code> and
+      forget <code>mod environment;</code>, the file is silently ignored, which surprises Python developers.</p>
+    <p>For a module that itself has child modules there are two layouts, and both are in Pixi:</p>
+    <div class="two-col">
+      <div>
+        <p><strong>Newer style:</strong> <code>foo.rs</code> next to a <code>foo/</code> directory</p>
+        <pre data-label="Layout"><code class="language-bash">src/
+  lib.rs          // mod platform;
+  platform.rs     // pub mod host;
+  platform/
+    host.rs</code></pre>
+      </div>
+      <div>
+        <p><strong>Older style:</strong> <code>foo/mod.rs</code></p>
+        <pre data-label="Layout"><code class="language-bash">src/
+  lib.rs          // mod manifests;
+  manifests/
+    mod.rs        // mod document;
+    document.rs</code></pre>
+      </div>
+    </div>
+    <p>In both, the module <code>platform</code> has a child <code>platform::host</code>. The <code>mod.rs</code> style
+      is the Rust 2015 convention, the counterpart of Python's <code>__init__.py</code>. The 2018 edition added the
+      <code>foo.rs</code> + <code>foo/</code> style, so that an editor with ten tabs open does not show ten files all
+      called <code>mod.rs</code>. Both are fully supported; a crate should pick one, though large old codebases such as
+      Pixi contain both. You may not use both for the same module.</p>
+    <pre class="mermaid">flowchart TD
+    R["crate root: src/lib.rs"] --> P["mod platform: src/platform.rs"]
+    P --> H["mod host: src/platform/host.rs"]
+    R --> M["mod manifests: src/manifests/mod.rs"]
+    M --> D["mod document: src/manifests/document.rs"]
+    R --> T["mod tests (inline, #[cfg(test)])"]</pre>
+    <p>The module tree, not the directory tree, is what paths follow. The files are just where the bodies are
+      stored.</p>
+    <aside class="callout warn"><p>If you see <code>error[E0583]: file not found for module `foo`</code>, the compiler
+      looked for <code>foo.rs</code> and <code>foo/mod.rs</code> next to the declaring file and found neither. Check the
+      file name and that you declared the module in the right parent: a child of <code>platform</code> must be
+      declared in <code>platform.rs</code>, not in <code>lib.rs</code>.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> every module is declared by its parent with
+      <code>mod name;</code>. Its body is in <code>name.rs</code> or <code>name/mod.rs</code>; its children live in the
+      <code>name/</code> directory.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="use-paths">
+    <h2><code>use</code> and paths: <code>crate::</code>, <code>super::</code>, <code>self::</code></h2>
+    <p>Writing <code>crate::manifests::document::ManifestDocument</code> everywhere would be tiring. A
+      <code>use</code> declaration creates a shorter local name for a path, like <code>from x import y</code>. Unlike
+      Python's <code>import</code>, it runs no code and loads nothing; it is only a name binding, resolved at compile
+      time.</p>
+    <p>A path can start in four ways:</p>
+    <table>
+      <thead><tr><th>Path starts with</th><th>Meaning</th><th>Python analogy</th></tr></thead>
+      <tbody>
+        <tr><td><code>crate::</code></td><td>The root of the current crate</td><td>An absolute import of your own package</td></tr>
+        <tr><td><code>super::</code></td><td>The parent of the current module</td><td><code>from .. import x</code></td></tr>
+        <tr><td><code>self::</code></td><td>The current module</td><td><code>from . import x</code></td></tr>
+        <tr><td>A name, such as <code>std::</code> or <code>itertools::</code></td><td>An external crate, or a name already in scope here</td><td><code>import itertools</code></td></tr>
+      </tbody>
+    </table>
+    <p>Predict the three words this prints. Each <code>who()</code> is a different function, and the path decides
+      which one is called.</p>
+    <div class="runnable" data-title="Which who?" data-predict>
+<textarea>
+mod outer {
+    pub fn who() -> &'static str { "outer" }
+    pub mod inner {
+        pub fn who() -> &'static str { "inner" }
+        pub fn report() -> String {
+            format!("{} {} {}", self::who(), super::who(), crate::who())
+        }
+    }
+}
+
+fn who() -> &'static str { "root" }
+
+fn main() {
+    println!("{}", outer::inner::report());
+    println!("{}", outer::who());
+}
+</textarea>
+    </div>
+    <p>Here is a fuller example. It uses a constant at the crate root, a private helper reached with
+      <code>self::</code>, a child module reaching its parent with <code>super::</code>, and a <code>use</code> that
+      shortens a long path.</p>
+    <div class="runnable" data-title="crate, self, super, and use">
+<textarea>
+const TOOL: &str = "pixi";
+
+mod cli {
+    pub fn banner() -> String {
+        format!("{} {}", crate::TOOL, self::version())
+    }
+
+    fn version() -> &'static str {
+        "0.81.0"
+    }
+
+    pub mod add {
+        pub fn describe(package: &str) -> String {
+            format!("{}: add {package}", super::banner())
+        }
+    }
+}
+
+use cli::add::describe;
+
+fn main() {
+    println!("{}", cli::banner());
+    println!("{}", describe("numpy"));
+    println!("{}", cli::add::describe("rust"));
+}
+</textarea>
+    </div>
+    <p>A child module may use its parent's private items (<code>cli::add</code> could call
+      <code>super::version()</code> even though <code>version</code> is not <code>pub</code>), because privacy flows
+      downward: a module's descendants are "inside" it. The reverse is not true: <code>cli</code> cannot call a private
+      function of <code>cli::add</code>.</p>
+    <h3>Forms of <code>use</code> you will see in Pixi</h3>
+    <pre><code class="language-rust">use std::collections::BTreeMap;                  // one item
+use std::fmt::{self, Display, Formatter};        // several, plus the module itself as `fmt`
+use fs_err as fs;                                // rename
+use crate::{FeatureName, solve_group::SolveGroupIdx};  // nested paths from the crate root
+use super::*;                                    // everything from the parent (common in tests)
+pub use environment::{Environment, EnvironmentName};  // re-export (next section)</code></pre>
+    <p>When a path is wrong, you get <code>E0432</code> (unresolved import) for a <code>use</code> or
+      <code>E0433</code> (failed to resolve) for a path in code. Compile this and find the typo from the label.</p>
+    <div class="runnable" data-title="An unresolved import" data-compile-fail>
+<textarea>
+mod manifest {
+    pub mod task {
+        pub fn default_name() -> &'static str {
+            "start"
+        }
+    }
+}
+
+use manifest::tasks::default_name;
+
+fn main() {
+    println!("{}", default_name());
+}
+</textarea>
+    </div>
+    <p>The span sits under <code>tasks</code> with the label "could not find `tasks` in `manifest`". The module is
+      <code>task</code>. Errors about paths always name the segment where resolution stopped, so read the label for
+      the exact word.</p>
+    <aside class="callout pro"><p>rustfmt sorts the <code>use</code> lines within each block (a block ends at a blank
+      line), and most Pixi files group them as <code>std</code>, then external crates, then
+      <code>crate::</code>/<code>super::</code>. When you read a Pixi file, the <code>use</code> lines at the top are a
+      map of what the file depends on.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>crate::</code> is absolute from your crate root,
+      <code>super::</code> is the parent, <code>self::</code> is here. <code>use</code> only creates a name. Children see
+      their ancestors' private items; parents do not see their children's.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="reexports">
+    <h2>Re-exports: a public face over private files</h2>
+    <p>A crate's internal file layout and its public API do not have to match. <code>pub use</code> makes an item
+      available at a new path: it is a <code>use</code> that other crates can see. The usual pattern is to keep the
+      modules private and re-export the important types from the crate root:</p>
+    <pre data-label="src/lib.rs"><code class="language-rust">mod environment;                                    // private module
+pub use environment::{Environment, EnvironmentName}; // public names at the root</code></pre>
+    <p>Users of the crate write <code>use pixi_manifest::EnvironmentName;</code> and never need to know the file it is
+      in. The maintainer is then free to move <code>EnvironmentName</code> to another file without breaking anyone.
+      Python packages do the same thing when <code>__init__.py</code> imports names from submodules.</p>
+    <p>A private <code>use</code> at the crate root also has a useful effect: the name becomes part of the root module,
+      so code anywhere in the crate can reach it with <code>crate::name</code>. Pixi's <code>pixi_manifest</code> has
+      <code>use pixi_consts::consts;</code> in
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/lib.rs#L170"><code>lib.rs</code> line 170</a>,
+      and then
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/environment.rs#L14"><code>environment.rs</code> line 14</a>
+      writes:</p>
+    <pre><code class="language-rust">use crate::{FeatureName, consts::DEFAULT_ENVIRONMENT_NAME, solve_group::SolveGroupIdx};</code></pre>
+    <p><code>FeatureName</code> is a re-export at the root, <code>consts</code> is the root's import of another crate's
+      module, and <code>solve_group</code> is a private module of the crate. All three are reached the same way.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>pub use</code> re-exports; it decouples the public API
+      from the file layout. When you look for where a type is defined, the <code>pub use</code> lines in
+      <code>lib.rs</code> tell you which module to open.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="cargo-lock">
+    <h2>Cargo.lock: the exact versions</h2>
+    <p><code>Cargo.toml</code> says which versions are <em>acceptable</em>. The first time you build, Cargo picks one
+      exact version of every crate in the whole dependency graph and records it in <code>Cargo.lock</code>, along with
+      a checksum. Every later build uses exactly those versions until you change them. This is the same job
+      <code>pixi.lock</code> does for your conda and PyPI packages.</p>
+    <p>Here is a real excerpt from Pixi's
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/Cargo.lock#L4169-L4185"><code>Cargo.lock</code>, lines 4169-4185</a>
+      (the header is lines 1-3):</p>
+    <pre data-label="Cargo.lock (excerpt)"><code class="language-toml"># This file is automatically @generated by Cargo.
+# It is not intended for manual editing.
+version = 4
+# ...
+[[package]]
+name = "itertools"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+dependencies = [
+ "either",
+]
+
+[[package]]
+name = "itertools"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b4baf93f58d4425749ca49a51c50ebab072c5df6994d08fed93541c331481dc"
+dependencies = [
+ "either",
+]</code></pre>
+    <p>Two versions of the same crate? Yes. Pixi's own crates ask for <code>itertools = "0.15.0"</code>, but some of
+      the crates Pixi depends on ask for 0.14 (and others for older versions still). Those ranges do not overlap, so
+      Cargo compiles each version separately and links both in. Python cannot do this, since one environment holds
+      one version of each package; Rust can, because each crate's dependencies are resolved by name and version at
+      compile time. It costs compile time and binary size, which is why maintainers try to keep the duplicates few.</p>
+    <ul>
+      <li><code>pixi run cargo update</code> picks newer versions within your requirements and rewrites the lock file
+        (like <code>pixi update</code>). <code>cargo update -p itertools</code> updates one crate.</li>
+      <li><code>--locked</code> makes Cargo fail instead of changing the lock file. CI and release builds use it so the
+        build is exactly what was reviewed. Pixi's own <code>install</code> task runs
+        <code>cargo install --path crates/pixi --locked</code>.</li>
+      <li>Commit <code>Cargo.lock</code>. For programs it is essential for reproducible builds; current Cargo guidance
+        is to commit it for libraries too. Pixi commits its <code>Cargo.lock</code> at the workspace root.</li>
+    </ul>
+    <aside class="callout pixi"><p>A Pixi-managed Rust project has <strong>two</strong> lock files: <code>pixi.lock</code>
+      pins the toolchain (the <code>rust</code> conda package and anything else from conda-forge), and
+      <code>Cargo.lock</code> pins the crates. Commit both.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>Cargo.toml</code> is the range, <code>Cargo.lock</code>
+      is the exact choice. Commit the lock file; update it on purpose with <code>cargo update</code>.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="workspaces">
+    <h2>Workspaces: many crates, one build</h2>
+    <p>A <strong>workspace</strong> is a set of packages developed together. They share one <code>Cargo.lock</code>
+      and one <code>target/</code> directory, so a crate used by ten members is compiled once, and every member agrees
+      on its version. You turn a directory into a workspace with a root <code>Cargo.toml</code> that has a
+      <code>[workspace]</code> table:</p>
+    <pre data-label="Cargo.toml (workspace root)"><code class="language-toml">[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+license = "BSD-3-Clause"
+
+[workspace.dependencies]
+itertools = "0.15.0"
+envtool_core = { path = "crates/envtool_core" }</code></pre>
+    <pre data-label="crates/envtool_cli/Cargo.toml"><code class="language-toml">[package]
+name = "envtool_cli"
+version = "0.1.0"
+edition.workspace = true     # inherit edition = "2024"
+license.workspace = true
+
+[dependencies]
+itertools = { workspace = true }       # the version comes from the root
+envtool_core = { workspace = true }    # a sibling crate, by path</code></pre>
+    <p>The pieces:</p>
+    <ul>
+      <li><code>members</code> lists the packages, with globs. <code>exclude</code> removes some.
+        <code>default-members</code> chooses what a bare <code>cargo build</code> at the root builds.</li>
+      <li><code>resolver = "3"</code> selects the newest dependency resolver behavior (the default for edition 2024
+        packages, written explicitly at a workspace root).</li>
+      <li><code>[workspace.package]</code> holds fields that members inherit with <code>field.workspace = true</code>.</li>
+      <li><code>[workspace.dependencies]</code> declares each dependency's version <em>once</em>. Members say
+        <code>{ workspace = true }</code> and may add <code>features</code> or <code>optional = true</code> on top.
+        Upgrading a crate everywhere is then a one-line change.</li>
+      <li>A <strong>path dependency</strong> (<code>{ path = "..." }</code>) points at a crate on disk instead of
+        crates.io. That is how workspace members depend on each other.</li>
+    </ul>
+    <p>Commands at the root act on the default members; <code>-p</code> (<code>--package</code>) selects one, and
+      <code>--workspace</code> selects all:</p>
+    <pre data-label="Terminal"><code class="language-bash">pixi run cargo test -p envtool_core       # test one crate
+pixi run cargo build --workspace          # build every member
+pixi run cargo clippy --workspace --all-targets -- -D warnings</code></pre>
+    <p>Why split a project into many crates at all? The crate is Rust's unit of compilation and of privacy. Smaller
+      crates compile in parallel and recompile less when one changes, and a crate boundary is a hard API boundary:
+      only <code>pub</code> items cross it. Pixi has 59 member crates for exactly these reasons.</p>
+    <aside class="callout pixi"><p>A Cargo workspace and a Pixi workspace are different things that happen to share a
+      name. Pixi's repository is both: its <code>pixi.toml</code> is a Pixi workspace that provides the toolchain and
+      tasks, and its <code>Cargo.toml</code> is a Cargo workspace that lists the crates.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> one root <code>Cargo.toml</code> with
+      <code>[workspace]</code>; members inherit with <code>.workspace = true</code>; versions live once in
+      <code>[workspace.dependencies]</code>; one lock file and one <code>target/</code> for all.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="pixi-reading">
+    <h2>Reading Pixi: the workspace and one crate's modules</h2>
+    <h3>1. The workspace root</h3>
+    <p>From
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/Cargo.toml#L1-L16"><code>Cargo.toml</code>, lines 1-16</a>:</p>
+    <pre data-label="Cargo.toml"><code class="language-toml">[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = [
+  # Only pulled in when enabling certain features. We do not want to include
+  # these crates when running workspace wide commands.
+  "crates/pixi_allocator",
+  # Standalone projects that should not be part of the workspace
+  "docs",
+  "examples",
+  "pixi-build-backends",
+  "pytest-temp",
+  "tests/data",
+  "trampoline",
+]
+default-members = ["crates/pixi"]</code></pre>
+    <ul>
+      <li><code>members = ["crates/*"]</code>: every directory under <code>crates/</code> is a member. There are 60,
+        and <code>crates/pixi_allocator</code> is excluded, leaving 59.</li>
+      <li><code>exclude</code> also lists directories that hold their own separate Cargo projects
+        (<code>pixi-build-backends</code>, <code>trampoline</code>) so that workspace-wide commands skip them.</li>
+      <li><code>default-members = ["crates/pixi"]</code>: a plain <code>cargo build</code> at the root builds only the
+        <code>pixi</code> binary package (and what it depends on), not every test helper crate.</li>
+    </ul>
+    <p>Further down, in
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/Cargo.toml#L114-L123">lines 114-123</a>,
+      <code>[workspace.dependencies]</code> lists the members as path dependencies, next to external crates such as
+      <code>itertools = "0.15.0"</code> on line 77:</p>
+    <pre data-label="Cargo.toml"><code class="language-toml">pixi_config = { path = "crates/pixi_config" }
+pixi_consts = { path = "crates/pixi_consts" }
+pixi_core = { path = "crates/pixi_core" }
+pixi_diff = { path = "crates/pixi_diff" }
+pixi_git = { path = "crates/pixi_git" }
+pixi_glob = { path = "crates/pixi_glob" }
+pixi_global = { path = "crates/pixi_global" }
+pixi_install_pypi = { path = "crates/pixi_install_pypi" }
+pixi_manifest = { path = "crates/pixi_manifest" }
+pixi_path = { path = "crates/pixi_path" }</code></pre>
+    <h3>2. One member: <code>pixi_manifest</code></h3>
+    <p>The crate that reads <code>pixi.toml</code>. From
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/Cargo.toml#L1-L13"><code>crates/pixi_manifest/Cargo.toml</code></a>
+      and
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/Cargo.toml#L37-L59">lines 37-59</a>:</p>
+    <pre data-label="crates/pixi_manifest/Cargo.toml"><code class="language-toml">[package]
+name = "pixi_manifest"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+readme.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+archspec = { workspace = true }
+chrono = { workspace = true }
+# ...
+# Rattler crates
+rattler_conda_types = { workspace = true }
+# These rattler crates are optionally used in the build system
+rattler_lock = { workspace = true, optional = true }
+rattler_solve = { workspace = true, default-features = false }
+# ...
+strum = { workspace = true, features = ["derive"] }
+# ...
+
+[dev-dependencies]
+assert_matches = { workspace = true }
+# ...
+insta = { workspace = true, features = ["yaml"] }</code></pre>
+    <ul>
+      <li>Every <code>[package]</code> field except <code>name</code> and <code>version</code> is inherited from
+        <code>[workspace.package]</code>, so all 59 crates share one edition and license.</li>
+      <li>Every dependency says <code>workspace = true</code>: no version numbers appear in member crates.</li>
+      <li>Members add what is specific to them: <code>strum</code> with the <code>derive</code> feature,
+        <code>rattler_lock</code> as <code>optional</code> (only compiled when a Cargo feature asks for it; see
+        <a href="m10-crate-design.html">M10</a>), and <code>rattler_solve</code> without default features.</li>
+      <li><code>insta</code>, the snapshot-testing crate, is a dev-dependency: tests use it, the shipped
+        <code>pixi</code> binary does not contain it.</li>
+    </ul>
+    <h3>3. The crate root: modules and re-exports</h3>
+    <p>From
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/lib.rs#L1-L43"><code>crates/pixi_manifest/src/lib.rs</code>, lines 1-43</a>, trimmed:</p>
+    <pre data-label="crates/pixi_manifest/src/lib.rs"><code class="language-rust">mod activation;
+mod build_system;
+pub(crate) mod channel;
+mod dependencies;
+mod discovery;
+mod environment;
+// ...
+mod manifests;
+// ...
+pub mod platform;
+// ...
+pub mod task;
+pub mod toml;
+pub mod utils;
+mod warning;
+mod workspace;
+pub use activation::Activation;
+pub use build_system::BuildBackend;
+pub use build_system::PackageBuild;
+pub use channel::PrioritizedChannel;
+pub use dependencies::{CondaConstraints, CondaDependencies, PyPiDependencies};
+// ...
+pub use environment::{Environment, EnvironmentName, NewEnvironment};
+pub use error::{DependencyError, GenericError, TomlError};</code></pre>
+    <ul>
+      <li>The first 31 lines declare the crate's modules. Most are private (<code>mod environment;</code>); a few are
+        <code>pub</code> (<code>pub mod task;</code>), so other crates can write
+        <code>pixi_manifest::task::...</code>.</li>
+      <li><code>pub(crate) mod channel;</code> is visible anywhere in this crate but not outside it.</li>
+      <li>Then come the re-exports. <code>environment</code> is private, yet
+        <code>pixi_manifest::EnvironmentName</code> works for every other crate, because of the <code>pub use</code>.</li>
+      <li>Both file layouts are in use. <code>pub mod platform;</code> is backed by <code>src/platform.rs</code>, which
+        declares <code>pub mod host;</code> on
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/platform.rs#L15">line 15</a>,
+        backed by <code>src/platform/host.rs</code>. <code>mod manifests;</code> is backed by
+        <code>src/manifests/mod.rs</code>, which declares its own children in
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/manifests/mod.rs#L11-L28">lines 11-28</a>.</li>
+    </ul>
+    <h3>4. The binary: almost nothing</h3>
+    <p>The <code>pixi</code> package's
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi/Cargo.toml#L12-L16"><code>[dependencies]</code></a>
+      are just four crates, and its
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi/src/main.rs#L40-L41"><code>src/main.rs</code></a>
+      hands everything to the library crate <code>pixi_cli</code>:</p>
+    <pre data-label="crates/pixi/src/main.rs (lines 40-41)"><code class="language-rust">        // Box the large main future to avoid stack overflows.
+        runtime.block_on(Box::pin(pixi_cli::execute()))</code></pre>
+    <p>That is the "thin <code>main.rs</code>, logic in libraries" pattern from earlier, at the scale of a real
+      tool. You do not need to understand <code>Box::pin</code> or <code>block_on</code> yet (they come in
+      <a href="m08-smart-pointers.html">M08</a> and Level 2); the point is the path <code>pixi_cli::execute</code>: crate
+      name, then function.</p>
+    <details class="reveal"><summary>Question: a crate outside <code>pixi_manifest</code> writes <code>use pixi_manifest::environment::EnvironmentName;</code>. Does it compile?</summary>
+      <p>No. <code>mod environment;</code> is private, so the path through it is rejected with <code>E0603</code>
+        ("module `environment` is private"). The crate must use the re-export:
+        <code>use pixi_manifest::EnvironmentName;</code>.</p>
+    </details>
+    <details class="reveal"><summary>Question: you want to bump <code>itertools</code> to 0.16 for all of Pixi. How many files do you edit?</summary>
+      <p>One: the root <code>Cargo.toml</code>'s <code>[workspace.dependencies]</code> line, plus the regenerated
+        <code>Cargo.lock</code>. Members say <code>itertools = { workspace = true }</code>, so they pick up the new
+        version automatically (and then you fix whatever the breaking changes broke).</p>
+    </details>
+    <details class="reveal"><summary>Question: where would you open the source of <code>pixi_manifest::platform::host</code>?</summary>
+      <p><code>crates/pixi_manifest/src/platform/host.rs</code>. The module <code>platform</code> is
+        <code>src/platform.rs</code>, and its child <code>host</code> lives in the <code>platform/</code> directory.</p>
+    </details>
+  </section>
+
+  <section class="lesson-section" id="practice">
+    <h2>Practice</h2>
+    <p>Exercises run as one file, so modules are inline (<code>mod name { ... }</code>), but the rules are the same as
+      for modules in files.</p>
+
+    <div class="exercise" data-id="m01-e1" data-title="Make the right things public">
+      <div class="exercise-prompt">
+        <p>The tests call <code>platform::subdir(os, arch)</code> from outside the module. The starter compiles on its
+          own, but the first Check will show an <code>E0603</code> error because the function is private. Make
+          <code>subdir</code> public. Leave <code>bits</code> private: it is a helper, and <code>subdir</code> can call it
+          because they are in the same module.</p>
+        <p>Expected: <code>subdir("linux", "x86_64")</code> is <code>"linux-64"</code> and
+          <code>subdir("osx", "arm64")</code> is <code>"osx-arm64"</code>.</p>
+      </div>
+<textarea class="starter">
+mod platform {
+    fn subdir(os: &str, arch: &str) -> String {
+        format!("{os}-{}", bits(arch))
+    }
+
+    fn bits(arch: &str) -> &str {
+        if arch == "x86_64" { "64" } else { arch }
+    }
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn linux_x86_64_is_linux_64() {
+    assert_eq!(platform::subdir("linux", "x86_64"), "linux-64", "subdir(\"linux\", \"x86_64\") should be \"linux-64\"");
+}
+
+#[test]
+fn osx_arm64_is_unchanged() {
+    assert_eq!(platform::subdir("osx", "arm64"), "osx-arm64", "subdir(\"osx\", \"arm64\") should be \"osx-arm64\"");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Add <code>pub</code> in front of one <code>fn</code>. The tests live
+        in a module that is a sibling of <code>platform</code>, not inside it.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">mod platform {
+    pub fn subdir(os: &amp;str, arch: &amp;str) -&gt; String {
+        format!("{os}-{}", bits(arch))
+    }
+
+    fn bits(arch: &amp;str) -&gt; &amp;str {
+        if arch == "x86_64" { "64" } else { arch }
+    }
+}</code></pre>
+        <p>Only the entry point is <code>pub</code>. Keeping <code>bits</code> private means you could rename or delete
+          it later without checking any code outside <code>platform</code>.</p>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m01-e2" data-title="Paths with crate:: and self::">
+      <div class="exercise-prompt">
+        <p>Implement the two functions in <code>environment</code>:</p>
+        <ul>
+          <li><code>env_dir(name)</code> returns <code>"&lt;ENVS_DIR&gt;/&lt;name&gt;"</code>, using the constant
+            <code>ENVS_DIR</code> defined at the crate root. <code>env_dir("test")</code> is
+            <code>".pixi/envs/test"</code>.</li>
+          <li><code>default_env_dir()</code> returns the directory of the environment named by the module's own
+            <code>DEFAULT</code> constant, by calling <code>env_dir</code>. It returns <code>".pixi/envs/default"</code>.</li>
+        </ul>
+        <p>Use <code>crate::</code> to reach <code>ENVS_DIR</code> and <code>self::</code> for the items in the same
+          module (plain names also work for those; the point is to practice the paths).</p>
+      </div>
+<textarea class="starter">
+const ENVS_DIR: &str = ".pixi/envs";
+
+mod environment {
+    pub const DEFAULT: &str = "default";
+
+    pub fn env_dir(name: &str) -> String {
+        todo!()
+    }
+
+    pub fn default_env_dir() -> String {
+        todo!()
+    }
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn env_dir_joins_name() {
+    assert_eq!(environment::env_dir("test"), ".pixi/envs/test", "env_dir(\"test\") should be \".pixi/envs/test\"");
+    assert_eq!(environment::env_dir("cuda"), ".pixi/envs/cuda", "env_dir(\"cuda\") should be \".pixi/envs/cuda\"");
+}
+
+#[test]
+fn default_env_dir_uses_default_name() {
+    assert_eq!(environment::default_env_dir(), ".pixi/envs/default", "default_env_dir() should be \".pixi/envs/default\"");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>format!("{}/{name}", crate::ENVS_DIR)</code> builds the
+        first. The second is one call: <code>self::env_dir(self::DEFAULT)</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">const ENVS_DIR: &amp;str = ".pixi/envs";
+
+mod environment {
+    pub const DEFAULT: &amp;str = "default";
+
+    pub fn env_dir(name: &amp;str) -&gt; String {
+        format!("{}/{name}", crate::ENVS_DIR)
+    }
+
+    pub fn default_env_dir() -&gt; String {
+        self::env_dir(self::DEFAULT)
+    }
+}</code></pre>
+        <p><code>ENVS_DIR</code> is private, but <code>environment</code> is a child of the crate root, so it may use
+          it. A plain <code>ENVS_DIR</code> inside <code>environment</code> would <em>not</em> resolve: names from the
+          parent are not automatically in scope in a child module, which is why <code>crate::</code> (or
+          <code>super::</code>) is needed.</p>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m01-e3" data-title="A nested module reaches up with super::">
+      <div class="exercise-prompt">
+        <p>Inside <code>cli</code> there is a private helper <code>binary()</code> and two child modules. Implement:</p>
+        <ul>
+          <li><code>cli::add::command(packages)</code>: <code>"pixi add numpy pandas"</code> for
+            <code>&amp;["numpy", "pandas"]</code>. With no packages it returns just <code>"pixi add"</code> (no trailing
+            space).</li>
+          <li><code>cli::run::command(task)</code>: <code>"pixi run test"</code> for <code>"test"</code>.</li>
+        </ul>
+        <p>Get the word <code>"pixi"</code> by calling the parent's private <code>binary()</code> with
+          <code>super::</code>, not by writing it again.</p>
+      </div>
+<textarea class="starter">
+mod cli {
+    fn binary() -> &'static str {
+        "pixi"
+    }
+
+    pub mod add {
+        pub fn command(packages: &[&str]) -> String {
+            todo!()
+        }
+    }
+
+    pub mod run {
+        pub fn command(task: &str) -> String {
+            todo!()
+        }
+    }
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn add_lists_packages() {
+    assert_eq!(cli::add::command(&["numpy", "pandas"]), "pixi add numpy pandas", "add with two packages should be \"pixi add numpy pandas\"");
+    assert_eq!(cli::add::command(&["rust"]), "pixi add rust", "add with one package should be \"pixi add rust\"");
+}
+
+#[test]
+fn add_without_packages_has_no_trailing_space() {
+    assert_eq!(cli::add::command(&[]), "pixi add", "add with no packages should be exactly \"pixi add\"");
+}
+
+#[test]
+fn run_names_the_task() {
+    assert_eq!(cli::run::command("test"), "pixi run test", "run::command(\"test\") should be \"pixi run test\"");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>A slice of strings has a <code>join</code> method:
+        <code>packages.join(" ")</code> gives <code>"numpy pandas"</code>. Check <code>packages.is_empty()</code> first
+        to handle the no-package case with an <code>if</code>/<code>else</code> whose branches both produce a
+        <code>String</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">mod cli {
+    fn binary() -&gt; &amp;'static str {
+        "pixi"
+    }
+
+    pub mod add {
+        pub fn command(packages: &amp;[&amp;str]) -&gt; String {
+            if packages.is_empty() {
+                format!("{} add", super::binary())
+            } else {
+                format!("{} add {}", super::binary(), packages.join(" "))
+            }
+        }
+    }
+
+    pub mod run {
+        pub fn command(task: &amp;str) -&gt; String {
+            format!("{} run {task}", super::binary())
+        }
+    }
+}</code></pre>
+        <p><code>binary</code> is private to <code>cli</code>, and <code>add</code> and <code>run</code> are inside
+          <code>cli</code>, so they may call it. The <code>if</code>/<code>else</code> is an expression: the function
+          returns whichever branch runs.</p>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m01-e4" data-title="Which dependencies come from the workspace?">
+      <div class="exercise-prompt">
+        <p>Write <code>workspace_deps(section: &amp;str) -&gt; Vec&lt;String&gt;</code>. It receives the text of a
+          <code>[dependencies]</code> table from a member crate's <code>Cargo.toml</code> and returns, in order, the names
+          of the dependencies that inherit from the workspace. A dependency inherits if its line is either form Pixi
+          uses:</p>
+        <ul>
+          <li><code>serde = { workspace = true }</code>, possibly with more keys, such as
+            <code>strum = { workspace = true, features = ["derive"] }</code></li>
+          <li><code>once_cell.workspace = true</code></li>
+        </ul>
+        <p>Skip blank lines, comment lines (starting with <code>#</code>), table headers (starting with
+          <code>[</code>), and dependencies with their own version such as <code>regex = "1.11"</code>. Lines may have
+          surrounding spaces.</p>
+      </div>
+<textarea class="starter">
+fn workspace_deps(section: &str) -> Vec<String> {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+const SECTION: &str = "[dependencies]
+archspec = { workspace = true }
+# Rattler crates
+rattler_lock = { workspace = true, optional = true }
+once_cell.workspace = true
+
+regex = \"1.11\"
+  strum = { workspace = true, features = [\"derive\"] }
+";
+
+#[test]
+fn finds_both_forms_in_order() {
+    let names = workspace_deps(SECTION);
+    assert_eq!(names, vec!["archspec", "rattler_lock", "once_cell", "strum"], "should find the four inherited dependencies, in file order");
+}
+
+#[test]
+fn skips_pinned_versions() {
+    let names = workspace_deps("[dependencies]\nregex = \"1.11\"\nurl = \"2\"\n");
+    assert!(names.is_empty(), "dependencies with their own version are not inherited, got {names:?}");
+}
+
+#[test]
+fn empty_input() {
+    assert!(workspace_deps("").is_empty(), "an empty section has no dependencies");
+}
+
+#[test]
+fn ignores_comments_mentioning_workspace() {
+    let names = workspace_deps("# serde = { workspace = true }\nchrono = { workspace = true }\n");
+    assert_eq!(names, vec!["chrono"], "a commented-out line is not a dependency");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary>
+        <p>Loop with <code>for line in section.lines()</code> and <code>let line = line.trim();</code>. Skip with
+          <code>continue</code> when <code>line.is_empty()</code>, <code>line.starts_with('#')</code>, or
+          <code>line.starts_with('[')</code>.</p>
+        <p><code>line.split_once('=')</code> returns <code>Some((before, after))</code> at the first <code>=</code>, or
+          <code>None</code>. Use <code>if let Some((key, value)) = line.split_once('=') { ... }</code>, trim both parts,
+          then check <code>key.strip_suffix(".workspace")</code> (which returns <code>Some(name)</code> if the suffix is
+          there) or <code>value.contains("workspace = true")</code>. <code>name.to_string()</code> turns a
+          <code>&amp;str</code> into a <code>String</code> to push.</p>
+      </details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn workspace_deps(section: &amp;str) -&gt; Vec&lt;String&gt; {
+    let mut names = Vec::new();
+    for line in section.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim();
+            let value = value.trim();
+            if let Some(name) = key.strip_suffix(".workspace") {
+                if value == "true" {
+                    names.push(name.to_string());
+                }
+            } else if value.contains("workspace = true") {
+                names.push(key.to_string());
+            }
+        }
+    }
+    names
+}</code></pre>
+        <p><code>let line = line.trim();</code> reuses the name for the trimmed version (shadowing, covered in
+          <a href="m02-types-structs-enums.html">M02</a>). <code>split_once</code> and <code>strip_suffix</code> return
+          an <code>Option</code>, Rust's "maybe a value" type from <a href="m04-option-result.html">M04</a>, and
+          <code>if let</code> runs its block only when there is a value. In Level 2 you will parse TOML properly with a
+          real parser instead of by line.</p>
+      </details>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="mini-project">
+    <h2>Mini-project: a multi-file crate, then a workspace</h2>
+    <div class="project-box">
+      <div class="widget-head"><span class="w-kind">Mini-project</span><span class="w-title">envtool: a library and a binary with modules in files</span></div>
+      <div class="widget-body">
+        <p>Build a small package with a library crate split into modules, a thin binary, and tests, using the file
+          layouts from this module. Then turn it into a two-crate workspace the way Pixi is organized.</p>
+        <pre data-label="Terminal"><code class="language-bash">pixi init envtool &amp;&amp; cd envtool
+pixi add rust
+pixi run cargo init --name envtool
+pixi run cargo add itertools</code></pre>
+        <p><strong>What to build</strong></p>
+        <ul>
+          <li><code>src/lib.rs</code> declares <code>pub mod platform;</code> and <code>mod environment;</code>, and
+            re-exports <code>pub use environment::env_dir;</code>.</li>
+          <li><code>src/platform.rs</code> (newer layout) with <code>pub fn subdir(os: &amp;str, arch: &amp;str) -&gt;
+            String</code> from exercise 1, and a child module <code>pub mod host;</code> in
+            <code>src/platform/host.rs</code> with <code>pub fn current() -&gt; String</code> that builds the subdir from
+            <code>std::env::consts::OS</code> and <code>std::env::consts::ARCH</code> using <code>super::subdir</code>.</li>
+          <li><code>src/environment/mod.rs</code> (older layout) with <code>env_dir</code> from exercise 2.</li>
+          <li><code>src/main.rs</code> only calls the library: it prints <code>envtool::platform::host::current()</code>
+            and <code>envtool::env_dir("default")</code>.</li>
+          <li>A <code>#[cfg(test)] mod tests</code> in <code>platform.rs</code> and one in <code>environment/mod.rs</code>,
+            each with at least two <code>#[test]</code> functions.</li>
+          <li>Use <code>itertools</code> somewhere small, for example
+            <code>use itertools::Itertools;</code> and <code>["a", "b"].iter().join(", ")</code>, so that you see a crate
+            dependency resolved into <code>Cargo.lock</code>.</li>
+        </ul>
+        <ul class="checklist" data-id="m01-mini">
+          <li><code>pixi run cargo run</code> prints your platform subdir and <code>.pixi/envs/default</code></li>
+          <li><code>pixi run cargo test</code> runs at least four tests, all passing</li>
+          <li>Removing <code>mod environment;</code> from <code>lib.rs</code> breaks the build with an error you can explain</li>
+          <li><code>main.rs</code> cannot call a private function of the library (try it, and read the <code>E0603</code>)</li>
+          <li><code>Cargo.lock</code> lists <code>itertools</code> with an exact version</li>
+          <li><code>pixi run cargo clippy --all-targets -- -D warnings</code> and <code>pixi run cargo fmt --check</code> both pass</li>
+        </ul>
+        <p><strong>Stretch goals:</strong> convert the project into a Cargo workspace with
+          <code>crates/envtool_core</code> (the library) and <code>crates/envtool</code> (the binary), a root
+          <code>Cargo.toml</code> with <code>[workspace.package]</code> and <code>[workspace.dependencies]</code>, and
+          members that use <code>edition.workspace = true</code> and <code>{ workspace = true }</code>; then run
+          <code>pixi run cargo test -p envtool_core</code>. Add Pixi tasks <code>test</code>, <code>lint</code>, and
+          <code>fmt</code> to <code>pixi.toml</code> that run the Cargo commands.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="quiz">
+    <h2>Quiz</h2>
+    <div class="quiz" data-id="m01-quiz">
+      <script type="application/json">
+      {"title": "Cargo, crates and modules quiz", "passScore": 0.7, "questions": [
+        {"type": "single", "prompt": "You are fixing type errors and want the fastest feedback. Which command?", "options": ["<code>pixi run cargo build --release</code>", "<code>pixi run cargo check</code>", "<code>pixi run cargo run</code>", "<code>pixi run cargo fmt</code>"], "answer": 1,
+         "explanation": "<p><code>cargo check</code> runs the type and borrow checkers without generating code, so it is the quickest way to see compile errors.</p>"},
+        {"type": "single", "prompt": "In <code>Cargo.toml</code>, what does <code>itertools = \"0.15.0\"</code> accept?", "options": ["Exactly 0.15.0", "<code>&gt;=0.15.0, &lt;0.16.0</code>", "<code>&gt;=0.15.0</code> with no upper bound", "<code>0.15.*</code> only"], "answer": 1,
+         "explanation": "<p>A bare version is a caret requirement. For 0.x versions the minor number is the compatibility boundary, so 0.16 would be a breaking release.</p>"},
+        {"type": "multi", "prompt": "Which statements about packages and crates are true?", "options": ["A package is a directory with a <code>Cargo.toml</code>", "A package can have at most one library crate", "A package can have several binary crates", "<code>src/main.rs</code> is the root of the library crate"], "answer": [0, 1, 2],
+         "explanation": "<p><code>src/lib.rs</code> is the library root; <code>src/main.rs</code> and <code>src/bin/*.rs</code> are binary roots.</p>"},
+        {"type": "single", "prompt": "Where does a dependency used only by your tests belong?", "options": ["<code>[dependencies]</code>", "<code>[dev-dependencies]</code>", "<code>[workspace]</code>", "<code>Cargo.lock</code>"], "answer": 1,
+         "explanation": "<p>Dev-dependencies are available to tests, examples, and benchmarks, and are not compiled into your program. Pixi lists <code>insta</code> and <code>tempfile</code> there.</p>"},
+        {"type": "single", "prompt": "You created <code>src/environment.rs</code> but nothing declares <code>mod environment;</code>. What happens?", "options": ["Cargo compiles it automatically", "The file is ignored; it is not part of the crate", "A compile error: file not declared", "It becomes a binary"], "answer": 1,
+         "explanation": "<p>Modules exist only when a parent declares them. An undeclared file is never read by the compiler, so mistakes in it go unnoticed too.</p>"},
+        {"type": "single", "prompt": "Where does the body of <code>mod host;</code> live, if it is declared in <code>src/platform.rs</code>?", "options": ["<code>src/host.rs</code>", "<code>src/platform/host.rs</code> or <code>src/platform/host/mod.rs</code>", "<code>src/platform.rs</code> itself", "<code>src/lib/host.rs</code>"], "answer": 1,
+         "explanation": "<p>Children of <code>platform</code> live in the <code>platform/</code> directory, as in Pixi's <code>pixi_manifest/src/platform/host.rs</code>.</p>"},
+        {"type": "output", "prompt": "What does this print?", "code": "mod outer {\n    pub fn who() -> &'static str { \"outer\" }\n    pub mod inner {\n        pub fn who() -> &'static str { \"inner\" }\n        pub fn report() -> String {\n            format!(\"{} {} {}\", self::who(), super::who(), crate::who())\n        }\n    }\n}\n\nfn who() -> &'static str { \"root\" }\n\nfn main() {\n    println!(\"{}\", outer::inner::report());\n}", "answer": "inner outer root",
+         "explanation": "<p><code>self::</code> is the current module (<code>inner</code>), <code>super::</code> its parent (<code>outer</code>), and <code>crate::</code> the crate root.</p>"},
+        {"type": "single", "prompt": "Does this compile?", "code": "mod platform {\n    fn detect() -> &'static str { \"linux-64\" }\n}\n\nfn main() {\n    println!(\"{}\", platform::detect());\n}", "options": ["Yes, it prints linux-64", "No: E0603, function `detect` is private", "No: E0432, unresolved import", "No: E0583, file not found for module"], "answer": 1,
+         "explanation": "<p>Items are private by default. <code>main</code> is in the crate root, outside <code>platform</code>, so it cannot call <code>detect</code> until it is <code>pub</code>.</p>"},
+        {"type": "single", "prompt": "Does this compile?", "code": "mod cli {\n    fn binary() -> &'static str { \"pixi\" }\n    pub mod run {\n        pub fn command() -> String {\n            format!(\"{} run\", super::binary())\n        }\n    }\n}\n\nfn main() {\n    println!(\"{}\", cli::run::command());\n}", "options": ["Yes: a child module may use its parent's private items", "No: <code>binary</code> is private", "No: <code>super</code> is not allowed in functions"], "answer": 0,
+         "explanation": "<p>Privacy flows downward. <code>cli::run</code> is inside <code>cli</code>, so it may call <code>cli</code>'s private <code>binary</code>. It prints <code>pixi run</code>.</p>"},
+        {"type": "text", "prompt": "Which error code means \"unresolved import\" (a <code>use</code> path that does not exist)?", "answer": ["E0432"],
+         "explanation": "<p><code>E0432</code> is for <code>use</code> declarations; <code>E0433</code> (\"failed to resolve\") is for paths written in code.</p>"},
+        {"type": "single", "prompt": "<code>pixi_manifest</code> has a private <code>mod environment;</code> and <code>pub use environment::EnvironmentName;</code>. How does another crate name the type?", "options": ["<code>pixi_manifest::environment::EnvironmentName</code>", "<code>pixi_manifest::EnvironmentName</code>", "<code>crate::EnvironmentName</code>", "It cannot use it"], "answer": 1,
+         "explanation": "<p>The re-export puts the name at the crate root. The path through the private module is rejected.</p>"},
+        {"type": "multi", "prompt": "In a member crate of Pixi's workspace, what does <code>serde = { workspace = true }</code> mean?", "options": ["The version comes from <code>[workspace.dependencies]</code> in the root <code>Cargo.toml</code>", "The member can still add <code>features</code> on top", "Each member gets its own copy of serde at a different version", "serde is a member of the workspace"], "answer": [0, 1],
+         "explanation": "<p>The workspace declares the version once; members inherit it and may add features or <code>optional = true</code>. All members share one <code>Cargo.lock</code>, so they use the same version.</p>"},
+        {"type": "single", "prompt": "Why does Pixi commit <code>Cargo.lock</code> and build releases with <code>--locked</code>?", "options": ["Cargo cannot build without it", "So every build uses exactly the reviewed dependency versions", "To make compilation faster", "Because crates.io requires it"], "answer": 1,
+         "explanation": "<p>The lock file records the exact version and checksum of every crate. <code>--locked</code> fails instead of silently changing it.</p>"},
+        {"type": "text", "prompt": "Which <code>[workspace]</code> key in Pixi's root <code>Cargo.toml</code> makes a plain <code>cargo build</code> build only <code>crates/pixi</code>?", "answer": ["default-members"],
+         "explanation": "<p><code>default-members = [\"crates/pixi\"]</code>. Use <code>--workspace</code> to build every member or <code>-p name</code> for one.</p>"}
+      ]}
+      </script>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="recap">
+    <h2>Recap</h2>
+    <ul>
+      <li>Cargo builds, runs, tests, lints, and formats. Run it as <code>pixi run cargo ...</code>; use
+        <code>check</code> while editing and <code>clippy</code> + <code>fmt</code> before you are done.</li>
+      <li><code>Cargo.toml</code> has <code>[package]</code>, <code>[dependencies]</code>, and
+        <code>[dev-dependencies]</code>. A bare version is a caret requirement. Hyphens in crate names become
+        underscores in code.</li>
+      <li>A package is a <code>Cargo.toml</code>; a crate is a compiled unit. <code>src/lib.rs</code> is the library
+        root, <code>src/main.rs</code> the binary root. Keep <code>main.rs</code> thin.</li>
+      <li>Modules are declared by their parent with <code>mod</code>. Bodies live inline, in <code>name.rs</code>, or in
+        <code>name/mod.rs</code>; children go in <code>name/</code>.</li>
+      <li>Everything is private unless <code>pub</code>. Children see their ancestors' private items.</li>
+      <li>Paths start from <code>crate::</code>, <code>super::</code>, <code>self::</code>, or an external crate's name.
+        <code>use</code> only creates names; <code>pub use</code> re-exports them.</li>
+      <li><code>Cargo.lock</code> pins exact versions; commit it. A workspace shares one lock file and one
+        <code>target/</code>, and declares versions once in <code>[workspace.dependencies]</code>.</li>
+    </ul>
+    <div class="flashcards" data-title="Cargo, crates and modules">
+      <script type="application/json">
+      [{"front": "<code>cargo check</code>", "back": "Type-check and borrow-check without producing a binary. The fastest way to see compile errors."},
+       {"front": "<code>[dev-dependencies]</code>", "back": "Crates used only by tests, examples, and benchmarks; not compiled into the program."},
+       {"front": "<code>regex = \"1.11\"</code> in Cargo.toml", "back": "A caret requirement: <code>&gt;=1.11.0, &lt;2.0.0</code>. (In pixi.toml, <code>\"1.11\"</code> would mean <code>1.11.*</code>.)"},
+       {"front": "Package vs crate", "back": "A package is a directory with a <code>Cargo.toml</code>. A crate is one compiled unit (a library or a binary). A package has at most one library and any number of binaries."},
+       {"front": "Crate roots", "back": "<code>src/lib.rs</code> for the library, <code>src/main.rs</code> for the main binary, <code>src/bin/*.rs</code> for extra binaries."},
+       {"front": "<code>mod foo;</code> in <code>src/lib.rs</code>", "back": "Declares module <code>foo</code>; its body is in <code>src/foo.rs</code> or <code>src/foo/mod.rs</code>. Undeclared files are ignored."},
+       {"front": "<code>crate::</code> / <code>super::</code> / <code>self::</code>", "back": "The crate root / the parent module / the current module."},
+       {"front": "Who can use a private item?", "back": "The module that defines it and all of that module's descendants."},
+       {"front": "<code>pub use a::B;</code>", "back": "A re-export: <code>B</code> becomes public at this module's path, even if module <code>a</code> is private."},
+       {"front": "<code>E0603</code> / <code>E0432</code>", "back": "Private item used from outside / unresolved import in a <code>use</code>."},
+       {"front": "<code>serde = { workspace = true }</code>", "back": "Inherit the version declared in the root's <code>[workspace.dependencies]</code>; features may be added per member."},
+       {"front": "Why Pixi has 59 crates", "back": "Crates compile in parallel and recompile independently, and a crate boundary is a hard API boundary (only <code>pub</code> crosses it)."}]
+      </script>
+    </div>
+    <h3>Going further</h3>
+    <ul>
+      <li><a href="https://doc.rust-lang.org/book/ch07-00-managing-growing-projects-with-packages-crates-and-modules.html">The Rust Book, chapter 7: Packages, Crates, and Modules</a> and <a href="https://doc.rust-lang.org/book/ch14-03-cargo-workspaces.html">14.3: Cargo Workspaces</a></li>
+      <li><a href="https://doc.rust-lang.org/rust-by-example/mod.html">Rust by Example: Modules</a> and <a href="https://doc.rust-lang.org/rust-by-example/cargo.html">Cargo</a></li>
+      <li><a href="https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html">The Cargo Book: Specifying Dependencies</a> and <a href="https://doc.rust-lang.org/cargo/reference/workspaces.html">Workspaces</a></li>
+      <li><a href="https://doc.rust-lang.org/reference/items/modules.html">The Rust Reference: Modules</a> and <a href="https://doc.rust-lang.org/reference/visibility-and-privacy.html">Visibility and privacy</a></li>
+      <li>Pixi: <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/Cargo.toml">the workspace <code>Cargo.toml</code></a>, <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/lib.rs"><code>pixi_manifest/src/lib.rs</code></a>, and the <a href="../reference/pixi-codebase-map.html">Pixi codebase map</a></li>
+      <li>Next: <a href="m02-types-structs-enums.html">M02 Types, Structs &amp; Enums</a></li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

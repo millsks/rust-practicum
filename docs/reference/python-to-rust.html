@@ -1,0 +1,697 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Python to Rust Cheat Sheet · Rust Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-rust.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-page="ref-python-to-rust">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Reference · Translation table</p>
+    <h1>Python to Rust Cheat Sheet</h1>
+    <p class="lede">The things you do every day in Python, next to how you do them in Rust. Each row links to the
+      module that teaches it properly; this page is for looking things up, not for learning them the first time.</p>
+    <div class="lesson-meta"><span>⏱ Look things up as you go</span><span>Rust 1.95, edition 2024</span></div>
+    <ul class="objectives">
+      <li>Translate a Python habit into the Rust idiom that replaces it</li>
+      <li>See the difference that matters (ownership, types, errors) at a glance</li>
+      <li>Jump to the module that teaches each idea</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="at-a-glance">
+    <h2>At a glance</h2>
+    <table>
+      <thead><tr><th>Python</th><th>Rust</th><th>Taught in</th></tr></thead>
+      <tbody>
+        <tr><td><code>x = 1</code>; reassign freely</td><td><code>let x = 1;</code> is immutable; <code>let mut x</code> to change it; shadowing with a new <code>let</code></td><td><a href="../modules/m02-types-structs-enums.html">M02</a></td></tr>
+        <tr><td><code>int</code>, <code>float</code>, <code>int(x)</code></td><td><code>i32</code>, <code>u64</code>, <code>f64</code>, ...; <code>as</code> casts; <code>TryFrom</code> for checked ones</td><td><a href="../modules/m02-types-structs-enums.html">M02</a></td></tr>
+        <tr><td><code>str</code>, f-strings</td><td><code>String</code> (owned) and <code>&amp;str</code> (borrowed); <code>format!("{name}")</code></td><td><a href="../modules/m02-types-structs-enums.html">M02</a>, <a href="../modules/m03-ownership-borrowing.html">M03</a></td></tr>
+        <tr><td><code>b = a</code> (two names, one object)</td><td><code>let b = a;</code> moves ownership; <code>&amp;a</code> borrows; <code>a.clone()</code> copies</td><td><a href="../modules/m03-ownership-borrowing.html">M03</a></td></tr>
+        <tr><td><code>list</code>, <code>dict</code>, <code>set</code></td><td><code>Vec&lt;T&gt;</code>, <code>HashMap&lt;K, V&gt;</code>/<code>BTreeMap</code>, <code>HashSet&lt;T&gt;</code></td><td><a href="../modules/m05-collections-iterators.html">M05</a></td></tr>
+        <tr><td>Comprehensions, <code>sum</code>, <code>any</code></td><td>Iterator chains: <code>.iter().map(..).filter(..).collect()</code></td><td><a href="../modules/m05-collections-iterators.html">M05</a>, <a href="../modules/m09-closures-iterators.html">M09</a></td></tr>
+        <tr><td><code>None</code>, <code>Optional[T]</code></td><td><code>Option&lt;T&gt;</code>: <code>Some(x)</code> or <code>None</code>, checked by the compiler</td><td><a href="../modules/m04-option-result.html">M04</a></td></tr>
+        <tr><td><code>raise</code> / <code>try</code> / <code>except</code></td><td><code>Result&lt;T, E&gt;</code>, <code>?</code> to propagate, <code>match</code> to handle; <code>panic!</code> for bugs</td><td><a href="../modules/m04-option-result.html">M04</a></td></tr>
+        <tr><td><code>class</code> with methods</td><td><code>struct</code> for data, <code>impl</code> for methods, traits for shared behavior</td><td><a href="../modules/m02-types-structs-enums.html">M02</a>, <a href="../modules/m06-traits-generics.html">M06</a></td></tr>
+        <tr><td>ABCs, <code>Protocol</code></td><td>Traits; <code>impl Trait</code>/generics (static) or <code>dyn Trait</code> (dynamic)</td><td><a href="../modules/m06-traits-generics.html">M06</a></td></tr>
+        <tr><td><code>@dataclass</code></td><td><code>#[derive(Debug, Clone, PartialEq, Default)]</code></td><td><a href="../modules/m02-types-structs-enums.html">M02</a>, <a href="../modules/m06-traits-generics.html">M06</a></td></tr>
+        <tr><td><code>__str__</code> / <code>__repr__</code></td><td><code>impl Display</code> (<code>{}</code>) / <code>#[derive(Debug)]</code> (<code>{:?}</code>)</td><td><a href="../modules/m06-traits-generics.html">M06</a></td></tr>
+        <tr><td><code>list[T]</code>, <code>TypeVar</code>, <code>Generic[T]</code></td><td><code>fn f&lt;T: Bound&gt;(..)</code>, <code>struct S&lt;T&gt;</code>, checked and compiled per type</td><td><a href="../modules/m06-traits-generics.html">M06</a></td></tr>
+        <tr><td><code>def f(x=None)</code>, keyword arguments</td><td><code>Option&lt;T&gt;</code> parameters, an options struct with <code>Default</code>, or a builder</td><td><a href="../modules/m04-option-result.html">M04</a>, <a href="../modules/m06-traits-generics.html">M06</a></td></tr>
+        <tr><td><code>__iter__</code> / <code>__next__</code>, generators</td><td><code>impl Iterator</code> with <code>type Item</code> and <code>fn next</code></td><td><a href="../modules/m09-closures-iterators.html">M09</a></td></tr>
+        <tr><td><code>with open(...) as f:</code></td><td>Values clean up when their owner goes out of scope (<code>Drop</code>, RAII)</td><td><a href="../modules/m03-ownership-borrowing.html">M03</a>, <a href="../modules/m08-smart-pointers.html">M08</a></td></tr>
+        <tr><td><code>threading</code>, the GIL</td><td>Real parallel threads; <code>Send</code>/<code>Sync</code>, <code>Arc&lt;Mutex&lt;T&gt;&gt;</code> checked at compile time</td><td><a href="../modules/m08-smart-pointers.html">M08</a></td></tr>
+        <tr><td>Modules, packages, <code>import</code></td><td><code>mod</code>, crates, <code>use</code>; <code>pub</code> to export</td><td><a href="../modules/m01-cargo-crates-modules.html">M01</a>, <a href="../modules/m10-crate-design.html">M10</a></td></tr>
+        <tr><td><code>pyproject.toml</code>, <code>pip install</code></td><td><code>Cargo.toml</code>, <code>pixi run cargo add</code>, <code>Cargo.lock</code></td><td><a href="../modules/m01-cargo-crates-modules.html">M01</a></td></tr>
+        <tr><td><code>pytest</code></td><td><code>#[test]</code>, <code>assert_eq!</code>, <code>pixi run cargo test</code>, insta, nextest</td><td><a href="../modules/m11-testing.html">M11</a></td></tr>
+      </tbody>
+    </table>
+    <aside class="callout warn"><p>The two biggest differences are not syntax. First, every value in Rust has exactly
+      one owner, so assignment and function calls <em>move</em> values unless you borrow them
+      (<a href="../modules/m03-ownership-borrowing.html">M03</a>). Second, errors are ordinary return values, so the
+      type of a function tells you whether it can fail (<a href="../modules/m04-option-result.html">M04</a>).</p></aside>
+  </section>
+
+  <section class="lesson-section" id="values">
+    <h2>Variables, numbers, and strings</h2>
+
+    <h3 id="variables">Variables and mutability</h3>
+    <p>Python names can be rebound and the objects they point to can usually be mutated. Rust bindings are immutable
+      unless you write <code>mut</code>, which makes every place that changes state visible.
+      <a href="../modules/m02-types-structs-enums.html">M02</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">name = "pixi"
+count = 0
+count += 1
+count = count * 2         # same name, rebound
+MAX_JOBS = 8              # a constant by convention only</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">let name = "pixi";          // immutable by default
+let mut count = 0;          // opt in to mutation
+count += 1;
+let count = count * 2;      // shadowing: a new binding, may change type
+const MAX_JOBS: usize = 8;  // a real compile-time constant</code></pre></div>
+    </div>
+
+    <h3 id="numbers">Numbers and casts</h3>
+    <p>Python has one unbounded <code>int</code>. Rust has sized integers (<code>i8</code> to <code>i128</code>,
+      <code>u8</code> to <code>u128</code>, <code>isize</code>/<code>usize</code>) and never converts between them
+      silently. Overflow panics in debug builds and wraps in release builds, so use <code>checked_*</code> when it can
+      happen. <a href="../modules/m02-types-structs-enums.html">M02</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">c = 7 + 2          # ints mix freely
+d = 7 // 2         # 3
+e = 7 / 2          # 3.5
+f = -7 % 3         # 2
+n = int("42")
+small = 300 % 256  # 44, only if you ask for it</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">let a: i32 = 7;
+let b: i64 = 2;
+let c = a as i64 + b;                 // explicit cast; no silent widening
+let d = 7 / 2;                        // 3: integer division for integers
+let e = 7.0 / 2.0;                    // 3.5
+let f = (-7_i32).rem_euclid(3);       // 2 (plain % gives -1)
+let n: i32 = "42".parse().unwrap();   // parse returns a Result
+let small = 300_u16 as u8;            // 44: `as` truncates
+let checked = u8::try_from(300_u16);  // Err(..): checked conversion
+let sum = 255_u8.checked_add(1);      // None instead of overflow</code></pre></div>
+    </div>
+
+    <h3 id="strings">Strings, f-strings, and format!</h3>
+    <p>Rust has two main string types. <code>String</code> owns a growable UTF-8 buffer; <code>&amp;str</code> is a
+      borrowed view into one (string literals are <code>&amp;'static str</code>). Functions usually take
+      <code>&amp;str</code> and return <code>String</code>. Format strings capture variables by name, like f-strings.
+      <a href="../modules/m02-types-structs-enums.html">M02</a>, <a href="../modules/m03-ownership-borrowing.html">M03</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">name = "pixi"
+owned = "rattler"
+owned += "-build"
+msg = f"{name} has {n} deps"
+padded = f"{n:&gt;4}|{name:&lt;6}|{3.14159:.2f}"
+parts = "a,b,c".split(",")
+joined = "-".join(parts)
+"  x  ".strip(); name.startswith("pi"); name.upper()</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">let name = "pixi";                        // &amp;str: borrowed text
+let mut owned = String::from("rattler");  // String: owned, growable
+owned.push_str("-build");
+let msg = format!("{name} has {n} deps");
+let padded = format!("{n:&gt;4}|{name:&lt;6}|{:.2}", 3.14159);
+let parts: Vec&lt;&amp;str&gt; = "a,b,c".split(',').collect();
+let joined = parts.join("-");
+"  x  ".trim(); name.starts_with("pi"); name.to_uppercase();</code></pre></div>
+    </div>
+    <aside class="callout tip"><p><code>println!</code> prints with a newline, <code>eprintln!</code> prints to stderr,
+      and <code>format!</code> returns a <code>String</code>. <code>{:?}</code> uses <code>Debug</code>,
+      <code>{}</code> uses <code>Display</code>, and <code>{x:#?}</code> pretty-prints.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="ownership">
+    <h2>Assignment, ownership, and borrowing</h2>
+    <p>In Python, <code>b = a</code> makes a second name for the same list, and both can change it. In Rust,
+      <code>let b = a;</code> moves the value: <code>a</code> can no longer be used (error E0382). To let a function
+      look at a value without taking it, pass a reference. <a href="../modules/m03-ownership-borrowing.html">M03</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">a = ["linux-64"]
+b = a              # same list, two names
+b.append("osx-arm64")
+print(a)           # both see the change
+
+def count(platforms: list[str]) -&gt; int:
+    return len(platforms)</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">let a = vec![String::from("linux-64")];
+let b = a;                     // move: `a` is no longer usable
+// println!("{a:?}");          // error[E0382]: borrow of moved value
+let c = b.clone();             // an explicit, independent copy
+
+fn count(platforms: &amp;[String]) -&gt; usize {  // borrow, do not take
+    platforms.len()
+}
+let n = count(&amp;b);             // `b` is still usable afterwards</code></pre></div>
+    </div>
+    <table>
+      <thead><tr><th>You want to</th><th>Parameter type</th></tr></thead>
+      <tbody>
+        <tr><td>Read a value</td><td><code>&amp;T</code> (<code>&amp;str</code> for text, <code>&amp;[T]</code> for a list)</td></tr>
+        <tr><td>Change the caller's value in place</td><td><code>&amp;mut T</code></td></tr>
+        <tr><td>Keep or consume the value</td><td><code>T</code> (the caller moves it in, or clones first)</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="lesson-section" id="collections">
+    <h2>Collections and iteration</h2>
+
+    <h3 id="list-dict-set">Lists, dicts, and sets</h3>
+    <p><code>Vec&lt;T&gt;</code> is a list whose elements all have type <code>T</code>. <code>HashMap</code> is a dict
+      with unspecified iteration order (it changes between runs); use <code>BTreeMap</code> for sorted keys, or
+      <code>IndexMap</code> (a crate Pixi uses) to keep insertion order like a Python dict.
+      <a href="../modules/m05-collections-iterators.html">M05</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">nums = [3, 1, 2]
+nums.append(4); nums.sort()
+first = nums[0]
+deps = {"python": "&gt;=3.12"}
+spec = deps.get("python")          # None if missing
+deps.setdefault("numpy", "*")
+platforms = {"linux-64", "osx-arm64"}
+"linux-64" in platforms; len(nums)</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">let mut nums = vec![3, 1, 2];
+nums.push(4); nums.sort();
+let first = nums[0];               // panics if out of range
+let maybe = nums.get(10);          // Option: None instead of IndexError
+let mut deps: HashMap&lt;String, String&gt; = HashMap::new();
+deps.insert("python".to_string(), "&gt;=3.12".to_string());
+let spec = deps.get("python");     // Option&lt;&amp;String&gt;
+deps.entry("numpy".to_string()).or_insert("*".to_string());
+let platforms: HashSet&lt;&amp;str&gt; = ["linux-64", "osx-arm64"].into_iter().collect();
+platforms.contains("linux-64"); nums.len();</code></pre></div>
+    </div>
+
+    <h3 id="comprehensions">Comprehensions and iterator chains</h3>
+    <p>A comprehension becomes an iterator chain ending in a <em>consumer</em> such as <code>collect</code>,
+      <code>sum</code>, or <code>any</code>. Adapters like <code>map</code> and <code>filter</code> are lazy: nothing
+      runs until the consumer pulls values. <code>iter()</code> borrows the elements, <code>iter_mut()</code> borrows
+      them mutably, and <code>into_iter()</code> takes them. <a href="../modules/m05-collections-iterators.html">M05</a>,
+      <a href="../modules/m09-closures-iterators.html">M09</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">squares = [n * n for n in nums]
+even_squares = [n * n for n in nums if n % 2 == 0]
+by_name = {s: len(s) for s in ["pixi", "uv"]}
+total = sum(nums)
+any_big = any(n &gt; 4 for n in nums)
+for i, n in enumerate(nums):
+    print(f"{i}: {n}")</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">let squares: Vec&lt;i32&gt; = nums.iter().map(|n| n * n).collect();
+let even_squares: Vec&lt;i32&gt; =
+    nums.iter().filter(|n| *n % 2 == 0).map(|n| n * n).collect();
+let by_name: HashMap&lt;&amp;str, usize&gt; =
+    ["pixi", "uv"].iter().map(|s| (*s, s.len())).collect();
+let total: i32 = nums.iter().sum();
+let any_big = nums.iter().any(|n| *n &gt; 4);
+for (i, n) in nums.iter().enumerate() {
+    println!("{i}: {n}");
+}</code></pre></div>
+    </div>
+    <div class="runnable" data-title="Try it: a comprehension as a chain">
+<textarea>
+fn main() {
+    let nums = vec![1, 2, 3, 4, 5];
+    let even_squares: Vec<i32> = nums.iter().filter(|n| *n % 2 == 0).map(|n| n * n).collect();
+    let total: i32 = nums.iter().sum();
+    println!("{even_squares:?} {total}");
+}
+</textarea>
+    </div>
+
+    <h3 id="iterators">The iteration protocol and Iterator</h3>
+    <p>Python's <code>__iter__</code>/<code>__next__</code> (or a generator) becomes one trait method: <code>next</code>
+      returns <code>Some(item)</code> or <code>None</code> when done, in place of raising <code>StopIteration</code>.
+      Implementing <code>next</code> gives you every adapter for free. <a href="../modules/m09-closures-iterators.html">M09</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">def countdown(n: int):
+    while n &gt; 0:
+        yield n
+        n -= 1
+
+list(countdown(3))   # [3, 2, 1]</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">struct Countdown { n: u32 }
+
+impl Iterator for Countdown {
+    type Item = u32;
+    fn next(&amp;mut self) -&gt; Option&lt;u32&gt; {
+        if self.n == 0 { return None; }
+        self.n -= 1;
+        Some(self.n + 1)
+    }
+}
+
+let v: Vec&lt;u32&gt; = Countdown { n: 3 }.collect();   // [3, 2, 1]</code></pre></div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="absence-and-errors">
+    <h2>None, exceptions, and default arguments</h2>
+
+    <h3 id="option">None and Option</h3>
+    <p>Any Python value might be <code>None</code>, and the type checker only helps if you annotate. In Rust a value
+      that might be missing has type <code>Option&lt;T&gt;</code>, and you cannot use the <code>T</code> inside without
+      handling <code>None</code>. <a href="../modules/m04-option-result.html">M04</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">def find_env(name: str) -&gt; int | None:
+    return 0 if name == "default" else None
+
+idx = find_env("test")
+if idx is not None:
+    print(idx)
+idx = find_env("test") or 0</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">fn find_env(name: &amp;str) -&gt; Option&lt;usize&gt; {
+    if name == "default" { Some(0) } else { None }
+}
+
+if let Some(idx) = find_env("test") {
+    println!("{idx}");
+}
+let idx = find_env("test").unwrap_or(0);
+let label = find_env("test").map(|i| i.to_string()).unwrap_or_else(|| "none".to_string());</code></pre></div>
+    </div>
+
+    <h3 id="result">Exceptions and Result with ?</h3>
+    <p>A function that can fail returns <code>Result&lt;T, E&gt;</code>: <code>Ok(value)</code> or
+      <code>Err(error)</code>. The <code>?</code> operator is the "let it propagate" of Rust: on <code>Err</code> it
+      returns the error from the current function (converting it with <code>From</code>), on <code>Ok</code> it unwraps
+      the value. <code>panic!</code>, <code>unwrap()</code>, and <code>expect()</code> are for bugs, not for expected
+      failures. <a href="../modules/m04-option-result.html">M04</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">class ManifestError(Exception): ...
+
+def read_version(text: str) -&gt; int:
+    if not text.startswith("version="):
+        raise ManifestError("missing key `version`")
+    try:
+        return int(text.removeprefix("version="))
+    except ValueError:
+        raise ManifestError("bad version on line 1")
+
+def caller() -&gt; None:
+    v = read_version("version=3")   # exceptions propagate implicitly</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">#[derive(Debug)]
+enum ManifestError {
+    Missing(String),
+    BadVersion { line: usize },
+}
+// plus `impl Display` and `impl std::error::Error` (M04)
+
+fn read_version(text: &amp;str) -&gt; Result&lt;u32, ManifestError&gt; {
+    let raw = text
+        .strip_prefix("version=")
+        .ok_or(ManifestError::Missing("version".into()))?;
+    raw.trim().parse().map_err(|_| ManifestError::BadVersion { line: 1 })
+}
+
+fn caller() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+    let v = read_version("version=3")?;   // propagation is explicit: `?`
+    Ok(())
+}</code></pre></div>
+    </div>
+    <aside class="callout pixi"><p>Pixi derives these impls with <code>thiserror</code> and reports errors to the user
+      with <code>miette</code>, so most Pixi functions return <code>miette::Result&lt;T&gt;</code>. M04 shows what those
+      crates generate; Level 2 teaches them.</p></aside>
+
+    <h3 id="defaults">None-default arguments, Option parameters, and builders</h3>
+    <p>Rust has no default or keyword arguments. For one optional value, take an <code>Option</code>. For many, take
+      an options struct that implements <code>Default</code> and use struct update syntax (<code>..Default::default()</code>),
+      or write a builder with chained setter methods (Pixi's <code>WorkspaceLocator::for_cli().with_search_start(..)</code>
+      is one). <a href="../modules/m04-option-result.html">M04</a>, <a href="../modules/m06-traits-generics.html">M06</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">def install(name: str, version: str | None = None,
+            no_install: bool = False) -&gt; str: ...
+
+install("numpy")
+install("numpy", version="2.0")
+install("numpy", no_install=True)</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">#[derive(Default)]
+struct InstallOptions {
+    version: Option&lt;String&gt;,
+    no_install: bool,
+}
+
+fn install(name: &amp;str, opts: InstallOptions) -&gt; String { /* ... */ }
+
+install("numpy", InstallOptions::default());
+install("numpy", InstallOptions { version: Some("2.0".into()), ..Default::default() });
+install("numpy", InstallOptions { no_install: true, ..Default::default() });</code></pre></div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="types">
+    <h2>Classes, protocols, and generics</h2>
+
+    <h3 id="classes">Classes vs structs, impl, and traits</h3>
+    <p>A Python class bundles data, methods, and inheritance. Rust splits these: a <code>struct</code> holds data, an
+      <code>impl</code> block adds methods, and traits share behavior between types. There is no inheritance. Methods
+      say how they use <code>self</code>: <code>&amp;self</code> reads, <code>&amp;mut self</code> changes, and
+      <code>self</code> consumes. <code>new</code> is a convention, not a keyword.
+      <a href="../modules/m02-types-structs-enums.html">M02</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">class Workspace:
+    def __init__(self, name: str) -&gt; None:
+        self.name = name
+        self.platforms: list[str] = []
+
+    def add_platform(self, p: str) -&gt; None:
+        self.platforms.append(p)
+
+    def platform_count(self) -&gt; int:
+        return len(self.platforms)</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">struct Workspace {
+    name: String,
+    platforms: Vec&lt;String&gt;,
+}
+
+impl Workspace {
+    fn new(name: &amp;str) -&gt; Self {
+        Workspace { name: name.to_string(), platforms: Vec::new() }
+    }
+    fn add_platform(&amp;mut self, p: &amp;str) {
+        self.platforms.push(p.to_string());
+    }
+    fn platform_count(&amp;self) -&gt; usize {
+        self.platforms.len()
+    }
+}</code></pre></div>
+    </div>
+
+    <h3 id="traits">ABCs and Protocols vs traits</h3>
+    <p>A trait is a named set of methods a type promises to have, like an ABC (explicit implementation) with the
+      checking of a Protocol (at compile time). A trait can have default methods. Use a generic or
+      <code>impl Trait</code> when the type is known at compile time; use <code>dyn Trait</code> (behind a pointer such
+      as <code>Box</code> or <code>&amp;</code>) when you need a list of different types.
+      <a href="../modules/m06-traits-generics.html">M06</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">from abc import ABC, abstractmethod
+
+class Backend(ABC):
+    @abstractmethod
+    def name(self) -&gt; str: ...
+
+    def describe(self) -&gt; str:
+        return f"backend {self.name()}"
+
+class Python(Backend):
+    def name(self) -&gt; str:
+        return "python"
+
+backends: list[Backend] = [Python()]</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">trait Backend {
+    fn name(&amp;self) -&gt; String;
+    fn describe(&amp;self) -&gt; String {        // default method
+        format!("backend {}", self.name())
+    }
+}
+
+struct Python;
+impl Backend for Python {
+    fn name(&amp;self) -&gt; String { "python".into() }
+}
+
+fn print_backend(b: &amp;impl Backend) { println!("{}", b.describe()); }  // static
+let backends: Vec&lt;Box&lt;dyn Backend&gt;&gt; = vec![Box::new(Python)];       // dynamic</code></pre></div>
+    </div>
+
+    <h3 id="dataclasses">Dataclasses vs derive</h3>
+    <p><code>@dataclass</code> generates <code>__init__</code>, <code>__repr__</code>, and <code>__eq__</code>.
+      <code>#[derive(...)]</code> generates trait implementations the same way, and you choose exactly which ones.
+      <a href="../modules/m02-types-structs-enums.html">M02</a>, <a href="../modules/m06-traits-generics.html">M06</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class Package:
+    name: str = ""
+    version: str = ""</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+struct Package {
+    name: String,
+    version: String,
+}
+// Debug: {:?}   Clone: .clone()   PartialEq/Eq: ==
+// Hash: usable as a HashMap key   Default: Package::default()</code></pre></div>
+    </div>
+
+    <h3 id="str-repr">__str__ and __repr__ vs Display and Debug</h3>
+    <p><code>Display</code> is the user-facing text used by <code>{}</code> and <code>.to_string()</code>; you write it
+      by hand. <code>Debug</code> is the developer-facing text used by <code>{:?}</code>; you almost always derive it.
+      <a href="../modules/m06-traits-generics.html">M06</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">class Version:
+    def __init__(self, major: int, minor: int) -&gt; None:
+        self.major, self.minor = major, minor
+
+    def __str__(self) -&gt; str:
+        return f"{self.major}.{self.minor}"
+
+    def __repr__(self) -&gt; str:
+        return f"Version(major={self.major}, minor={self.minor})"</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">use std::fmt;
+
+#[derive(Debug)]                 // Version { major: 1, minor: 2 }
+struct Version { major: u32, minor: u32 }
+
+impl fmt::Display for Version {  // 1.2
+    fn fmt(&amp;self, f: &amp;mut fmt::Formatter&lt;'_&gt;) -&gt; fmt::Result {
+        write!(f, "{}.{}", self.major, self.minor)
+    }
+}</code></pre></div>
+    </div>
+
+    <h3 id="generics">Typing generics vs Rust generics</h3>
+    <p>Python type parameters are hints a checker reads; at runtime one function handles every type. Rust generics are
+      checked by the compiler, and each concrete type gets its own compiled copy (monomorphization), so they cost
+      nothing at runtime. A <dfn>trait bound</dfn> (<code>T: PartialOrd</code>) says what the code needs from
+      <code>T</code>. <a href="../modules/m06-traits-generics.html">M06</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">def largest[T: (int, float)](items: list[T]) -&gt; T:
+    return max(items)
+
+class Stack[T]:
+    def __init__(self) -&gt; None:
+        self.items: list[T] = []
+    def push(self, item: T) -&gt; None:
+        self.items.append(item)
+    def pop(self) -&gt; T | None:
+        return self.items.pop() if self.items else None</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">fn largest&lt;T: PartialOrd + Copy&gt;(items: &amp;[T]) -&gt; T {
+    let mut best = items[0];
+    for &amp;item in items {
+        if item &gt; best { best = item; }
+    }
+    best
+}
+
+struct Stack&lt;T&gt; { items: Vec&lt;T&gt; }
+impl&lt;T&gt; Stack&lt;T&gt; {
+    fn push(&amp;mut self, item: T) { self.items.push(item); }
+    fn pop(&amp;mut self) -&gt; Option&lt;T&gt; { self.items.pop() }
+}</code></pre></div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="resources">
+    <h2>Cleanup and concurrency</h2>
+
+    <h3 id="with-drop">with vs Drop and RAII</h3>
+    <p>Python needs <code>with</code> to guarantee cleanup because objects live until the garbage collector frees
+      them. In Rust, a value is dropped the moment its owner goes out of scope, and its <code>Drop</code> impl runs
+      then. This pattern is called <dfn>RAII</dfn> (resource acquisition is initialization): files close, locks
+      release, and temporary directories disappear at the closing brace, on every path out of the scope.
+      <a href="../modules/m03-ownership-borrowing.html">M03</a>, <a href="../modules/m08-smart-pointers.html">M08</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">with open("pixi.toml") as f:
+    text = f.read()
+# closed here
+
+with lock:
+    counter += 1
+# released here</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">struct TempDir { path: String }
+
+impl Drop for TempDir {
+    fn drop(&amp;mut self) {
+        println!("removing {}", self.path);
+    }
+}
+
+fn work() {
+    let dir = TempDir { path: "/tmp/x".into() };
+    println!("using {}", dir.path);
+}   // `dir` is dropped here, even on an early return
+
+// A MutexGuard works the same way: *m.lock().unwrap() += 1; unlocks at the `;`</code></pre></div>
+    </div>
+
+    <h3 id="threads">Threads and the GIL vs Send and Sync</h3>
+    <p>Python threads take turns holding the GIL, so pure-Python code does not run in parallel, and data races are
+      prevented only for single bytecode steps. Rust threads run truly in parallel, and the compiler prevents data races
+      with two marker traits: <code>Send</code> (safe to move to another thread) and <code>Sync</code> (safe to share by
+      reference between threads). <code>Arc</code> shares ownership across threads; <code>Mutex</code> gives one thread
+      at a time mutable access. <a href="../modules/m08-smart-pointers.html">M08</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">import threading
+
+counter = 0
+lock = threading.Lock()
+
+def work() -&gt; None:
+    global counter
+    with lock:
+        counter += 1
+
+threads = [threading.Thread(target=work) for _ in range(4)]
+for t in threads: t.start()
+for t in threads: t.join()</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">use std::sync::{Arc, Mutex};
+use std::thread;
+
+let counter = Arc::new(Mutex::new(0));
+let mut handles = Vec::new();
+for _ in 0..4 {
+    let counter = Arc::clone(&amp;counter);
+    handles.push(thread::spawn(move || {
+        *counter.lock().unwrap() += 1;
+    }));
+}
+for h in handles { h.join().unwrap(); }
+// Using Rc instead of Arc here is a compile error (E0277: not Send)</code></pre></div>
+    </div>
+    <aside class="callout pixi"><p>Pixi is async (tokio) rather than thread-per-task, but the same rules apply: values
+      shared between tasks are wrapped in <code>Arc</code>, and a future must be <code>Send</code> to be spawned. Level 2
+      Stage 5 teaches async.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="projects">
+    <h2>Projects, dependencies, and tests</h2>
+
+    <h3 id="modules">Modules and packages vs mod and crates</h3>
+    <p>A Python package is a directory with modules you <code>import</code>. A Rust <dfn>crate</dfn> is one compilation
+      unit (a library or a binary); inside it, <code>mod</code> declares modules, which map to files. Everything is
+      private unless marked <code>pub</code>, and <code>pub use</code> re-exports, like names in an
+      <code>__init__.py</code>. <a href="../modules/m01-cargo-crates-modules.html">M01</a>,
+      <a href="../modules/m10-crate-design.html">M10</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python"># manifest/__init__.py
+from .parse import parse
+
+# manifest/parse.py
+def parse() -&gt; None: ...
+
+# elsewhere
+from manifest import parse</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">// src/lib.rs
+mod manifest;               // loads src/manifest.rs (or src/manifest/mod.rs)
+
+// src/manifest.rs
+pub mod parse;              // loads src/manifest/parse.rs
+pub use parse::parse;       // re-export
+
+// src/manifest/parse.rs
+pub fn parse() {}
+
+// elsewhere in the crate
+use crate::manifest::parse;</code></pre></div>
+    </div>
+
+    <h3 id="cargo">pyproject.toml and pip vs Cargo.toml (all through Pixi)</h3>
+    <p><code>Cargo.toml</code> is a Rust package's <code>pyproject.toml</code>: metadata, dependencies, and
+      dev-dependencies. <code>Cargo.lock</code> pins exact versions, like <code>pixi.lock</code>. In this course Pixi
+      provides the Rust toolchain itself, so every command goes through <code>pixi run</code>.
+      <a href="../modules/m01-cargo-crates-modules.html">M01</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-toml"># pyproject.toml
+[project]
+name = "hello"
+version = "0.1.0"
+dependencies = ["tomli&gt;=2"]
+
+# pixi.toml (the Python way, with Pixi)
+[dependencies]
+python = "3.14.*"
+pytest = "&gt;=9"</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-toml"># Cargo.toml
+[package]
+name = "hello"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+toml = "1"
+
+[dev-dependencies]
+insta = "1"</code></pre></div>
+    </div>
+    <pre data-label="Terminal"><code class="language-bash">pixi init hello-rust &amp;&amp; cd hello-rust
+pixi add rust                      # conda-forge's toolchain: rustc, cargo, clippy, rustfmt
+pixi run cargo init --name hello
+pixi run cargo add toml            # like adding to [project.dependencies]
+pixi run cargo add --dev insta
+pixi run cargo run</code></pre>
+
+    <h3 id="testing">pytest vs cargo test</h3>
+    <p>Rust tests are functions marked <code>#[test]</code>, usually in a <code>mod tests</code> at the bottom of the
+      file they test (so they can see private items). Integration tests go in <code>tests/</code>, like a pytest
+      directory. Pixi uses <code>insta</code> for snapshot tests and <code>cargo nextest</code> as its runner.
+      <a href="../modules/m11-testing.html">M11</a></p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">import pytest
+
+def test_parses_version() -&gt; None:
+    assert read_version("version=3") == 3
+
+def test_rejects_missing() -&gt; None:
+    with pytest.raises(ManifestError):
+        read_version("name=x")</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_version() {
+        assert_eq!(read_version("version=3").unwrap(), 3);
+    }
+
+    #[test]
+    fn rejects_missing() {
+        assert!(matches!(read_version("name=x"), Err(ManifestError::Missing(_))));
+    }
+}</code></pre></div>
+    </div>
+    <table>
+      <thead><tr><th>pytest</th><th>Rust</th></tr></thead>
+      <tbody>
+        <tr><td><code>pytest</code></td><td><code>pixi run cargo test</code> (or <code>cargo nextest run</code> in Pixi's repo)</td></tr>
+        <tr><td><code>pytest -k parse</code></td><td><code>pixi run cargo test parse</code></td></tr>
+        <tr><td><code>pytest.raises</code></td><td><code>matches!(result, Err(..))</code>, or <code>#[should_panic]</code> for panics</td></tr>
+        <tr><td>fixtures, <code>tmp_path</code></td><td>helper functions, the <code>tempfile</code> crate, <code>rstest</code></td></tr>
+        <tr><td><code>syrupy</code> / <code>inline-snapshot</code></td><td><code>insta::assert_snapshot!</code>, <code>cargo insta review</code></td></tr>
+        <tr><td><code>ruff check</code>, <code>ruff format</code></td><td><code>pixi run cargo clippy</code>, <code>pixi run cargo fmt</code></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="lesson-section" id="going-further">
+    <h2>Going further</h2>
+    <ul>
+      <li><a href="glossary.html">Glossary</a>: every term on this page, with a definition</li>
+      <li><a href="https://doc.rust-lang.org/book/">The Rust Programming Language</a> (the Rust Book)</li>
+      <li><a href="https://doc.rust-lang.org/rust-by-example/">Rust by Example</a></li>
+      <li><a href="https://doc.rust-lang.org/std/">The standard library documentation</a></li>
+      <li><a href="pixi-codebase-map.html">Pixi codebase map</a>: where these idioms appear in Pixi</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

@@ -1,0 +1,1316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M05 · Collections &amp; Iterators · Rust Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-rust.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-module="m05">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Stage 1 · The Core Language · Module 05</p>
+    <h1>Collections &amp; Iterators</h1>
+    <p class="lede">Almost every function in Pixi takes a collection of something (features, platforms, channels,
+      dependency specs) and turns it into another collection. In Python you do that with lists, dicts, sets, and
+      comprehensions. In Rust you do it with <code>Vec</code>, maps, sets, and iterator chains. This module teaches
+      you the collection types, the three ways to walk them, and the iterator vocabulary that makes up a large
+      share of the Pixi source.</p>
+    <div class="lesson-meta"><span>⏱ ~2.5 hours</span><span>Prerequisites: <a href="m03-ownership-borrowing.html">M03 Ownership &amp; Borrowing</a>, <a href="m04-option-result.html">M04 Option, Result &amp; ?</a></span></div>
+    <ul class="objectives">
+      <li>Choose between <code>Vec</code>, <code>HashMap</code>, <code>BTreeMap</code>, <code>HashSet</code>, and <code>BTreeSet</code>, and explain why Pixi often uses <code>IndexMap</code> instead</li>
+      <li>Use the entry API to count, group, and insert-if-missing with a single lookup</li>
+      <li>Explain the difference between <code>iter</code>, <code>iter_mut</code>, and <code>into_iter</code> in terms of ownership</li>
+      <li>Read and write iterator chains with <code>map</code>, <code>filter</code>, <code>filter_map</code>, <code>enumerate</code>, <code>zip</code>, <code>chain</code>, <code>flat_map</code>, <code>take</code>, and <code>skip</code></li>
+      <li>Finish a chain with the right consumer, and <code>collect</code> into a <code>Vec</code>, map, set, <code>String</code>, or <code>Result&lt;Vec&lt;_&gt;, _&gt;</code></li>
+      <li>Sort, deduplicate, and filter collections in place, including types that are not <code>Ord</code></li>
+      <li>Treat strings as collections of characters, lines, and fields without indexing them by number</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="vec">
+    <h2>Vec: the growable list</h2>
+    <p>In Python, <code>list</code> is the default container: it grows, it shrinks, and it can hold anything. Rust's
+      equivalent is <code>Vec&lt;T&gt;</code> (say "vector of T"). Two differences matter from the first line you
+      write:</p>
+    <ul>
+      <li><strong>Every element has the same type <code>T</code>.</strong> A <code>Vec&lt;String&gt;</code> holds
+        only <code>String</code>s. When you need a mix, you use an enum (M02) or a trait object (M06).</li>
+      <li><strong>The <code>Vec</code> owns its elements.</strong> The vector is a small value on the stack (a pointer,
+        a length, and a capacity) that owns a buffer on the heap. When the <code>Vec</code> is dropped, every element
+        is dropped with it. Everything you learned in M03 about moves and borrows applies to it.</li>
+    </ul>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">deps = ["python", "numpy"]
+deps.append("pandas")
+last = deps.pop()          # "pandas"
+print(len(deps), deps[0])  # 2 python
+deps[5]                    # IndexError</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">let mut deps = vec!["python", "numpy"];
+deps.push("pandas");
+let last = deps.pop();          // Some("pandas"): pop returns an Option
+println!("{} {}", deps.len(), deps[0]);
+deps[5];                        // panics: index out of bounds
+let maybe = deps.get(5);        // None: no panic</code></pre></div>
+    </div>
+    <p>The <code>vec!</code> macro builds a vector from a list of values. <code>Vec::new()</code> builds an empty one
+      (you then need <code>let mut</code> and usually a type annotation such as <code>Vec&lt;String&gt;</code> if
+      nothing tells the compiler what goes in it). <code>Vec::with_capacity(n)</code> reserves room for
+      <code>n</code> elements up front, which avoids repeated reallocations when you know the final size.</p>
+    <p>Notice where M04's lessons show up. <code>pop</code> returns <code>Option&lt;T&gt;</code> because the vector
+      might be empty. Indexing with <code>v[i]</code> panics when <code>i</code> is out of range, just as Python
+      raises <code>IndexError</code>, while <code>v.get(i)</code> returns <code>Option&lt;&amp;T&gt;</code> so you
+      can handle the missing case. Use <code>v[i]</code> when an out-of-range index would be a bug in your program;
+      use <code>get</code> when it is a normal possibility, such as reading user input.</p>
+    <div class="runnable" data-title="Predict: push, pop, get" data-predict>
+<textarea>
+fn main() {
+    let mut deps = vec!["python", "numpy"];
+    deps.push("pandas");
+    deps.push("polars");
+    let last = deps.pop();
+    println!("{last:?}");
+    println!("{}", deps.len());
+    println!("{:?}", deps.get(1));
+    println!("{:?}", deps.get(9));
+    println!("{:?}", &deps[1..]);
+}
+</textarea>
+    </div>
+    <p>The last line takes a <strong>slice</strong>, <code>&amp;deps[1..]</code>: a borrowed view of part of the
+      vector, of type <code>&amp;[&amp;str]</code>. M03 introduced slices; this is where they earn their keep.
+      Functions that only read a sequence should take <code>&amp;[T]</code>, not <code>&amp;Vec&lt;T&gt;</code>,
+      because a <code>&amp;Vec&lt;T&gt;</code> converts to <code>&amp;[T]</code> automatically and the slice type
+      also accepts arrays and sub-ranges.</p>
+
+    <h3>The borrow rules still apply</h3>
+    <p>A Python habit that does not survive: holding on to an element while you change the list. In Python that is
+      harmless. In Rust, <code>push</code> may need a bigger buffer, move every element to it, and free the old one.
+      A reference into the old buffer would then point at freed memory, so the borrow checker forbids it.</p>
+    <div class="runnable" data-title="Holding a reference across push" data-compile-fail>
+<textarea>
+fn main() {
+    let mut deps = vec!["python", "numpy"];
+    let first = &deps[0];
+    deps.push("pandas");
+    println!("{first}");
+}
+</textarea>
+    </div>
+    <p>The compiler reports <code>E0502: cannot borrow `deps` as mutable because it is also borrowed as
+      immutable</code>. Read the three labels in order: the immutable borrow starts at <code>&amp;deps[0]</code>,
+      the mutable borrow is <code>deps.push(...)</code>, and the immutable borrow is "later used here" in
+      <code>println!</code>. Any of three fixes works: print <code>first</code> before pushing, copy the value out
+      (<code>let first = deps[0];</code> works because <code>&amp;str</code> is <code>Copy</code>), or clone it
+      when the element is an owned type like <code>String</code>.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>Vec&lt;T&gt;</code> owns its elements; index with
+      <code>[i]</code> when out-of-range is a bug and with <code>get(i)</code> when it is expected; take
+      <code>&amp;[T]</code> in functions that only read; never hold a reference into a vector while you change it.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="maps">
+    <h2>Maps: HashMap, BTreeMap, and IndexMap</h2>
+    <p>Python has one mapping type, <code>dict</code>, and since Python 3.7 it remembers insertion order. Rust's
+      standard library has two, and neither remembers insertion order:</p>
+    <table>
+      <thead><tr><th>Type</th><th>Key requirement</th><th>Iteration order</th><th>Use it when</th></tr></thead>
+      <tbody>
+        <tr><td><code>HashMap&lt;K, V&gt;</code></td><td><code>K: Hash + Eq</code></td><td>Unspecified; it can change
+          between runs</td><td>You look things up by key and never print or compare the order</td></tr>
+        <tr><td><code>BTreeMap&lt;K, V&gt;</code></td><td><code>K: Ord</code></td><td>Sorted by key</td><td>You need
+          deterministic output, sorted keys, or range queries</td></tr>
+        <tr><td><code>IndexMap&lt;K, V&gt;</code> (crate <code>indexmap</code>)</td><td><code>K: Hash + Eq</code></td>
+          <td>Insertion order, like a Python <code>dict</code></td><td>The order the user wrote things in matters</td></tr>
+      </tbody>
+    </table>
+    <p><code>Hash</code>, <code>Eq</code>, and <code>Ord</code> are traits, which M06 covers properly. For now:
+      <code>String</code>, <code>&amp;str</code>, integers, <code>char</code>, <code>bool</code>, and tuples of those
+      all qualify for both maps. Floating-point numbers do not, because <code>NaN != NaN</code> breaks the rules a
+      map relies on.</p>
+    <p>The basic operations mirror <code>dict</code>, with M04's types in the return values:</p>
+    <pre><code class="language-rust">use std::collections::HashMap;
+
+let mut versions: HashMap&lt;String, String&gt; = HashMap::new();
+versions.insert("python".to_string(), "3.14".to_string());  // returns None: no previous value
+versions.insert("python".to_string(), "3.13".to_string());  // returns Some("3.14"): the old value
+let v: Option&lt;&amp;String&gt; = versions.get("python");       // look up with a &amp;str, no allocation
+let present: bool = versions.contains_key("numpy");
+let removed: Option&lt;String&gt; = versions.remove("python"); // the removed value, now owned by you</code></pre>
+    <p>Two details surprise Python developers. First, <code>get</code> returns <code>Option&lt;&amp;V&gt;</code>, a
+      reference into the map, not a copy; the map still owns the value. Second, a map with <code>String</code> keys
+      can be searched with a <code>&amp;str</code>. That works because <code>String</code> implements a trait called
+      <code>Borrow&lt;str&gt;</code>, which promises that a <code>String</code> and the <code>&amp;str</code> it
+      contains hash and compare the same way. You will see Pixi implement <code>Borrow&lt;str&gt;</code> for its own
+      name types so they can be looked up the same way.</p>
+    <p>Iteration is where the choice of map shows. Run this cell twice on the Playground: the <code>HashMap</code>
+      line can come out in a different order each time, while the <code>BTreeMap</code> line is always sorted.</p>
+    <div class="runnable" data-title="HashMap order is not stable; BTreeMap order is">
+<textarea>
+use std::collections::{BTreeMap, HashMap};
+
+fn main() {
+    let pairs = [("python", "3.14"), ("numpy", "2.*"), ("rich", ">=13"), ("pandas", "*")];
+
+    let hashed: HashMap<&str, &str> = pairs.into_iter().collect();
+    let sorted: BTreeMap<&str, &str> = pairs.into_iter().collect();
+
+    println!("HashMap:  {:?}", hashed.keys().collect::<Vec<_>>());
+    println!("BTreeMap: {:?}", sorted.keys().collect::<Vec<_>>());
+    println!("first key in sorted order: {:?}", sorted.keys().next());
+}
+</textarea>
+    </div>
+    <aside class="callout pixi"><p>Pixi reads a manifest the user wrote by hand, and users expect
+      <code>pixi list</code>, error messages, and the rewritten <code>pixi.toml</code> to keep their order. That is
+      why so many Pixi types use <code>IndexMap</code> and <code>IndexSet</code> from the <code>indexmap</code> crate:
+      a <code>Feature</code>'s <code>platforms</code> field is an <code>Option&lt;IndexSet&lt;PixiPlatformName&gt;&gt;</code>,
+      and the workspace's platform list is an <code>IndexSet&lt;PixiPlatform&gt;</code>. Their API is almost
+      identical to <code>HashMap</code>/<code>HashSet</code>, so everything in this module transfers. You do not need
+      them for the exercises.</p></aside>
+    <aside class="callout warn"><p>Course rule, and a real-world one: never print a <code>HashMap</code> or
+      <code>HashSet</code> directly in output someone will compare, such as a test expectation or a snapshot. Use a
+      <code>BTreeMap</code>, or collect and sort first. A test that passes only on lucky hash orders is a flaky
+      test.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>HashMap</code> for fast lookup with no order,
+      <code>BTreeMap</code> for sorted and deterministic, <code>IndexMap</code> (Pixi) for insertion order.
+      <code>insert</code> returns the old value, <code>get</code> returns a reference, <code>remove</code> gives the
+      value back to you.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="entry">
+    <h2>The entry API: one lookup, no double work</h2>
+    <p>In Python, counting and grouping use a few idioms you probably know by heart:</p>
+    <pre data-label="Python"><code class="language-python">counts = {}
+for word in words:
+    counts[word] = counts.get(word, 0) + 1
+
+groups = {}
+for name, platform in packages:
+    groups.setdefault(platform, []).append(name)   # or collections.defaultdict(list)</code></pre>
+    <p>Rust's version of <code>setdefault</code> is the <strong>entry API</strong>. <code>map.entry(key)</code>
+      looks the key up once and returns an <code>Entry</code>, a value that is either <em>occupied</em> (the key is
+      there) or <em>vacant</em> (it is not). Methods on the entry then say what to do in each case, and give you back a
+      <code>&amp;mut V</code> pointing at the value inside the map:</p>
+    <table>
+      <thead><tr><th>Method</th><th>If the key is missing</th><th>Python equivalent</th></tr></thead>
+      <tbody>
+        <tr><td><code>.or_insert(v)</code></td><td>Insert <code>v</code></td><td><code>d.setdefault(k, v)</code></td></tr>
+        <tr><td><code>.or_insert_with(|| make())</code></td><td>Call the closure and insert its result (only when missing)</td><td><code>defaultdict(make)</code></td></tr>
+        <tr><td><code>.or_default()</code></td><td>Insert <code>V::default()</code>: 0, empty <code>String</code>, empty <code>Vec</code></td><td><code>defaultdict(int)</code> / <code>defaultdict(list)</code></td></tr>
+        <tr><td><code>.and_modify(|v| ...)</code></td><td>Do nothing; when present, change the value first</td><td>no direct equivalent</td></tr>
+      </tbody>
+    </table>
+    <div class="runnable" data-title="Count and group with entry" data-predict>
+<textarea>
+use std::collections::BTreeMap;
+
+fn main() {
+    let words = ["pixi", "rust", "pixi", "conda", "pixi", "rust"];
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for word in words {
+        *counts.entry(word).or_insert(0) += 1;
+    }
+    println!("{counts:?}");
+
+    let packages = [("numpy", "linux-64"), ("rich", "noarch"), ("numpy", "osx-arm64"), ("polars", "linux-64")];
+    let mut by_platform: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (name, platform) in packages {
+        by_platform.entry(platform).or_default().push(name);
+    }
+    println!("{by_platform:?}");
+}
+</textarea>
+    </div>
+    <p>Two things to read carefully in <code>*counts.entry(word).or_insert(0) += 1</code>. <code>or_insert</code>
+      returns <code>&amp;mut usize</code>, a mutable reference to the count stored in the map, so you need the
+      <code>*</code> to change the number it points at. And the whole statement does one hash lookup, where the
+      Python version does two (<code>get</code>, then the assignment).</p>
+    <p>Why not just write it the Python way? You can (<code>if let Some(c) = counts.get_mut(word) { *c += 1 } else {
+      counts.insert(word, 1); }</code>), and it compiles. But the entry API is shorter, does one lookup, and states the
+      intent: "make sure this key exists, then work on its value." That intent is why it is idiomatic and why you will
+      see <code>.entry(...).or_default()</code> all through Pixi.</p>
+    <aside class="callout pixi"><p>When Pixi adds a dependency to a target, the first line is
+      <code>let deps = self.dependencies.entry(spec_type).or_default();</code>
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/target.rs#L394">crates/pixi_manifest/src/target.rs#L394</a>):
+      "get the dependency map for run, host, or build dependencies, creating an empty one if this target has none
+      yet," then it inserts into that map.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>map.entry(k).or_default()</code> is
+      <code>setdefault</code>/<code>defaultdict</code>. It returns <code>&amp;mut V</code>, so you either call a method
+      on it (<code>.push(x)</code>) or dereference it (<code>*... += 1</code>).</p></aside>
+  </section>
+
+  <section class="lesson-section" id="sets">
+    <h2>Sets: HashSet and BTreeSet</h2>
+    <p>A set is a map with keys and no values, and Rust's two sets follow the same split as the maps:
+      <code>HashSet&lt;T&gt;</code> (needs <code>Hash + Eq</code>, unordered) and <code>BTreeSet&lt;T&gt;</code> (needs
+      <code>Ord</code>, sorted). Pixi adds <code>IndexSet</code> for insertion order.</p>
+    <p><code>insert</code> returns a <code>bool</code>: <code>true</code> if the value was new, <code>false</code> if
+      it was already there. That makes "have I seen this before?" a one-liner, which Python can only do with a
+      separate membership check.</p>
+    <p>The set operations do not build new sets. <code>a.union(&amp;b)</code>, <code>intersection</code>,
+      <code>difference</code>, and <code>symmetric_difference</code> return <em>iterators</em> of references into the
+      two sets, because often you only want to loop over the result or count it. When you do want a set, finish with
+      <code>.cloned().collect()</code> or <code>.copied().collect()</code>, which the next sections explain.</p>
+    <div class="runnable" data-title="Set operations" data-predict>
+<textarea>
+use std::collections::BTreeSet;
+
+fn main() {
+    let workspace: BTreeSet<&str> = ["linux-64", "osx-arm64", "win-64"].into_iter().collect();
+    let cuda_feature: BTreeSet<&str> = ["linux-64", "win-64"].into_iter().collect();
+
+    let both: BTreeSet<&str> = workspace.intersection(&cuda_feature).copied().collect();
+    let only_workspace: Vec<&&str> = workspace.difference(&cuda_feature).collect();
+    println!("{both:?}");
+    println!("{only_workspace:?}");
+
+    let mut seen = BTreeSet::new();
+    for name in ["numpy", "rich", "numpy"] {
+        if !seen.insert(name) {
+            println!("duplicate: {name}");
+        }
+    }
+    println!("{} unique", seen.len());
+}
+</textarea>
+    </div>
+    <p>Look at the type <code>Vec&lt;&amp;&amp;str&gt;</code>. The set holds <code>&amp;str</code> values, and
+      <code>difference</code> yields references to them, so each item is a reference to a reference. Printing does
+      not care, but storing a <code>&amp;&amp;str</code> is awkward, which is why the first line uses
+      <code>.copied()</code> to turn each <code>&amp;&amp;str</code> back into a <code>&amp;str</code>. Double
+      references come up constantly with iterators; the next section explains where they come from.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>insert</code> on a set returns whether the value
+      was new. Set operations return iterators of references; collect them when you need a new set.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="three-iters">
+    <h2>iter, iter_mut, into_iter: who owns the items?</h2>
+    <p>In Python, <code>for x in items</code> always gives you the same thing: a name bound to each object, which is
+      shared with the list. Rust has to answer a question Python never asks: while you loop, does the loop
+      <em>borrow</em> each element, <em>mutably borrow</em> it, or <em>take ownership</em> of it? There is one
+      method for each answer:</p>
+    <table>
+      <thead><tr><th>Method</th><th>Item type for <code>Vec&lt;T&gt;</code></th><th>The collection afterwards</th><th><code>for</code> loop shorthand</th></tr></thead>
+      <tbody>
+        <tr><td><code>v.iter()</code></td><td><code>&amp;T</code></td><td>Unchanged and still usable</td><td><code>for x in &amp;v</code></td></tr>
+        <tr><td><code>v.iter_mut()</code></td><td><code>&amp;mut T</code></td><td>Possibly changed, still usable</td><td><code>for x in &amp;mut v</code></td></tr>
+        <tr><td><code>v.into_iter()</code></td><td><code>T</code></td><td>Gone: moved into the loop</td><td><code>for x in v</code></td></tr>
+      </tbody>
+    </table>
+    <p>The shorthand column is the key. A <code>for</code> loop calls <code>into_iter()</code> on whatever you give
+      it. Give it <code>v</code> and it consumes the vector. Give it <code>&amp;v</code> and the "into iterator" of a
+      reference is the borrowing iterator, the same as <code>v.iter()</code>. This is the most common ownership
+      error Python developers hit in their first week:</p>
+    <div class="runnable" data-title="The loop ate the vector" data-compile-fail>
+<textarea>
+fn main() {
+    let names = vec![String::from("numpy"), String::from("rich")];
+    for name in names {
+        println!("{name}");
+    }
+    println!("{} names", names.len());
+}
+</textarea>
+    </div>
+    <p><code>E0382: borrow of moved value: `names`</code>. The note under it names the culprit precisely:
+      "<code>names</code> moved due to this implicit call to <code>.into_iter()</code>", and the <code>help:</code> line
+      suggests the fix, iterating over <code>&amp;names</code>. Take that suggestion whenever you only need to read.
+      Use <code>for name in names</code> on purpose when you are done with the vector and want to move each
+      <code>String</code> somewhere else without cloning it.</p>
+    <p><code>iter_mut</code> is how you change elements in place. Each item is a <code>&amp;mut T</code>, so you
+      write through it with <code>*</code>, or call methods that take <code>&amp;mut self</code>:</p>
+    <div class="runnable" data-title="Change in place with iter_mut" data-predict>
+<textarea>
+fn main() {
+    let mut pins = vec![String::from("numpy"), String::from("rich")];
+    for pin in pins.iter_mut() {
+        pin.push_str(">=1");
+    }
+    let mut sizes = vec![10, 20, 30];
+    for s in &mut sizes {
+        *s *= 2;
+    }
+    println!("{pins:?}");
+    println!("{sizes:?}");
+}
+</textarea>
+    </div>
+
+    <h3>Under the hood: the Iterator trait</h3>
+    <p>All three methods return an <strong>iterator</strong>: a value with a <code>next</code> method that returns
+      <code>Option&lt;Item&gt;</code>, <code>Some(item)</code> while there are items and <code>None</code> at the end.
+      Python's iterator protocol is the same idea, with <code>StopIteration</code> where Rust uses
+      <code>None</code>. A <code>for</code> loop is just "call <code>next</code> until it returns <code>None</code>."</p>
+    <div class="runnable" data-title="Driving an iterator by hand" data-predict>
+<textarea>
+fn main() {
+    let channels = vec!["conda-forge", "bioconda"];
+    let mut it = channels.iter();
+    println!("{:?}", it.next());
+    println!("{:?}", it.next());
+    println!("{:?}", it.next());
+}
+</textarea>
+    </div>
+    <p>Note <code>let mut it</code>: calling <code>next</code> advances the iterator, which changes it, so the binding
+      must be mutable. And each item is <code>Some(&amp;"conda-forge")</code>, a reference to the
+      <code>&amp;str</code> in the vector, which prints the same as the value itself.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>iter()</code> borrows (<code>&amp;T</code>),
+      <code>iter_mut()</code> borrows mutably (<code>&amp;mut T</code>), <code>into_iter()</code> takes ownership
+      (<code>T</code>). <code>for x in v</code> consumes <code>v</code>; write <code>for x in &amp;v</code> to keep it.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="adapters">
+    <h2>Adapters: map, filter, and friends</h2>
+    <p>Python gives you comprehensions and a few built-ins (<code>map</code>, <code>filter</code>,
+      <code>enumerate</code>, <code>zip</code>, <code>itertools.chain</code>). Rust puts all of these on the iterator
+      itself as <strong>adapters</strong>: methods that take an iterator and return a new iterator that transforms the
+      items. You chain them left to right, and the chain reads like the steps of a recipe.</p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">pinned = [name.upper() for name in names if name.startswith("py")]</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">let pinned: Vec&lt;String&gt; = names
+    .iter()
+    .filter(|name| name.starts_with("py"))
+    .map(|name| name.to_uppercase())
+    .collect();</code></pre></div>
+    </div>
+    <p>The <code>|name| ...</code> parts are <strong>closures</strong>, Rust's lambdas: <code>|args| expression</code>.
+      M09 covers them in depth; for now read <code>|x| x * 2</code> as <code>lambda x: x * 2</code>.</p>
+    <table>
+      <thead><tr><th>Adapter</th><th>What it does</th><th>Python</th></tr></thead>
+      <tbody>
+        <tr><td><code>map(f)</code></td><td>Transform each item</td><td><code>f(x) for x in it</code></td></tr>
+        <tr><td><code>filter(p)</code></td><td>Keep items where <code>p(&amp;item)</code> is true</td><td><code>x for x in it if p(x)</code></td></tr>
+        <tr><td><code>filter_map(f)</code></td><td>Call <code>f</code>, keep only the <code>Some</code> values, unwrapped</td><td><code>y for x in it if (y := f(x)) is not None</code></td></tr>
+        <tr><td><code>enumerate()</code></td><td>Pair each item with its index: <code>(usize, item)</code></td><td><code>enumerate(it)</code></td></tr>
+        <tr><td><code>zip(other)</code></td><td>Pair items from two iterators, stopping at the shorter</td><td><code>zip(a, b)</code></td></tr>
+        <tr><td><code>chain(other)</code></td><td>All of the first, then all of the second</td><td><code>itertools.chain(a, b)</code></td></tr>
+        <tr><td><code>flat_map(f)</code></td><td>Map each item to an iterable and flatten the results</td><td><code>y for x in it for y in f(x)</code></td></tr>
+        <tr><td><code>flatten()</code></td><td>Flatten an iterator of iterables (also turns <code>Option</code>s into their values)</td><td><code>itertools.chain.from_iterable</code></td></tr>
+        <tr><td><code>take(n)</code> / <code>skip(n)</code></td><td>The first <code>n</code> items / everything after them</td><td><code>it[:n]</code> / <code>it[n:]</code> (<code>islice</code>)</td></tr>
+        <tr><td><code>cloned()</code> / <code>copied()</code></td><td>Turn <code>&amp;T</code> items into owned <code>T</code> by cloning or copying</td><td>not needed in Python</td></tr>
+      </tbody>
+    </table>
+    <div class="runnable" data-title="Adapters at work" data-predict>
+<textarea>
+fn main() {
+    let names = ["python", "numpy", "pytest", "rich"];
+    let specs = ["3.14", "2.*", "", ">=13"];
+
+    let py: Vec<&str> = names.iter().copied().filter(|n| n.starts_with("py")).collect();
+    println!("{py:?}");
+
+    for (i, name) in names.iter().enumerate().skip(1).take(2) {
+        println!("{i}: {name}");
+    }
+
+    let pinned: Vec<String> = names
+        .iter()
+        .zip(specs.iter())
+        .filter(|(_, spec)| !spec.is_empty())
+        .map(|(name, spec)| format!("{name} {spec}"))
+        .collect();
+    println!("{pinned:?}");
+
+    let all: Vec<&str> = names.iter().chain(["pandas"].iter()).copied().collect();
+    println!("{}", all.len());
+}
+</textarea>
+    </div>
+    <h3>filter_map and flat_map</h3>
+    <p><code>filter_map</code> is the adapter you will see most in Pixi after <code>map</code>. It combines "try
+      something that might not produce a value" with "keep only the successes." The closure returns an
+      <code>Option</code>; <code>None</code>s disappear and <code>Some(x)</code> becomes <code>x</code>. A classic use
+      is parsing and silently skipping what does not parse, using <code>.ok()</code> from M04 to turn a
+      <code>Result</code> into an <code>Option</code>:</p>
+    <div class="runnable" data-title="filter_map and flat_map" data-predict>
+<textarea>
+fn main() {
+    let raw = ["3", "x", "14", "", "7"];
+    let numbers: Vec<u32> = raw.iter().filter_map(|s| s.parse().ok()).collect();
+    println!("{numbers:?}");
+
+    let features = [vec!["numpy", "rich"], vec![], vec!["pytest"]];
+    let every_dep: Vec<&str> = features.iter().flat_map(|deps| deps.iter().copied()).collect();
+    println!("{every_dep:?}");
+
+    let maybe_platforms = [Some("linux-64"), None, Some("win-64")];
+    let platforms: Vec<&str> = maybe_platforms.iter().flatten().copied().collect();
+    println!("{platforms:?}");
+}
+</textarea>
+    </div>
+
+    <h3>Where the double references come from</h3>
+    <p><code>filter</code>'s closure receives a <em>reference</em> to each item, because filtering only needs to look,
+      and it must give the item back unchanged if it passes. If the items are already references (as with
+      <code>names.iter()</code>, which yields <code>&amp;&amp;str</code> from an array of <code>&amp;str</code>), the
+      closure sees <code>&amp;&amp;&amp;str</code>. Method calls see through any number of references (this is
+      called <strong>auto-deref</strong>), so <code>|n| n.starts_with("py")</code> just works. Comparisons with
+      <code>==</code> and arithmetic do not; there you either dereference (<code>|n| **n == "rich"</code>) or
+      destructure in the parameter (<code>|&amp;&amp;n| n == "rich"</code>). Calling <code>.copied()</code> early, as
+      the first cell did, removes one layer and keeps the closures simple.</p>
+
+    <h3>Iterators are lazy</h3>
+    <p>An adapter does no work when you call it. It only builds a new iterator that remembers what to do. Nothing
+      runs until something <em>consumes</em> the iterator by calling <code>next</code>. Python's generator expressions
+      behave the same way; Python's list comprehensions do not. The compiler warns you if you build a chain and drop
+      it unused:</p>
+    <div class="runnable" data-title="Nothing happens until you consume">
+<textarea>
+fn main() {
+    let names = vec!["numpy", "rich"];
+    // Builds an iterator and throws it away: the closure never runs.
+    // rustc warns: "unused `Map` that must be used ... iterators are lazy".
+    names.iter().map(|n| println!("visiting {n}"));
+    println!("before consuming");
+    let count = names.iter().map(|n| println!("visiting {n}")).count();
+    println!("visited {count}");
+}
+</textarea>
+    </div>
+    <p>Laziness is why long chains are cheap: there are no intermediate lists. A chain of <code>filter</code>,
+      <code>map</code>, and <code>take(3)</code> handles one item at a time from start to finish and stops after the
+      third, however long the input is. The compiler turns the chain into a loop as fast as one you would write by
+      hand.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> adapters return new iterators and do nothing on their
+      own. <code>filter</code> sees <code>&amp;Item</code>; use <code>.copied()</code>/<code>.cloned()</code> to strip a
+      layer of references. <code>filter_map</code> is map-then-keep-the-<code>Some</code>s.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="consumers">
+    <h2>Consumers: getting an answer out</h2>
+    <p>A <strong>consumer</strong> (the std docs also say "a method that consumes the iterator") calls
+      <code>next</code> until it has its answer, and returns something that is not an iterator. You already used
+      <code>collect</code> and <code>count</code>. The rest of the everyday set:</p>
+    <table>
+      <thead><tr><th>Consumer</th><th>Returns</th><th>Python</th></tr></thead>
+      <tbody>
+        <tr><td><code>count()</code></td><td><code>usize</code></td><td><code>sum(1 for _ in it)</code></td></tr>
+        <tr><td><code>sum()</code> / <code>product()</code></td><td>The total; you must name the type</td><td><code>sum(it)</code> / <code>math.prod(it)</code></td></tr>
+        <tr><td><code>min()</code> / <code>max()</code></td><td><code>Option&lt;Item&gt;</code> (empty input gives <code>None</code>)</td><td><code>min(it)</code> (raises on empty)</td></tr>
+        <tr><td><code>any(p)</code> / <code>all(p)</code></td><td><code>bool</code>, stopping early</td><td><code>any(...)</code> / <code>all(...)</code></td></tr>
+        <tr><td><code>find(p)</code></td><td><code>Option&lt;Item&gt;</code>: the first item where <code>p</code> is true</td><td><code>next((x for x in it if p(x)), None)</code></td></tr>
+        <tr><td><code>position(p)</code></td><td><code>Option&lt;usize&gt;</code>: its index</td><td><code>list.index</code> (raises)</td></tr>
+        <tr><td><code>fold(init, f)</code></td><td>The accumulated value</td><td><code>functools.reduce(f, it, init)</code></td></tr>
+        <tr><td><code>last()</code>, <code>nth(n)</code></td><td><code>Option&lt;Item&gt;</code></td><td><code>it[-1]</code>, <code>it[n]</code></td></tr>
+      </tbody>
+    </table>
+    <p>Notice how often <code>Option</code> appears. Where Python raises (<code>min([])</code>,
+      <code>list.index</code>), Rust returns <code>None</code>, and M04's tools take over.</p>
+    <div class="runnable" data-title="Consumers" data-predict>
+<textarea>
+fn main() {
+    let sizes_mb = [12, 3, 40, 7];
+    let total: u32 = sizes_mb.iter().sum();
+    let biggest = sizes_mb.iter().max();
+    let has_huge = sizes_mb.iter().any(|&s| s > 100);
+    let all_small = sizes_mb.iter().all(|&s| s < 50);
+    let first_big = sizes_mb.iter().find(|&&s| s > 10);
+    let where_big = sizes_mb.iter().position(|&s| s > 30);
+    let summary = sizes_mb.iter().fold(String::new(), |acc, s| acc + &s.to_string() + ";");
+    println!("{total} {biggest:?} {has_huge} {all_small}");
+    println!("{first_big:?} {where_big:?} {summary}");
+}
+</textarea>
+    </div>
+    <p>Read the closure parameters closely, because they differ for a reason. <code>any</code>,
+      <code>all</code>, and <code>position</code> receive each item (<code>&amp;u32</code> here), so
+      <code>|&amp;s|</code> destructures one reference. <code>find</code>, like <code>filter</code>, receives a
+      reference to the item so it can hand the item back, so it needs <code>|&amp;&amp;s|</code>. If you get the
+      number of <code>&amp;</code>s wrong, the compiler says so with <code>E0308 mismatched types</code> and shows the
+      expected type.</p>
+    <h3>sum needs a type</h3>
+    <p><code>sum</code> can produce many types (you can sum <code>&amp;i32</code>s into an <code>i32</code>, or
+      <code>Duration</code>s, or <code>Option</code>s), so the compiler cannot guess which one you want:</p>
+    <div class="runnable" data-title="Which kind of sum?" data-compile-fail>
+<textarea>
+fn main() {
+    let sizes = vec![12, 3, 40];
+    let total = sizes.iter().sum();
+    println!("{total}");
+}
+</textarea>
+    </div>
+    <p><code>E0283: type annotations needed</code>, with the note "cannot satisfy <code>_: Sum&lt;&amp;i32&gt;</code>".
+      The <code>help:</code> line shows the fix: <code>let total: i32 = ...</code>. Another spelling is the
+      <strong>turbofish</strong>, <code>sizes.iter().sum::&lt;i32&gt;()</code>, which puts the type on the method
+      instead of the variable. It is named for its shape, <code>::&lt;&gt;</code>, and you will see it constantly
+      with <code>collect</code>.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> consumers drive the iterator and return a plain value.
+      Lookups (<code>min</code>, <code>max</code>, <code>find</code>, <code>position</code>) return <code>Option</code>.
+      <code>sum</code> and <code>collect</code> need to be told the result type.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="collect">
+    <h2>collect: one method, many result types</h2>
+    <p><code>collect</code> is the most flexible consumer: it builds <em>any</em> collection that knows how to be
+      built from an iterator (the trait is called <code>FromIterator</code>). The type you ask for decides what you
+      get, which is why <code>collect</code> almost always needs an annotation or a turbofish.</p>
+    <table>
+      <thead><tr><th>You ask for</th><th>The iterator must yield</th><th>You get</th></tr></thead>
+      <tbody>
+        <tr><td><code>Vec&lt;T&gt;</code></td><td><code>T</code></td><td>The items in order</td></tr>
+        <tr><td><code>String</code></td><td><code>char</code> or <code>&amp;str</code> or <code>String</code></td><td>Them concatenated</td></tr>
+        <tr><td><code>HashMap&lt;K, V&gt;</code> / <code>BTreeMap&lt;K, V&gt;</code></td><td><code>(K, V)</code> tuples</td><td>A map; later duplicates overwrite earlier ones</td></tr>
+        <tr><td><code>HashSet&lt;T&gt;</code> / <code>BTreeSet&lt;T&gt;</code></td><td><code>T</code></td><td>The distinct items</td></tr>
+        <tr><td><code>Result&lt;Vec&lt;T&gt;, E&gt;</code></td><td><code>Result&lt;T, E&gt;</code></td><td><code>Ok</code> of all values, or the <strong>first</strong> <code>Err</code></td></tr>
+        <tr><td><code>Option&lt;Vec&lt;T&gt;&gt;</code></td><td><code>Option&lt;T&gt;</code></td><td><code>Some</code> of all values, or <code>None</code> if any was <code>None</code></td></tr>
+      </tbody>
+    </table>
+    <p>You can leave the item type as <code>_</code> and let the compiler fill it in:
+      <code>.collect::&lt;Vec&lt;_&gt;&gt;()</code> means "a vector of whatever the items are."</p>
+    <div class="runnable" data-title="Same iterator, different collections" data-predict>
+<textarea>
+use std::collections::{BTreeMap, BTreeSet};
+
+fn main() {
+    let deps = ["numpy", "rich", "numpy"];
+
+    let v: Vec<&str> = deps.iter().copied().collect();
+    let set: BTreeSet<&str> = deps.iter().copied().collect();
+    let joined: String = deps.iter().map(|d| d.chars().next().unwrap()).collect();
+    let lens: BTreeMap<&str, usize> = deps.iter().map(|d| (*d, d.len())).collect();
+    let csv = deps.iter().copied().collect::<Vec<_>>().join(",");
+
+    println!("{v:?}");
+    println!("{set:?}");
+    println!("{joined}");
+    println!("{lens:?}");
+    println!("{csv}");
+}
+</textarea>
+    </div>
+
+    <h3>Collecting Results: validate everything or stop at the first error</h3>
+    <p>This one deserves its own heading because it is everywhere in Pixi. Suppose you parse a list of strings, and
+      each parse returns a <code>Result</code>. Mapping gives you an iterator of <code>Result</code>s. Collecting that
+      into <code>Result&lt;Vec&lt;T&gt;, E&gt;</code> gives you <code>Ok(vec)</code> if every parse succeeded, and
+      otherwise the first <code>Err</code>, and it stops reading the input at that error. Combine it with
+      <code>?</code> from M04 and a whole validation loop becomes one expression:</p>
+    <div class="runnable" data-title="collect into Result" data-predict>
+<textarea>
+use std::num::ParseIntError;
+
+fn parse_all(raw: &[&str]) -> Result<Vec<u32>, ParseIntError> {
+    raw.iter().map(|s| s.trim().parse::<u32>()).collect()
+}
+
+fn total(raw: &[&str]) -> Result<u32, ParseIntError> {
+    let numbers = parse_all(raw)?;
+    Ok(numbers.iter().sum())
+}
+
+fn main() {
+    println!("{:?}", parse_all(&["1", " 2", "3 "]));
+    println!("{:?}", parse_all(&["1", "two", "3"]).is_err());
+    println!("{:?}", total(&["10", "20"]));
+    match total(&["10", "-1"]) {
+        Ok(n) => println!("total {n}"),
+        Err(e) => println!("error: {e}"),
+    }
+}
+</textarea>
+    </div>
+    <p>The Python equivalent is a loop with a <code>try</code> inside, appending to a list, that re-raises on the
+      first failure. In Rust, the "stop at the first error" behavior lives in <code>collect</code> itself, and the
+      return type of the function is enough to select it: <code>parse_all</code> has no annotation on
+      <code>collect</code> at all, because the signature already says <code>Result&lt;Vec&lt;u32&gt;, ParseIntError&gt;</code>.</p>
+    <aside class="callout pixi"><p>Grep the Pixi snapshot for <code>collect::&lt;Result&lt;Vec&lt;_&gt;, _&gt;&gt;()?</code>
+      and you will find it in the manifest parser, the CLI, and the lock-file code. In
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/features_ext.rs#L80-L89"><code>FeaturesExt::channel_urls</code></a>
+      it is written without the turbofish, exactly like <code>parse_all</code> above: the return type
+      <code>Result&lt;Vec&lt;ChannelUrl&gt;, ParseChannelError&gt;</code> selects it.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> the requested type decides what <code>collect</code>
+      builds. An iterator of <code>Result&lt;T, E&gt;</code> collects into <code>Result&lt;Vec&lt;T&gt;, E&gt;</code>,
+      stopping at the first error; add <code>?</code> to propagate it.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="sorting">
+    <h2>Sorting, deduplicating, and retaining</h2>
+    <p>Python's <code>list.sort(key=...)</code> and <code>sorted()</code> map onto a family of methods on slices
+      (so they work on vectors and arrays). They all sort <strong>in place</strong> and return nothing, like
+      <code>list.sort()</code>; there is no built-in <code>sorted()</code> that returns a new vector. (The
+      <code>itertools</code> crate adds one, which Pixi uses heavily; that is M09.)</p>
+    <table>
+      <thead><tr><th>Method</th><th>Python</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>v.sort()</code></td><td><code>v.sort()</code></td><td>Needs <code>T: Ord</code>; stable (equal items keep their order)</td></tr>
+        <tr><td><code>v.sort_unstable()</code></td><td>none</td><td>Faster and uses no extra memory; equal items may swap</td></tr>
+        <tr><td><code>v.sort_by_key(|x| key)</code></td><td><code>v.sort(key=...)</code></td><td>The key must be <code>Ord</code> and owned</td></tr>
+        <tr><td><code>v.sort_by(|a, b| a.cmp(b))</code></td><td><code>functools.cmp_to_key</code></td><td>Full control; <code>b.cmp(a)</code> sorts descending</td></tr>
+        <tr><td><code>v.reverse()</code></td><td><code>v.reverse()</code></td><td>In place</td></tr>
+        <tr><td><code>v.dedup()</code></td><td>none</td><td>Removes <em>consecutive</em> duplicates, so sort first</td></tr>
+        <tr><td><code>v.retain(|x| keep)</code></td><td><code>v[:] = [x for x in v if keep]</code></td><td>Filter in place</td></tr>
+      </tbody>
+    </table>
+    <p>A comparison function returns <code>std::cmp::Ordering</code>, an enum with three variants:
+      <code>Less</code>, <code>Equal</code>, <code>Greater</code>. <code>a.cmp(&amp;b)</code> produces one, and
+      <code>.then(...)</code> or <code>.then_with(|| ...)</code> breaks ties, which is how you sort by several keys.</p>
+    <div class="runnable" data-title="Sorting several ways" data-predict>
+<textarea>
+fn main() {
+    let mut names = vec!["rich", "numpy", "Pandas", "numpy", "attrs"];
+    names.sort();
+    println!("{names:?}");
+    names.dedup();
+    println!("{names:?}");
+    names.sort_by_key(|n| n.to_lowercase());
+    println!("{names:?}");
+    names.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
+    println!("{names:?}");
+    names.retain(|n| n.len() > 4);
+    println!("{names:?}");
+}
+</textarea>
+    </div>
+    <p>Two things to notice. Plain <code>sort</code> on strings compares bytes, so the capitalized
+      <code>"Pandas"</code> sorts before every lowercase name, as in Python. And <code>dedup</code> only removed the
+      second <code>"numpy"</code> because sorting had put the two next to each other.</p>
+    <h3>Floats are not Ord</h3>
+    <p>Python happily sorts a list of floats. Rust refuses, because <code>f64</code> has <code>NaN</code>, which is
+      neither less than, equal to, nor greater than anything, including itself. A type is <code>Ord</code> only when
+      every pair of values has an answer.</p>
+    <div class="runnable" data-title="Sorting floats" data-compile-fail>
+<textarea>
+fn main() {
+    let mut timings = vec![2.5, 0.3, 1.25];
+    timings.sort();
+    println!("{timings:?}");
+}
+</textarea>
+    </div>
+    <p><code>E0277: the trait bound `{float}: Ord` is not satisfied</code>, "required by a bound in
+      <code>slice::&lt;impl [T]&gt;::sort</code>". <code>E0277</code> always means "this type does not implement a
+      trait that something requires"; M06 is about exactly that. The fix is to say how to compare:
+      <code>timings.sort_by(|a, b| a.total_cmp(b))</code>. <code>total_cmp</code> defines an order for every float,
+      including <code>NaN</code>.</p>
+    <aside class="callout pixi"><p>In <code>pixi search</code>, the JSON output groups records by platform and then
+      sorts each group newest first with <code>records.sort_unstable_by(|a, b| b.cmp(a))</code>, swapping
+      <code>a</code> and <code>b</code> to reverse the order. You will read that function in full in
+      <a href="#pixi-reading">Reading Pixi</a>.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> sorting is in place and needs <code>Ord</code>;
+      <code>sort_by_key</code> is Python's <code>key=</code>; <code>b.cmp(a)</code> reverses; <code>dedup</code> needs
+      sorted input; floats need <code>sort_by</code> with <code>total_cmp</code>.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="strings">
+    <h2>Strings as collections</h2>
+    <p>A <code>String</code> is a <code>Vec&lt;u8&gt;</code> that is guaranteed to hold valid UTF-8, and a
+      <code>&amp;str</code> is a slice of one. That has a consequence Python hides from you: characters take one to
+      four bytes, so "the third character" cannot be found without walking from the start. Rust refuses to pretend
+      otherwise, and does not let you index a string by number:</p>
+    <div class="runnable" data-title="No s[0]" data-compile-fail>
+<textarea>
+fn main() {
+    let name = String::from("pixi");
+    let first = name[0];
+    println!("{first}");
+}
+</textarea>
+    </div>
+    <p><code>E0277: the type `str` cannot be indexed by `{integer}`</code>, with the note "you can use
+      <code>.chars().nth()</code> or <code>.bytes().nth()</code>." Byte <em>ranges</em> do work
+      (<code>&amp;name[0..2]</code>), but they panic if a range boundary falls inside a multi-byte character, so use
+      them only on text you know is ASCII or on positions you got from a search such as <code>find</code>.</p>
+    <p>Instead of indexing, you iterate. Strings offer several iterators, and everything from the previous sections
+      works on them:</p>
+    <table>
+      <thead><tr><th>Method</th><th>Yields</th><th>Python</th></tr></thead>
+      <tbody>
+        <tr><td><code>s.chars()</code></td><td><code>char</code> (a Unicode scalar value)</td><td><code>iter(s)</code></td></tr>
+        <tr><td><code>s.bytes()</code></td><td><code>u8</code></td><td><code>s.encode()</code></td></tr>
+        <tr><td><code>s.split(',')</code>, <code>s.split(", ")</code></td><td><code>&amp;str</code> pieces (empty pieces included)</td><td><code>s.split(",")</code></td></tr>
+        <tr><td><code>s.split_whitespace()</code></td><td>Non-empty <code>&amp;str</code> words</td><td><code>s.split()</code></td></tr>
+        <tr><td><code>s.lines()</code></td><td>Lines without their <code>\n</code> or <code>\r\n</code></td><td><code>s.splitlines()</code></td></tr>
+        <tr><td><code>s.split_once('=')</code></td><td><code>Option&lt;(&amp;str, &amp;str)&gt;</code></td><td><code>s.partition("=")</code></td></tr>
+      </tbody>
+    </table>
+    <p>And the non-iterator helpers you use with them: <code>trim</code>, <code>trim_start</code>,
+      <code>trim_end</code>, <code>strip_prefix</code> (returns <code>Option</code>), <code>starts_with</code>,
+      <code>contains</code>, <code>find</code> (returns <code>Option&lt;usize&gt;</code>, a byte index),
+      <code>to_lowercase</code>, <code>replace</code>, and <code>parse</code>. Every one that returns a piece of the
+      input returns a <code>&amp;str</code> <em>borrowed</em> from it, with no allocation. Call
+      <code>.to_string()</code> when you need to keep a piece after the input is gone.</p>
+    <div class="runnable" data-title="Parse a small manifest snippet" data-predict>
+<textarea>
+fn main() {
+    let text = "
+        # pinned deps
+        python = 3.14
+        numpy = 2.*
+
+        rich=>=13
+    ";
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        match line.split_once('=') {
+            Some((name, spec)) => println!("{} -> {}", name.trim(), spec.trim()),
+            None => println!("bad line: {line}"),
+        }
+    }
+    let word = "naïve";
+    println!("{} bytes, {} chars", word.len(), word.chars().count());
+}
+</textarea>
+    </div>
+    <p><code>split_once</code> splits at the <em>first</em> <code>=</code>, which is why
+      <code>rich=&gt;=13</code> gives <code>rich</code> and <code>&gt;=13</code>. And <code>len()</code> counts bytes:
+      the <code>ï</code> in "naïve" takes two, so the word is 6 bytes and 5 characters. Python's <code>len</code>
+      would say 5.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> no <code>s[i]</code>; iterate with <code>chars</code>,
+      <code>split</code>, <code>split_whitespace</code>, <code>lines</code>. <code>len()</code> is bytes. Pieces are
+      borrowed <code>&amp;str</code>s; <code>.to_string()</code> them to keep them.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="pixi-reading">
+    <h2>Reading Pixi</h2>
+    <p>Two short functions from the snapshot, both built entirely from this module's ideas. Read the code first,
+      then the explanation.</p>
+    <h3>Grouping search results by platform</h3>
+    <p><code>pixi search --json</code> prints the matching package records grouped by platform, newest first. This
+      helper builds that grouping
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_cli/src/search.rs#L75-L85">crates/pixi_cli/src/search.rs#L75-L85</a>):</p>
+    <pre data-label="crates/pixi_cli/src/search.rs"><code class="language-rust">fn build_json_output(packages: &amp;[RepoDataRecord]) -&gt; IndexMap&lt;String, Vec&lt;&amp;RepoDataRecord&gt;&gt; {
+    let mut result: IndexMap&lt;String, Vec&lt;&amp;RepoDataRecord&gt;&gt; = IndexMap::new();
+    for pkg in packages {
+        let platform = pkg.package_record.subdir.clone();
+        result.entry(platform).or_default().push(pkg);
+    }
+    for records in result.values_mut() {
+        records.sort_unstable_by(|a, b| b.cmp(a));
+    }
+    result
+}</code></pre>
+    <ul>
+      <li><strong>Signature.</strong> It borrows a slice of records (<code>&amp;[RepoDataRecord]</code>, not a
+        <code>Vec</code>) and returns a map from platform name (<code>subdir</code>, such as
+        <code>"linux-64"</code>) to a vector of <em>references</em> into that slice. Nothing is copied except the
+        platform strings.</li>
+      <li><strong><code>for pkg in packages</code></strong> iterates a <code>&amp;[RepoDataRecord]</code>, so
+        <code>pkg</code> is a <code>&amp;RepoDataRecord</code>. That is exactly the type the vectors store.</li>
+      <li><strong><code>.subdir.clone()</code></strong>: the map needs to own its <code>String</code> keys, and the
+        record only lends its <code>subdir</code>, so the function clones it.</li>
+      <li><strong><code>entry(platform).or_default().push(pkg)</code></strong> is the grouping idiom from this module:
+        <code>setdefault(platform, []).append(pkg)</code>.</li>
+      <li><strong><code>values_mut()</code></strong> iterates the map's values as <code>&amp;mut Vec&lt;_&gt;</code>, the
+        map version of <code>iter_mut</code>, so each group can be sorted in place.</li>
+      <li><strong><code>sort_unstable_by(|a, b| b.cmp(a))</code></strong> sorts each group in descending order.
+        Unstable sorting is fine because two equal records are interchangeable.</li>
+      <li><strong><code>IndexMap</code></strong> keeps platforms in the order they first appeared in the search
+        results, so the JSON output is deterministic, which a <code>HashMap</code> would not be.</li>
+    </ul>
+
+    <h3>Which platforms can an environment run on?</h3>
+    <p>An environment is a set of features, and a platform is usable only if every feature supports it. This is the
+      ordinary (non-composition) path of <code>FeaturesExt::platforms</code>
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/features_ext.rs#L205-L227">crates/pixi_manifest/src/features_ext.rs#L205-L227</a>):</p>
+    <pre data-label="crates/pixi_manifest/src/features_ext.rs"><code class="language-rust">        let exact_names: HashSet&lt;&amp;PixiPlatformName&gt; = self
+            .features()
+            .filter_map(|feature| feature.platforms.as_ref())
+            .flatten()
+            .collect();
+        let exact_subdirs: HashSet&lt;Platform&gt; = workspace
+            .platforms
+            .iter()
+            .filter(|platform| exact_names.contains(platform.name()))
+            .map(PixiPlatform::subdir)
+            .collect();
+        workspace
+            .platforms
+            .iter()
+            .filter(|platform| {
+                self.features()
+                    .all(|feature| feature.supports_platform(Some(platform)))
+            })
+            .filter(|platform| {
+                exact_names.contains(platform.name()) || !exact_subdirs.contains(&amp;platform.subdir())
+            })
+            .map(|platform| platform.name().clone())
+            .collect()</code></pre>
+    <ul>
+      <li><strong><code>self.features()</code></strong> returns an iterator over the environment's
+        <code>&amp;Feature</code>s. (How a trait method can return "some iterator" is M06.)</li>
+      <li><strong><code>filter_map(|feature| feature.platforms.as_ref())</code></strong>: each feature's
+        <code>platforms</code> is an <code>Option&lt;IndexSet&lt;PixiPlatformName&gt;&gt;</code>; features that do not
+        restrict platforms have <code>None</code>. <code>as_ref()</code> turns <code>&amp;Option&lt;IndexSet&gt;</code>
+        into <code>Option&lt;&amp;IndexSet&gt;</code> (borrowing instead of moving, M04), and <code>filter_map</code>
+        keeps only the features that do restrict.</li>
+      <li><strong><code>.flatten()</code></strong> turns the iterator of <code>&amp;IndexSet</code>s into one iterator of
+        <code>&amp;PixiPlatformName</code>s, and <code>collect</code> builds a <code>HashSet</code> for fast
+        <code>contains</code> checks. The type annotation on <code>let</code> selects the collection.</li>
+      <li><strong><code>.map(PixiPlatform::subdir)</code></strong> passes a method by name instead of writing
+        <code>|p| p.subdir()</code>. Any function with the right signature can stand in for a closure.</li>
+      <li><strong>The final chain</strong> walks the workspace's platforms in manifest order, keeps those that
+        <code>all</code> features support, applies a second rule about exact names, clones the surviving names, and
+        collects. The function's return type, <code>HashSet&lt;PixiPlatformName&gt;</code>, chooses what
+        <code>collect</code> builds, so the last line needs no annotation.</li>
+    </ul>
+    <details class="reveal"><summary>Why does <code>build_json_output</code> clone <code>subdir</code> but not the record?</summary>
+      <p>The map's key type is <code>String</code>, an owned value, so the map must own each key; the record only
+        lends its <code>subdir</code>. The values are <code>&amp;RepoDataRecord</code>, references that borrow from
+        the input slice, so no clone is needed. The cost is that the returned map cannot outlive
+        <code>packages</code>, a relationship M07 teaches you to read from the signature.</p></details>
+    <details class="reveal"><summary>If no feature restricts its platforms, what is <code>exact_names</code>, and what does the final chain return?</summary>
+      <p><code>exact_names</code> is empty: every <code>filter_map</code> call returned <code>None</code>. So is
+        <code>exact_subdirs</code>. The second filter then passes everything
+        (<code>!exact_subdirs.contains(...)</code> is always true), and the result is every workspace platform that
+        all features support, which with no restrictions is every workspace platform.</p></details>
+    <details class="reveal"><summary>Could the first statement use <code>flat_map</code> instead of <code>filter_map</code> plus <code>flatten</code>?</summary>
+      <p>Yes: <code>.flat_map(|feature| feature.platforms.iter().flatten())</code>, or even
+        <code>.flat_map(|feature| feature.platforms.as_ref()).flatten()</code>, since an <code>Option</code> is itself
+        iterable. Each spelling is equivalent. The Pixi version reads as two plain steps, "keep the features that
+        have a list, then flatten the lists," which is a reasonable choice for code people review.</p></details>
+  </section>
+
+  <section class="lesson-section" id="practice">
+    <h2>Practice</h2>
+    <p>Five exercises, from a warm-up to a small parser. Each is graded by <code>cargo test</code>. Use
+      <code>BTreeMap</code> in your answers wherever the result is a map, so output is deterministic.</p>
+
+    <div class="exercise" data-id="m05-e1" data-title="Count words with the entry API">
+      <div class="exercise-prompt">
+        <p>Write <code>word_counts(text: &amp;str) -&gt; BTreeMap&lt;String, usize&gt;</code>. Split on whitespace,
+          lowercase each word, and count how often each appears. Use the entry API.</p>
+      </div>
+<textarea class="starter">
+use std::collections::BTreeMap;
+
+fn word_counts(text: &str) -> BTreeMap<String, usize> {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn counts_repeated_words() {
+    let counts = word_counts("pixi run pixi add pixi");
+    assert_eq!(counts.get("pixi"), Some(&3), "\"pixi\" appears 3 times");
+    assert_eq!(counts.get("run"), Some(&1), "\"run\" appears once");
+    assert_eq!(counts.len(), 3, "three distinct words: add, pixi, run");
+}
+
+#[test]
+fn lowercases_words() {
+    let counts = word_counts("Rust rust RUST");
+    assert_eq!(counts.get("rust"), Some(&3), "words should be lowercased before counting");
+    assert_eq!(counts.len(), 1, "only one distinct word after lowercasing");
+}
+
+#[test]
+fn handles_extra_whitespace_and_empty_input() {
+    let counts = word_counts("  conda\n\tforge   conda ");
+    assert_eq!(counts.get("conda"), Some(&2), "split_whitespace ignores runs of spaces, tabs and newlines");
+    assert!(word_counts("").is_empty(), "empty text has no words");
+    assert!(word_counts("   ").is_empty(), "whitespace-only text has no words");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>for word in text.split_whitespace()</code>, then
+        <code>*counts.entry(word.to_lowercase()).or_insert(0) += 1;</code>. <code>to_lowercase</code> already returns
+        an owned <code>String</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-rust">use std::collections::BTreeMap;
+
+fn word_counts(text: &amp;str) -&gt; BTreeMap&lt;String, usize&gt; {
+    let mut counts = BTreeMap::new();
+    for word in text.split_whitespace() {
+        *counts.entry(word.to_lowercase()).or_insert(0) += 1;
+    }
+    counts
+}</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m05-e2" data-title="Group packages by platform">
+      <div class="exercise-prompt">
+        <p>A simplified <code>build_json_output</code>. Write
+          <code>group_by_platform(records: &amp;[(&amp;str, &amp;str)]) -&gt; BTreeMap&lt;String, Vec&lt;String&gt;&gt;</code>.
+          Each record is <code>(package_name, platform)</code>. Return a map from platform to the package names on
+          that platform, each list <strong>sorted</strong> and with <strong>duplicates removed</strong>.</p>
+      </div>
+<textarea class="starter">
+use std::collections::BTreeMap;
+
+fn group_by_platform(records: &[(&str, &str)]) -> BTreeMap<String, Vec<String>> {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn groups_by_platform() {
+    let records = [("numpy", "linux-64"), ("rich", "noarch"), ("numpy", "osx-arm64")];
+    let groups = group_by_platform(&records);
+    assert_eq!(groups.len(), 3, "three platforms: linux-64, noarch, osx-arm64");
+    assert_eq!(groups["noarch"], vec!["rich".to_string()], "noarch holds only rich");
+}
+
+#[test]
+fn sorts_each_group() {
+    let records = [("polars", "linux-64"), ("attrs", "linux-64"), ("numpy", "linux-64")];
+    let groups = group_by_platform(&records);
+    assert_eq!(groups["linux-64"], vec!["attrs", "numpy", "polars"], "each group must be sorted by name");
+}
+
+#[test]
+fn removes_duplicates() {
+    let records = [("numpy", "win-64"), ("rich", "win-64"), ("numpy", "win-64")];
+    let groups = group_by_platform(&records);
+    assert_eq!(groups["win-64"], vec!["numpy", "rich"], "numpy appears twice in the input but once in the output");
+}
+
+#[test]
+fn empty_input_gives_empty_map() {
+    assert!(group_by_platform(&[]).is_empty(), "no records, no platforms");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Two loops, like the Pixi function: first
+        <code>groups.entry(platform.to_string()).or_default().push(name.to_string())</code>, then
+        <code>for names in groups.values_mut() { names.sort(); names.dedup(); }</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-rust">use std::collections::BTreeMap;
+
+fn group_by_platform(records: &amp;[(&amp;str, &amp;str)]) -&gt; BTreeMap&lt;String, Vec&lt;String&gt;&gt; {
+    let mut groups: BTreeMap&lt;String, Vec&lt;String&gt;&gt; = BTreeMap::new();
+    for (name, platform) in records {
+        groups.entry(platform.to_string()).or_default().push(name.to_string());
+    }
+    for names in groups.values_mut() {
+        names.sort();
+        names.dedup();
+    }
+    groups
+}</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m05-e3" data-title="Parse a version list, or fail">
+      <div class="exercise-prompt">
+        <p>Write <code>parse_versions(input: &amp;str) -&gt; Result&lt;Vec&lt;u32&gt;, ParseIntError&gt;</code> for input like
+          <code>"3, 12,, 14 "</code>. Split on commas, trim each piece, skip empty pieces, and parse the rest as
+          <code>u32</code>. If any piece fails to parse, return that error. Use a single iterator chain that ends in
+          <code>collect</code>; no explicit loop.</p>
+      </div>
+<textarea class="starter">
+use std::num::ParseIntError;
+
+fn parse_versions(input: &str) -> Result<Vec<u32>, ParseIntError> {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn parses_clean_input() {
+    assert_eq!(parse_versions("3,12,14"), Ok(vec![3, 12, 14]), "plain comma-separated numbers");
+}
+
+#[test]
+fn trims_and_skips_empty_pieces() {
+    assert_eq!(parse_versions(" 3, 12,, 14 ,"), Ok(vec![3, 12, 14]), "trim each piece and skip the empty ones");
+    assert_eq!(parse_versions(""), Ok(vec![]), "empty input is an empty list, not an error");
+}
+
+#[test]
+fn reports_the_first_bad_piece() {
+    assert!(parse_versions("3, x, 14").is_err(), "\"x\" is not a number, so the whole parse fails");
+    assert!(parse_versions("3, -1").is_err(), "-1 is not a valid u32");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>input.split(',').map(str::trim).filter(|s| !s.is_empty()).map(|s| s.parse::&lt;u32&gt;()).collect()</code>.
+        The function's return type tells <code>collect</code> to build a <code>Result</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-rust">use std::num::ParseIntError;
+
+fn parse_versions(input: &amp;str) -&gt; Result&lt;Vec&lt;u32&gt;, ParseIntError&gt; {
+    input
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::&lt;u32&gt;())
+        .collect()
+}</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m05-e4" data-title="Platforms every feature supports">
+      <div class="exercise-prompt">
+        <p>A small version of <code>FeaturesExt::platforms</code>. Write
+          <code>common_platforms(workspace: &amp;[&amp;str], features: &amp;[Vec&lt;&amp;str&gt;]) -&gt; Vec&lt;String&gt;</code>.
+          <code>workspace</code> lists the workspace's platforms in manifest order. Each entry of
+          <code>features</code> is one feature's platform list; an <strong>empty</strong> list means "no restriction"
+          (the feature supports every platform). Return the workspace platforms that every feature supports, in
+          workspace order.</p>
+      </div>
+<textarea class="starter">
+fn common_platforms(workspace: &[&str], features: &[Vec<&str>]) -> Vec<String> {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn keeps_workspace_order() {
+    let ws = ["win-64", "linux-64", "osx-arm64"];
+    let features = vec![vec!["osx-arm64", "linux-64", "win-64"]];
+    assert_eq!(common_platforms(&ws, &features), vec!["win-64", "linux-64", "osx-arm64"],
+        "results must follow the workspace's order, not the feature's");
+}
+
+#[test]
+fn intersects_restrictions() {
+    let ws = ["linux-64", "osx-arm64", "win-64"];
+    let features = vec![vec!["linux-64", "win-64"], vec!["win-64", "osx-arm64", "linux-64"]];
+    assert_eq!(common_platforms(&ws, &features), vec!["linux-64", "win-64"], "only platforms every feature lists");
+}
+
+#[test]
+fn empty_list_means_unrestricted() {
+    let ws = ["linux-64", "osx-arm64"];
+    let features = vec![vec![], vec!["osx-arm64"]];
+    assert_eq!(common_platforms(&ws, &features), vec!["osx-arm64"], "an empty feature list restricts nothing");
+    assert_eq!(common_platforms(&ws, &[]), vec!["linux-64", "osx-arm64"], "no features: every workspace platform");
+}
+
+#[test]
+fn ignores_platforms_outside_the_workspace() {
+    let ws = ["linux-64"];
+    let features = vec![vec!["linux-64", "win-64"]];
+    assert_eq!(common_platforms(&ws, &features), vec!["linux-64"], "win-64 is not a workspace platform");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Filter the workspace platforms. A platform <code>p</code> passes
+        when <code>features.iter().all(|f| f.is_empty() || f.contains(p))</code>. Then
+        <code>.map(|p| p.to_string()).collect()</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-rust">fn common_platforms(workspace: &amp;[&amp;str], features: &amp;[Vec&lt;&amp;str&gt;]) -&gt; Vec&lt;String&gt; {
+    workspace
+        .iter()
+        .filter(|p| features.iter().all(|f| f.is_empty() || f.contains(p)))
+        .map(|p| p.to_string())
+        .collect()
+}</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m05-e5" data-title="Parse a dependency table">
+      <div class="exercise-prompt">
+        <p>Write <code>parse_deps(text: &amp;str) -&gt; Result&lt;BTreeMap&lt;String, String&gt;, String&gt;</code> for a
+          tiny <code>[dependencies]</code> body, one <code>name = spec</code> per line:</p>
+        <ul>
+          <li>Trim each line. Skip blank lines and lines starting with <code>#</code>.</li>
+          <li>Split each remaining line at the <strong>first</strong> <code>=</code>; trim the name and the spec.
+            Strip one pair of surrounding double quotes from the spec if present (<code>"&gt;=3.12"</code> becomes
+            <code>&gt;=3.12</code>).</li>
+          <li>A line with no <code>=</code>, or with an empty name, is an error: return
+            <code>Err(format!("line {n}: expected name = spec"))</code>, where <code>n</code> is the 1-based line
+            number in the original text.</li>
+          <li>A name that appears twice is an error: <code>Err(format!("line {n}: duplicate dependency {name}"))</code>.</li>
+        </ul>
+      </div>
+<textarea class="starter">
+use std::collections::BTreeMap;
+
+fn parse_deps(text: &str) -> Result<BTreeMap<String, String>, String> {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn parses_simple_lines() {
+    let deps = parse_deps("python = \"3.14.*\"\nnumpy = \">=2\"").expect("valid input should parse");
+    assert_eq!(deps.get("python").map(String::as_str), Some("3.14.*"), "quotes are stripped from the spec");
+    assert_eq!(deps.get("numpy").map(String::as_str), Some(">=2"), "spec for numpy");
+    assert_eq!(deps.len(), 2, "two dependencies");
+}
+
+#[test]
+fn skips_comments_and_blank_lines() {
+    let text = "\n# tools\n  rich = *  \n\n   # more\npytest=>=8";
+    let deps = parse_deps(text).expect("comments and blank lines are not errors");
+    assert_eq!(deps.get("rich").map(String::as_str), Some("*"), "unquoted specs are kept as written, trimmed");
+    assert_eq!(deps.get("pytest").map(String::as_str), Some(">=8"), "split at the first '=' only");
+    assert_eq!(deps.len(), 2, "comments are not dependencies");
+}
+
+#[test]
+fn reports_missing_equals_with_line_number() {
+    let err = parse_deps("python = 3.14\n\nnumpy").unwrap_err();
+    assert_eq!(err, "line 3: expected name = spec", "line numbers count every line, including blank ones");
+}
+
+#[test]
+fn reports_empty_name() {
+    let err = parse_deps(" = 1.0").unwrap_err();
+    assert_eq!(err, "line 1: expected name = spec", "an empty name is invalid");
+}
+
+#[test]
+fn reports_duplicates() {
+    let err = parse_deps("numpy = 1\nrich = 2\nnumpy = 3").unwrap_err();
+    assert_eq!(err, "line 3: duplicate dependency numpy", "the second numpy is on line 3");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Loop over <code>text.lines().enumerate()</code> so you have the
+        index (add 1 for the line number). <code>let Some((name, spec)) = line.split_once('=') else { return Err(...) };</code>
+        handles the missing <code>=</code>. For quotes, <code>spec.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(spec)</code>.
+        For duplicates, <code>insert</code> returns <code>Some(old)</code> when the key was already there.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-rust">use std::collections::BTreeMap;
+
+fn parse_deps(text: &amp;str) -&gt; Result&lt;BTreeMap&lt;String, String&gt;, String&gt; {
+    let mut deps = BTreeMap::new();
+    for (index, raw) in text.lines().enumerate() {
+        let n = index + 1;
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((name, spec)) = line.split_once('=') else {
+            return Err(format!("line {n}: expected name = spec"));
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(format!("line {n}: expected name = spec"));
+        }
+        let spec = spec.trim();
+        let spec = spec.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(spec);
+        if deps.insert(name.to_string(), spec.to_string()).is_some() {
+            return Err(format!("line {n}: duplicate dependency {name}"));
+        }
+    }
+    Ok(deps)
+}</code></pre></details>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="mini-project">
+    <h2>Mini-project: a dependency report</h2>
+    <div class="project-box">
+      <div class="widget-head"><span class="w-kind">Mini-project</span><span class="w-title">dep-report: summarize the features of a manifest</span></div>
+      <div class="widget-body">
+        <p>Build a small command-line tool that reads a simplified manifest and prints a report about its features.
+          It exercises every collection in this module, and its input looks like the <code>[feature.*]</code> tables
+          you know from Pixi.</p>
+        <pre data-label="Terminal"><code class="language-bash">pixi init dep-report &amp;&amp; cd dep-report
+pixi add rust
+pixi run cargo init --name dep_report
+# write src/main.rs, then:
+pixi run cargo run -- sample.toml
+pixi run cargo test
+pixi run cargo clippy --all-targets -- -D warnings</code></pre>
+        <p><strong>Input</strong> (<code>sample.toml</code>; do not use a TOML crate yet, parse lines by hand):</p>
+        <pre data-label="sample.toml"><code class="language-toml">[feature.default]
+python = "3.14.*"
+numpy = "&gt;=2"
+
+[feature.test]
+pytest = "&gt;=8"
+numpy = "&gt;=2"
+
+[feature.docs]
+mkdocs = "*"</code></pre>
+        <p><strong>Output</strong>: one line per feature in the order the file defines them, with its dependency
+          count and sorted names; then every package used by more than one feature, sorted, with the features that use
+          it.</p>
+        <pre data-label="Expected output"><code class="language-bash">default (2): numpy, python
+test (2): numpy, pytest
+docs (1): mkdocs
+shared: numpy in default, test</code></pre>
+        <p><strong>Suggested design</strong></p>
+        <ul>
+          <li><code>fn parse(text: &amp;str) -&gt; Result&lt;Vec&lt;(String, BTreeMap&lt;String, String&gt;)&gt;, String&gt;</code>:
+            a <code>Vec</code> of pairs keeps the feature order without <code>IndexMap</code>. Reuse your exercise 5
+            parser for the bodies.</li>
+          <li><code>fn shared(features: &amp;[(String, BTreeMap&lt;String, String&gt;)]) -&gt; BTreeMap&lt;String, Vec&lt;String&gt;&gt;</code>:
+            build package to features with the entry API, then <code>retain</code> the entries with more than one
+            feature.</li>
+          <li><code>main</code> reads the file named by the first argument with
+            <code>std::env::args().nth(1)</code> and <code>std::fs::read_to_string</code>, and returns
+            <code>Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt;</code> as in M04.</li>
+        </ul>
+        <ul class="checklist" data-id="m05-mini">
+          <li>Features print in file order; dependency names within a feature print sorted</li>
+          <li>The shared section is computed with <code>entry(...).or_default()</code> and <code>retain</code></li>
+          <li>A dependency line outside any <code>[feature.*]</code> header is reported as an error with its line number</li>
+          <li>No <code>HashMap</code> appears in printed output</li>
+          <li>Unit tests cover parsing, an empty feature, and the shared computation</li>
+          <li><code>pixi run cargo clippy --all-targets -- -D warnings</code> is clean</li>
+        </ul>
+        <p><strong>Stretch goals:</strong> add a <code>--platform</code> section using
+          <code>[feature.x.target.linux-64]</code> headers; print the features that share <em>no</em> packages with any
+          other; report a dependency whose spec differs between features (<code>numpy = "&gt;=2"</code> in one,
+          <code>"&lt;2"</code> in another) as a warning.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="quiz">
+    <h2>Quiz</h2>
+    <div class="quiz" data-id="m05-quiz">
+<script type="application/json">
+{"title": "Collections & Iterators quiz", "passScore": 0.7, "questions": [
+  {"type": "single", "prompt": "You need a map whose iteration order is the same on every run and sorted by key. Which type?", "options": ["<code>HashMap</code>", "<code>BTreeMap</code>", "<code>Vec&lt;(K, V)&gt;</code> with no sorting", "<code>HashSet</code>"], "answer": 1, "explanation": "<p><code>BTreeMap</code> keeps keys sorted. <code>HashMap</code> order is unspecified and can change between runs. Pixi uses <code>IndexMap</code> when it needs insertion order instead.</p>"},
+  {"type": "single", "prompt": "Does this compile?", "code": "fn main() {\n    let names = vec![String::from(\"numpy\")];\n    for n in names {\n        println!(\"{n}\");\n    }\n    println!(\"{}\", names.len());\n}", "options": ["Yes", "No: E0382, the for loop moved names via into_iter()", "No: E0502, names is borrowed mutably", "No: String is not iterable"], "answer": 1, "explanation": "<p><code>for n in names</code> calls <code>names.into_iter()</code>, which takes ownership. Loop over <code>&amp;names</code> to borrow instead.</p>"},
+  {"type": "output", "prompt": "What does this print?", "code": "use std::collections::BTreeMap;\n\nfn main() {\n    let mut counts: BTreeMap<char, u32> = BTreeMap::new();\n    for c in \"banana\".chars() {\n        *counts.entry(c).or_insert(0) += 1;\n    }\n    println!(\"{counts:?}\");\n}", "answer": "{'a': 3, 'b': 1, 'n': 2}", "explanation": "<p>The entry API counts each character; <code>BTreeMap</code> prints keys sorted. <code>char</code>s debug-print in single quotes.</p>"},
+  {"type": "multi", "prompt": "Which of these return an <code>Option</code>?", "options": ["<code>v.get(3)</code> on a <code>Vec</code>", "<code>v.pop()</code>", "<code>v.len()</code>", "<code>it.max()</code>", "<code>it.position(|x| ...)</code>"], "answer": [0, 1, 3, 4], "explanation": "<p>Anything that might find nothing returns <code>Option</code>: an index past the end, popping an empty vector, the max of an empty iterator, a position never found. <code>len</code> always has an answer.</p>"},
+  {"type": "output", "prompt": "What does this print?", "code": "fn main() {\n    let v = vec![1, 2, 3, 4, 5, 6];\n    let r: Vec<i32> = v.iter().filter(|&&x| x % 2 == 0).map(|x| x * 10).take(2).collect();\n    println!(\"{r:?}\");\n}", "answer": "[20, 40]", "explanation": "<p>Keep the even numbers (2, 4, 6), multiply by ten, take the first two.</p>"},
+  {"type": "single", "prompt": "What is the value of <code>parsed</code>?", "code": "let parsed: Result<Vec<u32>, _> = [\"1\", \"x\", \"3\"].iter().map(|s| s.parse::<u32>()).collect();", "options": ["<code>Ok(vec![1, 3])</code>: bad items are skipped", "<code>Err(..)</code> holding the error from parsing \"x\"", "<code>Ok(vec![1])</code>: it stops at the error but keeps what it had", "It does not compile"], "answer": 1, "explanation": "<p>Collecting into <code>Result&lt;Vec&lt;T&gt;, E&gt;</code> returns the first <code>Err</code> and discards the rest. To skip bad items instead, use <code>filter_map(|s| s.parse().ok())</code>.</p>"},
+  {"type": "single", "prompt": "Why does <code>let total = v.iter().sum();</code> fail with E0283?", "options": ["<code>sum</code> only works on <code>Vec&lt;f64&gt;</code>", "<code>sum</code> can produce several result types, so the compiler needs to be told which one", "Iterators cannot be summed; use <code>fold</code>", "<code>v</code> must be mutable"], "answer": 1, "explanation": "<p>Write <code>let total: i32 = ...</code> or <code>.sum::&lt;i32&gt;()</code>. The same applies to <code>collect</code>.</p>"},
+  {"type": "single", "prompt": "Does this compile?", "code": "fn main() {\n    let mut times = vec![0.5, 2.0, 1.5];\n    times.sort();\n}", "options": ["Yes", "No: E0277, floats are not Ord because of NaN", "No: E0308, mismatched types", "No: sort needs a closure"], "answer": 1, "explanation": "<p><code>sort</code> requires <code>T: Ord</code>. Use <code>times.sort_by(|a, b| a.total_cmp(b))</code>.</p>"},
+  {"type": "output", "prompt": "What does this print?", "code": "fn main() {\n    let mut v = vec![3, 1, 3, 2, 1];\n    v.dedup();\n    println!(\"{v:?}\");\n    v.sort();\n    v.dedup();\n    println!(\"{v:?}\");\n}", "answer": "[3, 1, 3, 2, 1]\n[1, 2, 3]", "explanation": "<p><code>dedup</code> removes only <em>consecutive</em> duplicates, and the unsorted vector has none. After sorting, duplicates are adjacent and disappear.</p>"},
+  {"type": "single", "prompt": "Inside <code>v.iter().filter(...)</code> on a <code>Vec&lt;i32&gt;</code>, what type does the closure receive?", "options": ["<code>i32</code>", "<code>&amp;i32</code>", "<code>&amp;&amp;i32</code>", "<code>&amp;mut i32</code>"], "answer": 2, "explanation": "<p><code>iter()</code> yields <code>&amp;i32</code>, and <code>filter</code> passes a reference to each item so it can return the item unchanged: <code>&amp;&amp;i32</code>. Hence <code>|&amp;&amp;x|</code> or <code>|x| **x</code>.</p>"},
+  {"type": "output", "prompt": "What does this print?", "code": "fn main() {\n    let s = \"name = pixi = cool\";\n    let (k, v) = s.split_once('=').unwrap();\n    println!(\"[{}] [{}]\", k.trim(), v.trim());\n    println!(\"{}\", \"héllo\".len());\n}", "answer": "[name] [pixi = cool]\n6", "explanation": "<p><code>split_once</code> splits at the first match only. <code>len</code> counts bytes, and <code>é</code> is two bytes in UTF-8.</p>"},
+  {"type": "text", "prompt": "Which <code>Entry</code> method inserts <code>V::default()</code> when the key is missing (Rust's <code>defaultdict</code>)?", "answer": ["or_default", "or_default()", ".or_default()"], "explanation": "<p><code>map.entry(k).or_default()</code> returns <code>&amp;mut V</code>, inserting an empty value first if needed. Pixi uses it to create per-platform and per-spec-type groups.</p>"},
+  {"type": "single", "prompt": "What happens when this runs?", "code": "fn main() {\n    let v = vec![1, 2, 3];\n    v.iter().map(|x| println!(\"{x}\"));\n}", "options": ["Prints 1, 2, 3", "Prints nothing; the compiler warns that the iterator is unused and lazy", "Does not compile", "Panics"], "answer": 1, "explanation": "<p>Adapters are lazy. Nothing calls <code>next</code>, so the closure never runs. Use a <code>for</code> loop for side effects, or a consumer such as <code>for_each</code> or <code>count</code>.</p>"},
+  {"type": "multi", "prompt": "Why does Pixi use <code>IndexMap</code>/<code>IndexSet</code> for manifest data?", "options": ["They keep the order the user wrote entries in", "They make output and rewritten manifests deterministic", "They are the only maps that accept <code>String</code> keys", "They sort keys alphabetically"], "answer": [0, 1], "explanation": "<p><code>IndexMap</code> preserves insertion order, like a Python <code>dict</code>. Any <code>Hash + Eq</code> key works in a <code>HashMap</code> too; sorting by key is <code>BTreeMap</code>'s behavior.</p>"}
+]}
+</script>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="recap">
+    <h2>Recap</h2>
+    <ul>
+      <li><code>Vec&lt;T&gt;</code> owns its elements. <code>v[i]</code> panics out of range, <code>v.get(i)</code> returns
+        <code>Option</code>. Functions that only read take <code>&amp;[T]</code>.</li>
+      <li><code>HashMap</code>/<code>HashSet</code> are unordered; <code>BTreeMap</code>/<code>BTreeSet</code> are sorted;
+        Pixi's <code>IndexMap</code>/<code>IndexSet</code> keep insertion order.</li>
+      <li>The entry API (<code>entry(k).or_insert(v)</code>, <code>.or_default()</code>, <code>.and_modify</code>)
+        counts, groups, and inserts with one lookup.</li>
+      <li><code>iter</code> borrows, <code>iter_mut</code> borrows mutably, <code>into_iter</code> moves. <code>for x in v</code>
+        consumes <code>v</code>; <code>for x in &amp;v</code> does not.</li>
+      <li>Adapters (<code>map</code>, <code>filter</code>, <code>filter_map</code>, <code>enumerate</code>, <code>zip</code>,
+        <code>chain</code>, <code>flat_map</code>, <code>take</code>, <code>skip</code>) are lazy; consumers
+        (<code>collect</code>, <code>sum</code>, <code>count</code>, <code>any</code>, <code>all</code>, <code>find</code>,
+        <code>position</code>, <code>fold</code>) run them.</li>
+      <li><code>collect</code> builds whatever type you ask for, including <code>Result&lt;Vec&lt;_&gt;, _&gt;</code>, which
+        stops at the first error.</li>
+      <li>Sorting is in place and needs <code>Ord</code>; <code>dedup</code> needs sorted input; floats sort with
+        <code>total_cmp</code>.</li>
+      <li>Strings cannot be indexed by number. Iterate with <code>chars</code>, <code>split</code>, <code>lines</code>;
+        <code>len</code> counts bytes.</li>
+    </ul>
+    <div class="flashcards" data-title="Collections and iterators">
+      <script type="application/json">
+      [{"front": "<code>v[i]</code> vs <code>v.get(i)</code>", "back": "<code>v[i]</code> panics when out of range; <code>get</code> returns <code>Option&lt;&amp;T&gt;</code>."},
+       {"front": "HashMap vs BTreeMap vs IndexMap", "back": "Unordered and fast / sorted by key / insertion order (the <code>indexmap</code> crate, used throughout Pixi)."},
+       {"front": "Rust's <code>setdefault(k, []).append(x)</code>", "back": "<code>map.entry(k).or_default().push(x)</code>"},
+       {"front": "<code>iter()</code> / <code>iter_mut()</code> / <code>into_iter()</code>", "back": "Items are <code>&amp;T</code> / <code>&amp;mut T</code> / <code>T</code>. Only <code>into_iter</code> consumes the collection."},
+       {"front": "What does <code>for x in v</code> call?", "back": "<code>v.into_iter()</code>, which moves <code>v</code>. Use <code>for x in &amp;v</code> to borrow."},
+       {"front": "<code>filter_map</code>", "back": "Calls a closure returning <code>Option</code>; keeps the <code>Some</code> values, unwrapped."},
+       {"front": "Are iterator adapters eager or lazy?", "back": "Lazy. Nothing runs until a consumer (or a <code>for</code> loop) calls <code>next</code>."},
+       {"front": "Collect an iterator of <code>Result&lt;T, E&gt;</code>", "back": "Into <code>Result&lt;Vec&lt;T&gt;, E&gt;</code>: <code>Ok</code> of all values, or the first <code>Err</code>."},
+       {"front": "The turbofish", "back": "<code>::&lt;T&gt;</code> on a method, e.g. <code>.collect::&lt;Vec&lt;_&gt;&gt;()</code> or <code>.parse::&lt;u32&gt;()</code>."},
+       {"front": "Why can't you <code>sort()</code> a <code>Vec&lt;f64&gt;</code>?", "back": "<code>f64</code> is not <code>Ord</code> (NaN). Use <code>sort_by(|a, b| a.total_cmp(b))</code>."},
+       {"front": "<code>dedup()</code> caveat", "back": "It only removes consecutive duplicates. Sort first."},
+       {"front": "<code>\"naïve\".len()</code>", "back": "6: <code>len</code> counts UTF-8 bytes. <code>.chars().count()</code> is 5."}]
+      </script>
+    </div>
+    <h3>Going further</h3>
+    <ul>
+      <li><a href="https://doc.rust-lang.org/book/ch08-00-common-collections.html">The Rust Book, chapter 8: Common Collections</a> and <a href="https://doc.rust-lang.org/book/ch13-02-iterators.html">13.2: Processing a Series of Items with Iterators</a></li>
+      <li><a href="https://doc.rust-lang.org/rust-by-example/std/vec.html">Rust by Example: Vectors</a>, <a href="https://doc.rust-lang.org/rust-by-example/std/hash.html">HashMap</a>, and <a href="https://doc.rust-lang.org/rust-by-example/trait/iter.html">Iterators</a></li>
+      <li>std docs: <a href="https://doc.rust-lang.org/std/iter/trait.Iterator.html"><code>Iterator</code></a> (every adapter and consumer), <a href="https://doc.rust-lang.org/std/collections/index.html"><code>std::collections</code></a> (with a guide to choosing a collection), <a href="https://doc.rust-lang.org/std/collections/hash_map/enum.Entry.html"><code>Entry</code></a></li>
+      <li>The Rust Reference: <a href="https://doc.rust-lang.org/reference/expressions/loop-expr.html#iterator-loops">iterator loops</a> (what <code>for</code> desugars to)</li>
+      <li>Pixi source: <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/features_ext.rs">crates/pixi_manifest/src/features_ext.rs</a>, a whole trait of iterator chains over features</li>
+      <li>Next: <a href="m06-traits-generics.html">M06 Traits &amp; Generics</a>, where <code>Ord</code>, <code>Hash</code>, <code>FromIterator</code>, and <code>Iterator</code> itself turn out to be ordinary traits you can implement</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

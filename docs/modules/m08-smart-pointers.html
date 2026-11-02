@@ -1,0 +1,1379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M08 · Smart Pointers &amp; Shared State · Rust Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-rust.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-module="m08">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Stage 2 · Idiomatic Rust · Module 08</p>
+    <h1>Smart Pointers &amp; Shared State</h1>
+    <p class="lede">Ownership says every value has exactly one owner, and borrowing says references must not outlive
+      it. Real programs need more: a tree whose nodes contain nodes, one HTTP client used by twenty download tasks, a
+      cache that many threads update. Rust's standard library meets those needs with a small set of
+      <strong>smart pointers</strong>, types that own a value and add a rule about how it is shared or changed. This
+      module teaches each one by the problem it solves, and ends with why nearly every long-lived object in Pixi sits
+      behind an <code>Arc</code>.</p>
+    <div class="lesson-meta"><span>⏱ ~2.5 hours</span><span>Prerequisites: <a href="m07-lifetimes.html">M07 Lifetimes in Practice</a>, <a href="m06-traits-generics.html">M06 Traits &amp; Generics</a></span></div>
+    <ul class="objectives">
+      <li>Use <code>Box&lt;T&gt;</code> for recursive types, trait objects, and to keep large enum variants small</li>
+      <li>Share ownership with <code>Rc&lt;T&gt;</code> and <code>Arc&lt;T&gt;</code>, and explain what cloning one costs</li>
+      <li>Mutate through a shared reference with <code>Cell</code> and <code>RefCell</code>, and know when <code>RefCell</code> panics</li>
+      <li>Explain <code>Send</code> and <code>Sync</code> well enough to read the compiler's thread-safety errors</li>
+      <li>Share mutable state between threads with <code>Arc&lt;Mutex&lt;T&gt;&gt;</code> and <code>RwLock</code>, and recognize <code>parking_lot</code>'s versions</li>
+      <li>Borrow local data from threads with <code>std::thread::scope</code></li>
+      <li>Use <code>Cow&lt;'_, str&gt;</code>, <code>OnceLock</code> and <code>LazyLock</code>, and read Pixi's <code>once_cell</code> fields</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="box">
+    <h2><code>Box&lt;T&gt;</code>: one owner, on the heap</h2>
+    <p>In Python, every object lives on the heap and every variable is a pointer to one, so you never think about
+      where a value lives. In Rust, a value lives wherever its owner is: a local <code>i32</code> or a struct sits
+      directly in the function's stack frame, and its size must be known at compile time. A <code>String</code> or a
+      <code>Vec</code> is a small fixed-size handle on the stack that owns a heap buffer (M03).</p>
+    <p><code>Box&lt;T&gt;</code> is the simplest smart pointer: it puts one <code>T</code> on the heap and owns it.
+      A box is one pointer wide, has exactly one owner, moves like any other value, and frees its <code>T</code> when
+      it is dropped. <code>Box::new(value)</code> creates one, and <code>*b</code> or auto-deref (calling methods
+      directly on <code>b</code>) reaches the value. You need it in three situations.</p>
+    <h3>1. Recursive types</h3>
+    <p>A type that contains itself directly would be infinitely large. An expression tree is the classic case:</p>
+    <div class="runnable" data-title="E0072: recursive type has infinite size" data-compile-fail>
+<textarea>
+enum Expr {
+    Num(i64),
+    Add(Expr, Expr),
+}
+
+fn main() {
+    let _e = Expr::Num(1);
+}
+</textarea>
+    </div>
+    <p>The compiler cannot compute <code>size_of::&lt;Expr&gt;()</code>, because an <code>Add</code> holds two more
+      <code>Expr</code> values inline, each of which might be an <code>Add</code>. The help line says "insert some
+      indirection (e.g., a <code>Box</code>, <code>Rc</code>, or <code>&amp;</code>) to break the cycle". (A second error,
+      E0391 "cycle detected", is a follow-on from the same problem; fix the first error and it disappears.) A box has
+      a fixed size (one pointer), so the recursion moves to the heap:</p>
+    <div class="runnable" data-title="Box breaks the cycle" data-predict>
+<textarea>
+enum Expr {
+    Num(i64),
+    Add(Box<Expr>, Box<Expr>),
+    Mul(Box<Expr>, Box<Expr>),
+}
+
+fn eval(e: &Expr) -> i64 {
+    match e {
+        Expr::Num(n) => *n,
+        Expr::Add(a, b) => eval(a) + eval(b),
+        Expr::Mul(a, b) => eval(a) * eval(b),
+    }
+}
+
+fn main() {
+    // (2 + 3) * 4
+    let e = Expr::Mul(
+        Box::new(Expr::Add(Box::new(Expr::Num(2)), Box::new(Expr::Num(3)))),
+        Box::new(Expr::Num(4)),
+    );
+    println!("{}", eval(&e));
+}
+</textarea>
+    </div>
+    <p>Notice <code>eval(a)</code> where <code>a: &amp;Box&lt;Expr&gt;</code>: deref coercion turns
+      <code>&amp;Box&lt;Expr&gt;</code> into <code>&amp;Expr</code> automatically. A <code>Vec&lt;Expr&gt;</code>
+      field would also break the cycle, because a <code>Vec</code> already keeps its elements on the heap; that is how
+      tree-like types such as a dependency tree usually hold their children.</p>
+    <h3>2. Trait objects</h3>
+    <p>M06 introduced <code>Box&lt;dyn Trait&gt;</code>: a value of some type that implements the trait, chosen at
+      run time. Different types have different sizes, so they cannot sit side by side in a <code>Vec</code>; boxing
+      each gives every element the same size (a pointer plus a vtable pointer).</p>
+    <pre><code class="language-rust">let backends: Vec&lt;Box&lt;dyn BuildBackend&gt;&gt; = vec![Box::new(Cmake::default()), Box::new(Python::default())];</code></pre>
+    <h3>3. Keeping a large enum variant small</h3>
+    <p>An enum is as large as its largest variant. If one variant is big and rare, every value pays for it. Predict
+      the sizes, in bytes:</p>
+    <div class="runnable" data-title="Boxing a large variant" data-predict>
+<textarea>
+#[allow(dead_code)]
+enum Inline {
+    Small(u8),
+    Large([u8; 256]),
+}
+
+#[allow(dead_code)]
+enum Boxed {
+    Small(u8),
+    Large(Box<[u8; 256]>),
+}
+
+fn main() {
+    println!("{}", size_of::<Inline>());
+    println!("{}", size_of::<Boxed>());
+}
+</textarea>
+    </div>
+    <aside class="callout pixi"><p>Pixi's central dependency type does exactly this. A spec is usually a bare version
+      string, but some variants carry large detailed structs, so those are boxed
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_spec/src/lib.rs#L93-L121">crates/pixi_spec/src/lib.rs</a>):</p>
+    <pre><code class="language-rust">pub enum PixiSpec {
+    // ...
+    Version(VersionSpec),
+    DetailedVersion(Box&lt;DetailedSpec&gt;),
+    UrlBinary(UrlBinarySpec),
+    PathBinary(PathBinarySpec),
+    UrlSource(Box&lt;UrlSourceSpec&gt;),
+    PathSource(Box&lt;PathSourceSpec&gt;),
+    Git(Box&lt;GitSpec&gt;),
+}</code></pre>
+    <p>A manifest holds thousands of these in maps; boxing the rare large variants keeps every map entry small. Clippy's
+      <code>large_enum_variant</code> lint suggests this change when one variant is much bigger than the others.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>Box&lt;T&gt;</code> is single ownership on the heap.
+      Reach for it for recursive types, <code>dyn Trait</code> values, and large, rare enum variants. It adds no
+      sharing and no mutability rules.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="rc">
+    <h2><code>Rc&lt;T&gt;</code>: many owners, one thread</h2>
+    <p>Sometimes a value genuinely has several owners, and none of them is clearly the last to use it. In Python that
+      is every object: CPython counts references and frees the object when the count reaches zero.
+      <code>Rc&lt;T&gt;</code> ("reference counted") gives you exactly that model, opt-in, for one value.</p>
+    <p><code>Rc::new(value)</code> moves the value to the heap next to a counter set to 1. <code>Rc::clone(&amp;rc)</code>
+      does <em>not</em> copy the value: it increments the counter and returns another pointer to the same allocation.
+      Dropping an <code>Rc</code> decrements the counter, and the value is dropped when it reaches zero. Predict the
+      counts:</p>
+    <div class="runnable" data-title="Counting owners" data-predict>
+<textarea>
+use std::rc::Rc;
+
+fn main() {
+    let channels = Rc::new(vec![String::from("conda-forge"), String::from("bioconda")]);
+    let for_solver = Rc::clone(&channels);
+    println!("{}", Rc::strong_count(&channels));
+    {
+        let for_installer = Rc::clone(&channels);
+        println!("{} {}", Rc::strong_count(&channels), for_installer.len());
+    }
+    println!("{}", Rc::strong_count(&channels));
+    println!("{}", Rc::ptr_eq(&channels, &for_solver));
+}
+</textarea>
+    </div>
+    <p>The convention is to write <code>Rc::clone(&amp;x)</code> rather than <code>x.clone()</code>. Both do the same
+      thing, but the explicit form tells a reader "this is a cheap pointer copy, not a deep clone of the vector".</p>
+    <p>There is a catch: <code>Rc&lt;T&gt;</code> only gives out shared references. If several owners could each get
+      <code>&amp;mut T</code>, the "one writer or many readers" rule from M03 would be broken. So this fails:</p>
+    <div class="runnable" data-title="E0596: Rc gives shared access only" data-compile-fail>
+<textarea>
+use std::rc::Rc;
+
+fn main() {
+    let channels = Rc::new(vec![String::from("conda-forge")]);
+    let other = Rc::clone(&channels);
+    other.push(String::from("bioconda"));
+    println!("{}", channels.len());
+}
+</textarea>
+    </div>
+    <p>"cannot borrow data in an <code>Rc</code> as mutable" is the rule doing its job. Shared ownership plus mutation
+      needs one more piece, coming next.</p>
+    <aside class="callout warn"><p>Reference counting has one leak: a cycle. If <code>a</code> holds an
+      <code>Rc</code> to <code>b</code> and <code>b</code> holds one to <code>a</code>, neither count reaches zero. Python
+      has a cycle collector for this; Rust does not. Break cycles with <code>std::rc::Weak</code>, a non-owning pointer
+      that you <code>upgrade()</code> to an <code>Option&lt;Rc&lt;T&gt;&gt;</code> when you need it (parent pointers in
+      trees are the usual case).</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>Rc::clone</code> copies a pointer and bumps a
+      count. The value is dropped when the last <code>Rc</code> goes. <code>Rc</code> is read-only and single-thread
+      only.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="refcell">
+    <h2><code>RefCell&lt;T&gt;</code> and interior mutability</h2>
+    <p>The borrow rules are checked at compile time. Occasionally you know a mutation is safe but the compiler cannot
+      see it, usually because the only thing you have is a <code>&amp;self</code> or a shared <code>Rc</code>.
+      <strong>Interior mutability</strong> is the name for types that allow mutation through a shared reference, by
+      checking the rules some other way.</p>
+    <p><code>RefCell&lt;T&gt;</code> checks the borrowing rules at <em>run time</em>. It keeps a small counter of
+      active borrows:</p>
+    <ul>
+      <li><code>cell.borrow()</code> returns a <code>Ref&lt;T&gt;</code>, which acts like <code>&amp;T</code>. Many can
+        exist at once.</li>
+      <li><code>cell.borrow_mut()</code> returns a <code>RefMut&lt;T&gt;</code>, which acts like
+        <code>&amp;mut T</code>. Only one can exist, and only when there are no <code>Ref</code>s.</li>
+      <li>Breaking the rule does not fail to compile; it <strong>panics</strong>. <code>try_borrow_mut()</code> returns
+        a <code>Result</code> instead.</li>
+    </ul>
+    <p>The guards release their borrow when dropped, just like a reference's last use ends a borrow. A common pattern
+      is a type whose methods take <code>&amp;self</code> but record something on the side:</p>
+    <div class="runnable" data-title="Recording through &amp;self" data-predict>
+<textarea>
+use std::cell::RefCell;
+
+struct Validator {
+    warnings: RefCell<Vec<String>>,
+}
+
+impl Validator {
+    fn check(&self, name: &str) -> bool {
+        if name.chars().any(|c| c.is_uppercase()) {
+            self.warnings.borrow_mut().push(format!("'{name}' should be lowercase"));
+        }
+        !name.is_empty()
+    }
+}
+
+fn main() {
+    let v = Validator { warnings: RefCell::new(Vec::new()) };
+    let ok = ["numpy", "Pandas", "", "SciPy"].iter().filter(|n| v.check(n)).count();
+    println!("{ok} valid");
+    for w in v.warnings.borrow().iter() {
+        println!("{w}");
+    }
+}
+</textarea>
+    </div>
+    <p>Combine it with <code>Rc</code> and you get shared, mutable, single-threaded state: <code>Rc&lt;RefCell&lt;T&gt;&gt;</code>.
+      Every owner can call <code>borrow_mut()</code>. This is the closest thing Rust has to an ordinary Python object
+      shared between two parts of a program.</p>
+    <p>Here is what a broken rule looks like. This compiles, then panics at run time:</p>
+    <div class="runnable" data-title="RefCell panics on a second mutable borrow">
+<textarea>
+use std::cell::RefCell;
+
+fn main() {
+    let log = RefCell::new(vec![String::from("start")]);
+    let first = log.borrow_mut();
+    println!("first borrow taken: {}", first.len());
+    println!("try_borrow_mut ok? {}", log.try_borrow_mut().is_ok());
+    let _second = log.borrow_mut(); // panics: RefCell already borrowed
+    println!("never printed");
+}
+</textarea>
+    </div>
+    <p>The fix is to keep borrow guards short-lived: take the borrow, do the work, and let the guard drop in the same
+      statement or a small block. Never hold a <code>borrow_mut()</code> across a call that might borrow the same
+      cell again.</p>
+    <aside class="callout note" data-title="Cell, the lighter cousin"><p><code>std::cell::Cell&lt;T&gt;</code> is
+      interior mutability without borrows: you <code>get()</code> a copy or <code>set()</code> a new value, so it can
+      never panic. It suits small <code>Copy</code> values such as counters and flags:
+      <code>calls: Cell&lt;u32&gt;</code> and <code>self.calls.set(self.calls.get() + 1)</code>.</p></aside>
+    <aside class="callout pixi"><p>Pixi's Python build backend collects warnings while it reads
+      <code>pyproject.toml</code> metadata, from methods that only take <code>&amp;self</code>
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_build_python/src/metadata.rs#L36-L70">crates/pixi_build_python/src/metadata.rs</a>):</p>
+    <pre><code class="language-rust">pub struct PyprojectMetadataProvider {
+    manifest_root: PathBuf,
+    pyproject_manifest: OnceCell&lt;PyProjectToml&gt;,
+    mode: PyprojectManifestMode,
+    warnings: RefCell&lt;Vec&lt;String&gt;&gt;,
+}
+// ...
+    pub fn warnings(&amp;self) -&gt; Vec&lt;String&gt; {
+        self.warnings.borrow().clone()
+    }
+
+    /// Adds a warning message to the warning collection.
+    fn add_warning(&amp;self, warning: impl Into&lt;String&gt;) {
+        self.warnings.borrow_mut().push(warning.into());
+    }</code></pre>
+    <p>Both guards live for one expression, so a double borrow cannot happen. The <code>OnceCell</code> field is another
+      interior-mutability type, covered below.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>RefCell</code> moves the borrow check to run time:
+      <code>borrow()</code> for many readers, <code>borrow_mut()</code> for one writer, a panic if you break it.
+      <code>Rc&lt;RefCell&lt;T&gt;&gt;</code> is shared mutable state on one thread.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="send-sync">
+    <h2>Threads, <code>Send</code> and <code>Sync</code></h2>
+    <p><code>Rc</code>'s counter is a plain integer. If two threads cloned the same <code>Rc</code> at the same moment,
+      both could read 1 and both write 2, and the value would later be freed while one thread still uses it. Python
+      avoids this with the global interpreter lock; Rust avoids it with two marker traits that the compiler checks.</p>
+    <ul>
+      <li><strong><code>Send</code></strong>: a value of this type can be <em>moved</em> to another thread.</li>
+      <li><strong><code>Sync</code></strong>: a <code>&amp;T</code> can be <em>shared</em> between threads (precisely,
+        <code>T</code> is <code>Sync</code> if <code>&amp;T</code> is <code>Send</code>).</li>
+    </ul>
+    <p>You almost never implement these. The compiler derives them automatically: a struct is <code>Send</code> if all
+      its fields are. <code>String</code>, <code>Vec&lt;T&gt;</code> of <code>Send</code> things, and integers are both.
+      <code>Rc&lt;T&gt;</code> is neither, and <code>RefCell&lt;T&gt;</code> is <code>Send</code> but not
+      <code>Sync</code>. <code>std::thread::spawn</code> requires its closure to be <code>Send</code>, so:</p>
+    <div class="runnable" data-title="E0277: Rc cannot be sent between threads safely" data-compile-fail>
+<textarea>
+use std::rc::Rc;
+use std::thread;
+
+fn main() {
+    let channels = Rc::new(vec![String::from("conda-forge")]);
+    let for_thread = Rc::clone(&channels);
+    let handle = thread::spawn(move || for_thread.len());
+    println!("{}", handle.join().unwrap());
+}
+</textarea>
+    </div>
+    <p>Read the error top-down. E0277 is the general "trait bound not satisfied" error from M06. The message names
+      the type (<code>Rc&lt;Vec&lt;String&gt;&gt;</code> cannot be sent between threads safely), a note says "required
+      because it's used within this closure", and another points at the <code>F: Send</code> bound on
+      <code>spawn</code>. This is a data race being prevented at compile time.</p>
+    <table>
+      <thead><tr><th>Type</th><th><code>Send</code></th><th><code>Sync</code></th><th>Use it for</th></tr></thead>
+      <tbody>
+        <tr><td><code>Box&lt;T&gt;</code></td><td>if <code>T</code> is</td><td>if <code>T</code> is</td><td>single owner on the heap</td></tr>
+        <tr><td><code>Rc&lt;T&gt;</code></td><td>no</td><td>no</td><td>shared ownership, one thread</td></tr>
+        <tr><td><code>Arc&lt;T&gt;</code></td><td>if <code>T: Send + Sync</code></td><td>if <code>T: Send + Sync</code></td><td>shared ownership across threads</td></tr>
+        <tr><td><code>Cell</code>, <code>RefCell</code></td><td>if <code>T</code> is</td><td>no</td><td>interior mutability, one thread</td></tr>
+        <tr><td><code>Mutex&lt;T&gt;</code>, <code>RwLock&lt;T&gt;</code></td><td>if <code>T: Send</code></td><td>if <code>T: Send</code> (<code>RwLock</code> also needs <code>T: Sync</code>)</td><td>interior mutability across threads</td></tr>
+      </tbody>
+    </table>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>Send</code> = may move to another thread;
+      <code>Sync</code> = may be shared by reference between threads. The compiler works them out for you, and an
+      E0277 mentioning them means "this would be a data race".</p></aside>
+  </section>
+
+  <section class="lesson-section" id="arc-mutex">
+    <h2><code>Arc</code>, <code>Mutex</code> and <code>RwLock</code></h2>
+    <p><code>Arc&lt;T&gt;</code> ("atomically reference counted") is <code>Rc&lt;T&gt;</code> with a counter updated
+      by atomic CPU instructions, which are safe to run from several threads at once. Same API, slightly slower
+      clones, and <code>Send + Sync</code> when <code>T</code> is. Swap <code>Rc</code> for <code>Arc</code> in the
+      failing program above and it compiles.</p>
+    <p>Like <code>Rc</code>, <code>Arc</code> gives shared access only. To mutate shared data from several threads you
+      need the thread-safe version of <code>RefCell</code>: a <strong>lock</strong>.</p>
+    <ul>
+      <li><code>Mutex&lt;T&gt;</code> ("mutual exclusion"): <code>m.lock()</code> waits until no other thread holds the
+        lock, then returns a <code>MutexGuard&lt;T&gt;</code> that derefs to <code>&amp;mut T</code>. Dropping the guard
+        unlocks.</li>
+      <li><code>RwLock&lt;T&gt;</code> (reader-writer lock): <code>read()</code> gives shared access to many threads at
+        once, <code>write()</code> gives exclusive access to one. Better when reads vastly outnumber writes.</li>
+    </ul>
+    <p>Unlike Python's <code>threading.Lock</code>, which guards whatever code you remember to put inside
+      <code>with lock:</code>, a Rust <code>Mutex</code> <em>contains</em> the data. There is no way to reach the data
+      without taking the lock, so "forgot to lock" is a compile error, not a bug report.</p>
+    <div class="runnable" data-title="Arc&lt;Mutex&lt;T&gt;&gt; across threads" data-predict>
+<textarea>
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+fn main() {
+    let installed = Arc::new(Mutex::new(Vec::new()));
+    let mut handles = Vec::new();
+    for name in ["numpy", "pandas", "scipy"] {
+        let installed = Arc::clone(&installed);
+        handles.push(thread::spawn(move || {
+            installed.lock().unwrap().push(name.to_string());
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+    let mut list = installed.lock().unwrap().clone();
+    list.sort(); // threads finish in any order
+    println!("{list:?}");
+    println!("{}", Arc::strong_count(&installed));
+}
+</textarea>
+    </div>
+    <p>The shape is worth memorizing, because you will see it everywhere: create the <code>Arc</code>, then for each
+      thread clone it into a new variable <em>with the same name</em> and <code>move</code> that clone into the closure.
+      After every thread is joined and its clone dropped, the count is back to 1.</p>
+    <h3>Why <code>.lock().unwrap()</code>?</h3>
+    <p>If a thread panics while holding a std <code>Mutex</code>, the data might be half-updated, so the lock becomes
+      <strong>poisoned</strong> and later <code>lock()</code> calls return <code>Err</code>. Most code treats that as a
+      bug and propagates the panic with <code>unwrap()</code>. That is one of the accepted uses of
+      <code>unwrap</code> from M04.</p>
+    <h3>Keep the guard short</h3>
+    <p>A guard holds the lock until it is dropped. Holding it while doing slow work (a download, a solve) makes every
+      other thread wait. Take the lock, copy out or update what you need, and let the guard go, as the example does by
+      locking inside a single statement. Taking two locks in different orders in two threads can deadlock;
+      the simplest defence is to never hold two at once.</p>
+    <aside class="callout pixi" data-title="parking_lot: the locks Pixi mostly uses"><p>Most of Pixi uses the
+      <code>parking_lot</code> crate's <code>Mutex</code> and <code>RwLock</code> instead of std's. They are smaller and
+      do not poison, so <code>lock()</code>, <code>read()</code> and <code>write()</code> return the guard directly,
+      with no <code>unwrap()</code>:</p>
+    <pre><code class="language-rust">use parking_lot::Mutex;              // e.g. crates/pixi_progress/src/lib.rs
+let guard = state.lock();            // MutexGuard, no Result
+use std::sync::Mutex;
+let guard = state.lock().unwrap();   // LockResult&lt;MutexGuard&gt;</code></pre>
+    <p>So when you read <code>self.inner.write()</code> with no <code>unwrap</code> in Pixi, look at the imports: it is a
+      <code>parking_lot::RwLock</code>. The std version still appears where a dependency is not worth it, such as the
+      once-per-run warning set in <code>pixi_config</code>
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_config/src/lib.rs#L140-L141">crates/pixi_config/src/lib.rs#L140-L141</a>
+      and <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_config/src/lib.rs#L652-L653">#L652-L653</a>):</p>
+    <pre><code class="language-rust">static NETFS_REDIRECT_WARNED: LazyLock&lt;Mutex&lt;HashSet&lt;CacheKind&gt;&gt;&gt; =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+// ...
+    let mut warned = NETFS_REDIRECT_WARNED.lock().unwrap();
+    if warned.insert(kind) {</code></pre>
+    <p><code>HashSet::insert</code> returns <code>true</code> only the first time, so each cache kind warns once per
+      process, even when several threads resolve cache directories at the same time.</p></aside>
+    <aside class="callout warn"><p>Async code (Level 2) has its own rule: never hold a std or <code>parking_lot</code>
+      guard across an <code>.await</code>. The task may move to another thread while it waits. Pixi uses
+      <code>tokio::sync</code> locks and semaphores where a lock must be held across an await.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>Arc</code> shares, the lock mutates.
+      <code>Arc&lt;Mutex&lt;T&gt;&gt;</code> for shared mutable state across threads, <code>Arc&lt;RwLock&lt;T&gt;&gt;</code>
+      when reads dominate. Clone the <code>Arc</code> before <code>move</code>; keep guards short.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="thread-scope">
+    <h2>Scoped threads: borrowing without <code>Arc</code></h2>
+    <p>M07 showed that <code>thread::spawn</code> needs <code>'static</code> closures, because a spawned thread might
+      outlive the function that started it. That is the reason <code>Arc</code> appears in the previous example: each
+      thread had to own its pointer. But if you only need parallelism for the duration of one function call, there is
+      a simpler tool.</p>
+    <p><code>std::thread::scope(|s| { ... })</code> creates a scope in which <code>s.spawn(...)</code> starts threads
+      that are guaranteed to finish before <code>scope</code> returns. Because of that guarantee, those threads may
+      borrow local variables, with ordinary borrowing rules, and no <code>Arc</code> or <code>'static</code> bound:</p>
+    <div class="runnable" data-title="Scoped threads borrow local data" data-predict>
+<textarea>
+use std::thread;
+
+fn main() {
+    let platforms = vec!["linux-64", "osx-arm64", "win-64", "linux-aarch64"];
+    let mut sizes = vec![0; platforms.len()];
+
+    thread::scope(|s| {
+        for (platform, size) in platforms.iter().zip(sizes.iter_mut()) {
+            s.spawn(move || {
+                *size = platform.len(); // stands in for real work per platform
+            });
+        }
+    }); // every thread has finished here
+
+    println!("{sizes:?}");
+    println!("{}", platforms.len());
+}
+</textarea>
+    </div>
+    <p>Each thread gets a shared borrow of one platform name and a mutable borrow of a distinct slot in
+      <code>sizes</code>. The borrow checker accepts this because <code>iter_mut</code> hands out non-overlapping
+      <code>&amp;mut</code> references. Here, <code>move</code> moves the <em>references</em> into each closure, not the
+      vectors, so <code>platforms</code> is still usable afterwards.</p>
+    <aside class="callout pixi"><p>Pixi's CMake backend runs three <code>ninja</code> queries in parallel so that no
+      process blocks on a full output pipe. The threads borrow <code>self</code>, which a plain
+      <code>thread::spawn</code> could not do
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_build_cmake/src/inputs.rs#L197-L218">crates/pixi_build_cmake/src/inputs.rs</a>):</p>
+    <pre><code class="language-rust">    fn run_concurrently(
+        &amp;self,
+        queries: [(&amp;'static str, &amp;[&amp;str]); 3],
+    ) -&gt; io::Result&lt;[(&amp;'static str, Output); 3]&gt; {
+        std::thread::scope(|s| {
+            let handles = queries.map(|(label, args)| {
+                let h = s.spawn(move || {
+                    Command::new(&amp;self.binary)
+                        .arg("-C")
+                        .arg(&amp;self.build_dir)
+                        .args(args)
+                        .output()
+                });
+                (label, h)
+            });
+            // ... join each handle, collect the outputs
+        })
+    }</code></pre>
+    <p><code>&amp;self.binary</code> inside a thread closure is the giveaway: that borrow is only legal in a scoped
+      thread.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> if the threads end before the function does, use
+      <code>thread::scope</code> and borrow. Use <code>Arc</code> when the work outlives the caller, as spawned threads
+      and async tasks do.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="cow">
+    <h2><code>Cow&lt;'_, str&gt;</code>: borrow when you can, own when you must</h2>
+    <p>M07 ended with a dilemma: a function that sometimes returns its input unchanged and sometimes builds a new
+      string. Returning <code>String</code> always allocates, even in the common unchanged case. Returning
+      <code>&amp;str</code> cannot express the changed case.</p>
+    <p><code>std::borrow::Cow</code> ("clone on write") is an enum with both options:</p>
+    <pre><code class="language-rust">enum Cow&lt;'a, B: ?Sized + ToOwned&gt; {
+    Borrowed(&amp;'a B),          // for str: &amp;'a str
+    Owned(&lt;B as ToOwned&gt;::Owned), // for str: String
+}</code></pre>
+    <p>A <code>Cow&lt;'_, str&gt;</code> derefs to <code>&amp;str</code>, so callers use it like any string. It allocates
+      only in the <code>Owned</code> case. <code>.into_owned()</code> turns it into a <code>String</code> (copying only if
+      it was borrowed), and <code>.to_mut()</code> gives a <code>&amp;mut String</code>, cloning first if needed. That
+      last method is where the name comes from.</p>
+    <div class="runnable" data-title="Allocate only when needed" data-predict>
+<textarea>
+use std::borrow::Cow;
+
+fn quote(arg: &str) -> Cow<'_, str> {
+    if arg.contains(' ') {
+        Cow::Owned(format!("\"{arg}\""))
+    } else {
+        Cow::Borrowed(arg)
+    }
+}
+
+fn main() {
+    for arg in ["pytest", "-k", "slow and not network"] {
+        let q = quote(arg);
+        let kind = match &q {
+            Cow::Borrowed(_) => "borrowed",
+            Cow::Owned(_) => "owned",
+        };
+        println!("{q} ({kind}, {} bytes)", q.len());
+    }
+}
+</textarea>
+    </div>
+    <p>A second use: <code>Cow&lt;'static, str&gt;</code> as a field that holds either a string literal (free) or a
+      formatted <code>String</code>. Combined with <code>impl Into&lt;Cow&lt;'static, str&gt;&gt;</code> parameters, a
+      function accepts both <code>"literal"</code> and <code>format!(...)</code> without forcing callers to allocate.</p>
+    <aside class="callout pixi"><p>Pixi's task runner quotes arguments for its shell with a function of exactly this
+      shape (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/task.rs#L870-L890">crates/pixi_manifest/src/task.rs</a>):</p>
+    <pre><code class="language-rust">pub fn quote(in_str: &amp;str) -&gt; Cow&lt;'_, str&gt; {
+    if in_str.is_empty() {
+        "\"\"".into()
+    } else if in_str.contains(['\t', '\r', '\n', ' ', '[', ']']) {
+        let mut out: String = String::with_capacity(in_str.len() + 2);
+        // ... push '"', each char (escaping '"' and '\\'), then '"'
+        out.into()
+    } else {
+        in_str.into()
+    }
+}</code></pre>
+    <p><code>.into()</code> converts through <code>From</code> (M06): <code>&amp;str</code> becomes
+      <code>Cow::Borrowed</code>, <code>String</code> becomes <code>Cow::Owned</code>. The empty case returns the literal
+      <code>"\"\""</code>, a <code>&amp;'static str</code>, which also fits <code>Cow&lt;'_, str&gt;</code>. Pixi's manifest
+      errors use the second pattern: <code>GenericError::new(message: impl Into&lt;Cow&lt;'static, str&gt;&gt;)</code>
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/error.rs#L40-L54">crates/pixi_manifest/src/error.rs</a>).</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> return <code>Cow&lt;'_, str&gt;</code> when the usual result
+      is the input unchanged and the rare one is new text. It reads as <code>&amp;str</code> and allocates only when
+      needed.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="lazy">
+    <h2><code>OnceLock</code>, <code>LazyLock</code>, and <code>once_cell</code></h2>
+    <p>Python modules often hold globals computed at import time: <code>DEFAULT_CHANNELS = load()</code> or a compiled
+      regex. Rust <code>static</code> items must be built by constant expressions, so a <code>Regex</code> or a value
+      read from the environment cannot be a plain static. And some struct fields are expensive to create but not
+      always needed, such as an HTTP client. Both cases want "compute on first use, then share".</p>
+    <ul>
+      <li><code>std::sync::OnceLock&lt;T&gt;</code>: a cell that starts empty and can be set exactly once.
+        <code>get_or_init(|| ...)</code> runs the closure the first time and returns <code>&amp;T</code> on every call.
+        It is thread-safe: if two threads race, one runs the closure and the other waits.</li>
+      <li><code>std::sync::LazyLock&lt;T&gt;</code>: a <code>OnceLock</code> with its initializer built in. Declare it
+        with a closure; the first dereference runs it. Ideal for <code>static</code> items.</li>
+    </ul>
+    <div class="runnable" data-title="Initialized once, on first use" data-predict>
+<textarea>
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{LazyLock, OnceLock};
+
+static INITS: AtomicUsize = AtomicUsize::new(0);
+
+static DEFAULT_CHANNELS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    INITS.fetch_add(1, Ordering::SeqCst);
+    vec!["conda-forge".to_string()]
+});
+
+fn cache_dir() -> &'static str {
+    static DIR: OnceLock<String> = OnceLock::new();
+    DIR.get_or_init(|| format!("{}/pixi", "/home/me/.cache"))
+}
+
+fn main() {
+    println!("{}", INITS.load(Ordering::SeqCst));
+    println!("{:?}", *DEFAULT_CHANNELS);
+    println!("{}", DEFAULT_CHANNELS.len());
+    println!("{}", INITS.load(Ordering::SeqCst));
+    println!("{}", std::ptr::eq(cache_dir(), cache_dir()));
+}
+</textarea>
+    </div>
+    <p>A <code>static</code> lives for the whole program, so a reference into it is <code>&amp;'static</code>, which is
+      why <code>cache_dir</code> can return <code>&amp;'static str</code>. The <code>AtomicUsize</code> counter is itself
+      a small piece of thread-safe interior mutability: a static that can be changed without a lock.</p>
+    <aside class="callout pixi"><p>Pixi reads proxy settings once per process with <code>LazyLock</code> statics
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_config/src/lib.rs#L121-L138">crates/pixi_config/src/lib.rs</a>):</p>
+    <pre><code class="language-rust">// detect proxy env vars like curl: https://curl.se/docs/manpage.html
+static ENV_HTTP_PROXY: LazyLock&lt;Option&lt;String&gt;&gt; = LazyLock::new(|| {
+    ["http_proxy", "all_proxy", "ALL_PROXY"]
+        .iter()
+        .find_map(|&amp;k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+});
+// ...
+static USE_PROXY_FROM_ENV: LazyLock&lt;bool&gt; =
+    LazyLock::new(|| (*ENV_HTTPS_PROXY).is_some() || (*ENV_HTTP_PROXY).is_some());</code></pre>
+    <p><code>(*ENV_HTTPS_PROXY)</code> dereferences the lazy static, forcing its initializer if no one has yet. One lazy
+      value can depend on another.</p></aside>
+    <h3>Why Pixi still uses <code>once_cell</code></h3>
+    <p>Before Rust 1.70 (<code>OnceLock</code>) and 1.80 (<code>LazyLock</code>), the <code>once_cell</code> crate
+      provided these types, and the standard library versions were modelled on it. New code should use std. Pixi has
+      moved most statics to std, but some fields still use <code>once_cell::sync::OnceCell</code>, and a comment says
+      why (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_core/src/workspace/mod.rs#L161-L169">crates/pixi_core/src/workspace/mod.rs</a>):</p>
+    <pre><code class="language-rust">    /// Reqwest client shared for this workspace.
+    /// This is wrapped in a `OnceLock` to allow for lazy initialization.
+    // TODO: once https://github.com/rust-lang/rust/issues/109737 is stabilized, switch to OnceLock
+    client: OnceCell&lt;(LazyReqwestClient, rattler_networking::LazyClient)&gt;,
+
+    /// The repodata gateway to use for answering queries about repodata.
+    /// This is wrapped in a `OnceLock` to allow for lazy initialization.
+    // TODO: once https://github.com/rust-lang/rust/issues/109737 is stabilized, switch to OnceLock
+    repodata_gateway: OnceCell&lt;Gateway&gt;,</code></pre>
+    <p>The linked issue tracks <code>OnceLock::get_or_try_init</code>, an initializer that can fail and return an
+      error, which is still unstable in std. <code>once_cell</code>'s <code>OnceCell</code> has it today, so the fields
+      stay on the crate until std catches up. You will also see <code>once_cell::sync::Lazy</code>, the crate's
+      <code>LazyLock</code>, in a few statics such as <code>JINJA_ENV</code> in <code>pixi_manifest</code>.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>LazyLock</code> for statics computed on first use,
+      <code>OnceLock</code> for "set once" fields and function-local statics. <code>once_cell::sync::{OnceCell, Lazy}</code>
+      are the same ideas from before std had them.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="why-arc">
+    <h2>Why Pixi passes <code>Arc</code> everywhere</h2>
+    <p>Open almost any Pixi crate and you will find <code>Arc&lt;Gateway&gt;</code>, <code>Arc&lt;Semaphore&gt;</code>,
+      <code>Arc&lt;CacheDirs&gt;</code>, <code>Arc&lt;EnvironmentSpec&gt;</code>. The reasons follow from everything
+      above:</p>
+    <ol>
+      <li><strong>Long-lived services are shared.</strong> One repodata gateway, one HTTP client, one download budget
+        serve every solve and install in a run. Nobody is the single natural owner.</li>
+      <li><strong>Async tasks need <code>'static + Send</code>.</strong> Pixi downloads and solves concurrently on tokio.
+        A spawned task cannot borrow from the function that spawned it (M07), so it must own what it uses. Cloning an
+        <code>Arc</code> gives each task an owning handle for the price of an atomic increment.</li>
+      <li><strong>Clones must be cheap.</strong> Cloning a <code>Gateway</code> or a large spec by value would copy
+        caches and maps. Cloning an <code>Arc</code> copies a pointer.</li>
+      <li><strong>Immutability makes sharing safe.</strong> Most shared data is never changed after creation, so it
+        needs no lock at all: <code>Arc&lt;T&gt;</code> alone is enough. Where something does change, a lock goes
+        inside: <code>Arc&lt;RwLock&lt;T&gt;&gt;</code>.</li>
+    </ol>
+    <p>A common Pixi idiom builds a cheaply clonable <strong>handle</strong>: a struct whose only real field is an
+      <code>Arc</code> to the shared data, with <code>#[derive(Clone)]</code>. The command dispatcher that runs every
+      solve and build is one
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_command_dispatcher/src/command_dispatcher/mod.rs#L51-L65">crates/pixi_command_dispatcher/src/command_dispatcher/mod.rs</a>):</p>
+    <pre><code class="language-rust">#[derive(Clone)]
+pub struct CommandDispatcher {
+    /// Holds the shared data required by the command dispatcher.
+    pub(crate) data: Arc&lt;CommandDispatcherData&gt;,
+    // ...
+    /// Held so that when the last [`CommandDispatcher`] clone drops,
+    /// the compute dep-graph snapshot is written if the
+    /// `PIXI_COMPUTE_DEP_GRAPH` env var is set.
+    _dump_guard: Arc&lt;DepGraphDumpGuard&gt;,
+}</code></pre>
+    <p>The <code>_dump_guard</code> field uses the reference count as a signal: its <code>Drop</code> impl writes a
+      debug file, and because it sits in an <code>Arc</code>, that happens exactly once, when the last clone of the
+      dispatcher goes away. Here is the same idea in miniature. Predict the output, including when "dropped" appears:</p>
+    <div class="runnable" data-title="A clonable handle with a drop signal" data-predict>
+<textarea>
+use std::sync::Arc;
+use std::thread;
+
+struct Data {
+    name: String,
+}
+
+impl Drop for Data {
+    fn drop(&mut self) {
+        println!("dropped {}", self.name);
+    }
+}
+
+#[derive(Clone)]
+struct Dispatcher {
+    data: Arc<Data>,
+}
+
+fn main() {
+    let d = Dispatcher { data: Arc::new(Data { name: "dispatcher".into() }) };
+    let worker = d.clone();
+    let len = thread::spawn(move || worker.data.name.len()).join().unwrap();
+    println!("worker saw {len} bytes, owners now {}", Arc::strong_count(&d.data));
+    drop(d);
+    println!("end of main");
+}
+</textarea>
+    </div>
+    <p>The worker's clone was dropped when its thread finished, leaving one owner. Dropping <code>d</code> takes the
+      count to zero, which runs <code>Data</code>'s <code>Drop</code> before "end of main".</p>
+    <h3>Choosing a pointer</h3>
+    <table>
+      <thead><tr><th>You need</th><th>Use</th></tr></thead>
+      <tbody>
+        <tr><td>One owner, value on the heap (recursion, <code>dyn Trait</code>, big variant)</td><td><code>Box&lt;T&gt;</code></td></tr>
+        <tr><td>Several owners, one thread, read-only</td><td><code>Rc&lt;T&gt;</code></td></tr>
+        <tr><td>Several owners, one thread, mutable</td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td></tr>
+        <tr><td>Mutation through <code>&amp;self</code>, one thread</td><td><code>Cell&lt;T&gt;</code> (Copy values) or <code>RefCell&lt;T&gt;</code></td></tr>
+        <tr><td>Several owners across threads or tasks, read-only</td><td><code>Arc&lt;T&gt;</code></td></tr>
+        <tr><td>Several owners across threads, mutable</td><td><code>Arc&lt;Mutex&lt;T&gt;&gt;</code> or <code>Arc&lt;RwLock&lt;T&gt;&gt;</code></td></tr>
+        <tr><td>Threads that finish before the function returns</td><td><code>thread::scope</code> and plain borrows</td></tr>
+        <tr><td>Usually borrowed, sometimes new</td><td><code>Cow&lt;'_, str&gt;</code></td></tr>
+        <tr><td>Compute once on first use</td><td><code>LazyLock</code> (statics) or <code>OnceLock</code> (fields)</td></tr>
+      </tbody>
+    </table>
+    <aside class="callout pro"><p>Do not wrap things in <code>Arc&lt;Mutex&lt;...&gt;&gt;</code> by reflex. Start with plain
+      ownership and borrowing; add <code>Arc</code> when a value must be shared by things that outlive each other; add a
+      lock only when shared data must change. Reviewers ask "who mutates this?" when they see a lock, and expect an
+      answer.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> Pixi uses <code>Arc</code> because its services are shared by
+      many concurrent tasks that must own their handles. An <code>Arc</code> clone is a pointer copy, and most shared
+      data is immutable, so no lock is needed.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="pixi-reading">
+    <h2>Reading Pixi</h2>
+    <p>Two excerpts from the snapshot combine several of this module's pointers in one place.</p>
+    <h3>1. A thread-safe registry of environment specs</h3>
+    <p>The command dispatcher hands out small ids for workspace environments and keeps their full specs in a registry
+      that many concurrent computations read
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_command_dispatcher/src/environment/registry.rs#L25-L101">crates/pixi_command_dispatcher/src/environment/registry.rs#L25-L101</a>):</p>
+    <pre><code class="language-rust">pub struct WorkspaceEnvRegistry {
+    inner: RwLock&lt;WorkspaceEnvRegistryInner&gt;,
+}
+
+#[derive(Default)]
+struct WorkspaceEnvRegistryInner {
+    entries: Vec&lt;Arc&lt;EnvironmentSpec&gt;&gt;,
+    refs_by_key: HashMap&lt;WorkspaceEnvRegistryKey, WorkspaceEnvRef&gt;,
+}
+
+impl WorkspaceEnvRegistry {
+    pub fn allocate(&amp;self, name: String, platform: String, spec: EnvironmentSpec) -&gt; WorkspaceEnvRef {
+        let mut inner = self.inner.write();
+        // ... build `key` from name, platform and spec
+        if let Some(existing) = inner.refs_by_key.get(&amp;key) {
+            return existing.clone();
+        }
+        // ... compute a new `id` from inner.entries.len()
+        inner.entries.push(Arc::new(key.spec.clone()));
+        // ... build `env_ref`
+        inner.refs_by_key.insert(key, env_ref.clone());
+        env_ref
+    }
+
+    pub fn get(&amp;self, id: WorkspaceEnvId) -&gt; Arc&lt;EnvironmentSpec&gt; {
+        self.inner
+            .read()
+            .entries
+            .get(id.as_index())
+            .expect("allocated WorkspaceEnvId must have a registry entry")
+            .clone()
+    }
+}</code></pre>
+    <ul>
+      <li><code>RwLock</code> here is <code>parking_lot::RwLock</code> (line 3 imports it), which is why
+        <code>write()</code> and <code>read()</code> have no <code>unwrap()</code>.</li>
+      <li>Both methods take <code>&amp;self</code>, yet <code>allocate</code> mutates. That is interior mutability: the
+        lock turns a shared reference into exclusive access for the duration of the guard.</li>
+      <li><code>let mut inner = self.inner.write();</code> holds one write guard for the whole method. The doc comment
+        on <code>allocate</code> explains why: lookup and insert must happen under the same lock, or two threads
+        allocating the same key could both miss the lookup and mint two ids.</li>
+      <li><code>Vec&lt;Arc&lt;EnvironmentSpec&gt;&gt;</code>: each spec is immutable once stored, so readers get their
+        own <code>Arc</code> from <code>get</code> and can use it after the read guard is gone, with no lock held while
+        they work.</li>
+      <li>In <code>get</code>, the read guard is a temporary in a method chain; it is dropped at the end of the
+        statement, right after <code>.clone()</code> bumped the count. The lock is held for a few instructions.</li>
+      <li>Elsewhere in the file (lines 109-119), the registry itself is stored as <code>Arc&lt;WorkspaceEnvRegistry&gt;</code>,
+        so the shape is <code>Arc&lt;RwLock&lt;Vec&lt;Arc&lt;T&gt;&gt;&gt;&gt;</code> with the lock inside the struct.</li>
+    </ul>
+    <details class="reveal"><summary>Question: why does <code>get</code> return <code>Arc&lt;EnvironmentSpec&gt;</code> instead of <code>&amp;EnvironmentSpec</code>?</summary>
+      <p>A reference into <code>entries</code> would have to borrow from the read guard, so the caller would keep the
+        read lock held as long as it used the spec, blocking every <code>allocate</code>. (The signature could not even
+        express it without returning the guard.) Returning a cloned <code>Arc</code> lets the guard drop immediately;
+        the spec stays alive through the caller's own count.</p></details>
+    <details class="reveal"><summary>Question: what would go wrong if <code>allocate</code> took a read lock for the lookup, released it, and then took a write lock to insert?</summary>
+      <p>Between the two locks, another thread could allocate the same key. Both would see "not found" and insert,
+        creating two ids for one environment, which breaks the "equal requests reuse the id" promise. Holding the write
+        lock across both steps makes check-then-insert atomic.</p></details>
+
+    <h3>2. A lazily created, shared download budget</h3>
+    <p>The <code>Workspace</code> limits how many downloads run at once with a semaphore (a counter of permits that
+      async tasks wait on). It is created on first use and shared by every download
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_core/src/workspace/mod.rs#L192-L193">crates/pixi_core/src/workspace/mod.rs#L192-L193</a>
+      and <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_core/src/workspace/mod.rs#L1149-L1156">#L1149-L1156</a>):</p>
+    <pre><code class="language-rust">    /// The concurrent request semaphore
+    concurrent_downloads_semaphore: OnceCell&lt;Arc&lt;Semaphore&gt;&gt;,
+// ...
+    pub fn concurrent_downloads_semaphore(&amp;self) -&gt; Arc&lt;Semaphore&gt; {
+        self.concurrent_downloads_semaphore
+            .get_or_init(|| {
+                let max_concurrent_downloads = self.config().max_concurrent_downloads();
+                Arc::new(Semaphore::new(max_concurrent_downloads))
+            })
+            .clone()
+    }</code></pre>
+    <ul>
+      <li><code>OnceCell</code> is <code>once_cell::sync::OnceCell</code> (imported at line 38), the crate version of
+        <code>OnceLock</code>. The field starts empty when the workspace is loaded.</li>
+      <li><code>get_or_init</code> takes <code>&amp;self</code>: it is interior mutability that can only ever go from
+        empty to full once. The closure reads the user's config only on the first call.</li>
+      <li>The cell holds an <code>Arc&lt;Semaphore&gt;</code>, and the method returns <code>.clone()</code> of it. Each
+        caller receives its own owning handle to the <em>same</em> semaphore, so permits are shared across every
+        download task, and the handle can move into a <code>'static</code> task.</li>
+      <li>The semaphore is <code>tokio::sync::Semaphore</code>; it was the <code>io_semaphore:
+        Option&lt;Arc&lt;Semaphore&gt;&gt;</code> parameter you met in M07's <code>spawn_blocking_with_io_permit</code>.</li>
+    </ul>
+    <details class="reveal"><summary>Question: why not store a plain <code>Semaphore</code> in the cell and return <code>&amp;Semaphore</code>?</summary>
+      <p>The borrow would be tied to <code>&amp;self</code>, the workspace. Download tasks are spawned onto tokio and
+        must be <code>'static</code>, so they cannot hold a borrow of the workspace. An <code>Arc</code> they own can go
+        anywhere and keeps the semaphore alive as long as any task needs it.</p></details>
+    <details class="reveal"><summary>Question: this field could use <code>std::sync::OnceLock</code> today. Why might it still be <code>once_cell</code>?</summary>
+      <p>Its initializer cannot fail, so std's <code>OnceLock::get_or_init</code> would work. The neighbouring
+        <code>client</code> and <code>repodata_gateway</code> fields need a fallible initializer, so the file already
+        depends on <code>once_cell</code>, and keeping one type for all the lazy fields is consistent. A small cleanup
+        PR could switch this field; that is the kind of change Level 3 prepares you to make.</p></details>
+  </section>
+
+  <section class="lesson-section" id="practice">
+    <h2>Practice</h2>
+    <p>Five exercises, one per major tool. All are <code>std</code>-only.</p>
+
+    <div class="exercise" data-id="m08-e1" data-title="Evaluate a boxed expression tree">
+      <div class="exercise-prompt">
+        <p>The enum below describes a version-constraint expression tree. Implement <code>matches(c: &amp;Constraint,
+          v: u32) -&gt; bool</code> (<code>AtLeast(n)</code> means <code>v &gt;= n</code>, <code>Below(n)</code> means
+          <code>v &lt; n</code>, <code>And</code>/<code>Or</code>/<code>Not</code> as usual) and <code>depth(c:
+          &amp;Constraint) -&gt; usize</code> (a leaf has depth 1; each <code>And</code>, <code>Or</code> or
+          <code>Not</code> adds 1 to its deepest child). Then write a helper
+          <code>between(lo: u32, hi: u32) -&gt; Constraint</code> that builds <code>And(AtLeast(lo), Below(hi))</code>.</p>
+      </div>
+<textarea class="starter">
+enum Constraint {
+    AtLeast(u32),
+    Below(u32),
+    And(Box<Constraint>, Box<Constraint>),
+    Or(Box<Constraint>, Box<Constraint>),
+    Not(Box<Constraint>),
+}
+
+fn matches(c: &Constraint, v: u32) -> bool {
+    todo!()
+}
+
+fn depth(c: &Constraint) -> usize {
+    todo!()
+}
+
+fn between(lo: u32, hi: u32) -> Constraint {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn leaves() {
+    assert!(matches(&Constraint::AtLeast(3), 3), "AtLeast(3) includes 3");
+    assert!(!matches(&Constraint::Below(3), 3), "Below(3) excludes 3");
+    assert_eq!(depth(&Constraint::AtLeast(1)), 1, "a leaf has depth 1");
+}
+
+#[test]
+fn between_is_a_half_open_range() {
+    let c = between(2, 5);
+    assert!(matches(&c, 2) && matches(&c, 4), "between(2, 5) includes 2 and 4");
+    assert!(!matches(&c, 5) && !matches(&c, 1), "between(2, 5) excludes 5 and 1");
+    assert_eq!(depth(&c), 2, "And over two leaves has depth 2");
+}
+
+#[test]
+fn nested() {
+    // not in [2, 5) or exactly >= 10
+    let c = Constraint::Or(
+        Box::new(Constraint::Not(Box::new(between(2, 5)))),
+        Box::new(Constraint::AtLeast(10)),
+    );
+    assert!(matches(&c, 1), "1 is outside [2, 5)");
+    assert!(!matches(&c, 3), "3 is inside [2, 5) and below 10");
+    assert!(matches(&c, 12), "12 is outside [2, 5)");
+    assert_eq!(depth(&c), 4, "Or > Not > And > leaf is depth 4");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>match c { Constraint::And(a, b) =&gt; matches(a, v) &amp;&amp;
+        matches(b, v), ... }</code>: <code>a</code> is a <code>&amp;Box&lt;Constraint&gt;</code>, which deref-coerces to
+        <code>&amp;Constraint</code>. For depth, <code>1 + depth(a).max(depth(b))</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">enum Constraint {
+    AtLeast(u32),
+    Below(u32),
+    And(Box&lt;Constraint&gt;, Box&lt;Constraint&gt;),
+    Or(Box&lt;Constraint&gt;, Box&lt;Constraint&gt;),
+    Not(Box&lt;Constraint&gt;),
+}
+
+fn matches(c: &amp;Constraint, v: u32) -&gt; bool {
+    match c {
+        Constraint::AtLeast(n) =&gt; v &gt;= *n,
+        Constraint::Below(n) =&gt; v &lt; *n,
+        Constraint::And(a, b) =&gt; matches(a, v) &amp;&amp; matches(b, v),
+        Constraint::Or(a, b) =&gt; matches(a, v) || matches(b, v),
+        Constraint::Not(a) =&gt; !matches(a, v),
+    }
+}
+
+fn depth(c: &amp;Constraint) -&gt; usize {
+    match c {
+        Constraint::AtLeast(_) | Constraint::Below(_) =&gt; 1,
+        Constraint::And(a, b) | Constraint::Or(a, b) =&gt; 1 + depth(a).max(depth(b)),
+        Constraint::Not(a) =&gt; 1 + depth(a),
+    }
+}
+
+fn between(lo: u32, hi: u32) -&gt; Constraint {
+    Constraint::And(Box::new(Constraint::AtLeast(lo)), Box::new(Constraint::Below(hi)))
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m08-e2" data-title="Warnings through &amp;self">
+      <div class="exercise-prompt">
+        <p>Like Pixi's <code>PyprojectMetadataProvider</code>, this checker's methods take <code>&amp;self</code> but
+          must record warnings. Complete <code>Checker</code> using the <code>RefCell</code> field and a
+          <code>Cell&lt;u32&gt;</code> counter: <code>new()</code>, <code>check(&amp;self, name: &amp;str) -&gt; bool</code>
+          (increments <code>checked</code>; records <code>"empty name"</code> for an empty name and returns
+          <code>false</code>; records <code>"'{name}' has uppercase letters"</code> for a name with any uppercase
+          character but still returns <code>true</code>; otherwise returns <code>true</code>),
+          <code>warnings(&amp;self) -&gt; Vec&lt;String&gt;</code> (a copy, in order), and
+          <code>checked(&amp;self) -&gt; u32</code>.</p>
+      </div>
+<textarea class="starter">
+use std::cell::{Cell, RefCell};
+
+struct Checker {
+    warnings: RefCell<Vec<String>>,
+    checked: Cell<u32>,
+}
+
+impl Checker {
+    fn new() -> Self {
+        todo!()
+    }
+
+    fn check(&self, name: &str) -> bool {
+        todo!()
+    }
+
+    fn warnings(&self) -> Vec<String> {
+        todo!()
+    }
+
+    fn checked(&self) -> u32 {
+        todo!()
+    }
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn records_warnings_in_order() {
+    let c = Checker::new();
+    assert!(c.check("numpy"), "a lowercase name is valid");
+    assert!(c.check("NumPy"), "uppercase only warns; the name is still valid");
+    assert!(!c.check(""), "an empty name is invalid");
+    assert_eq!(c.warnings(), vec!["'NumPy' has uppercase letters".to_string(), "empty name".to_string()], "warnings in the order they happened");
+}
+
+#[test]
+fn counts_every_check() {
+    let c = Checker::new();
+    for n in ["a", "B", ""] {
+        c.check(n);
+    }
+    assert_eq!(c.checked(), 3, "every call to check counts, valid or not");
+}
+
+#[test]
+fn works_through_a_shared_reference() {
+    let c = Checker::new();
+    let a = &c;
+    let b = &c;
+    a.check("X");
+    b.check("Y");
+    assert_eq!(c.warnings().len(), 2, "two shared references can both record warnings");
+    assert!(c.warnings.try_borrow_mut().is_ok(), "no borrow guard should still be alive after a method returns");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>self.checked.set(self.checked.get() + 1)</code>;
+        <code>self.warnings.borrow_mut().push(...)</code> in one statement so the guard drops at once;
+        <code>self.warnings.borrow().clone()</code> to return a copy.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">use std::cell::{Cell, RefCell};
+
+struct Checker {
+    warnings: RefCell&lt;Vec&lt;String&gt;&gt;,
+    checked: Cell&lt;u32&gt;,
+}
+
+impl Checker {
+    fn new() -&gt; Self {
+        Checker { warnings: RefCell::new(Vec::new()), checked: Cell::new(0) }
+    }
+
+    fn check(&amp;self, name: &amp;str) -&gt; bool {
+        self.checked.set(self.checked.get() + 1);
+        if name.is_empty() {
+            self.warnings.borrow_mut().push("empty name".to_string());
+            return false;
+        }
+        if name.chars().any(char::is_uppercase) {
+            self.warnings.borrow_mut().push(format!("'{name}' has uppercase letters"));
+        }
+        true
+    }
+
+    fn warnings(&amp;self) -&gt; Vec&lt;String&gt; {
+        self.warnings.borrow().clone()
+    }
+
+    fn checked(&amp;self) -&gt; u32 {
+        self.checked.get()
+    }
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m08-e3" data-title="Install in parallel, record in one list">
+      <div class="exercise-prompt">
+        <p>Write <code>install_all(log: &amp;Arc&lt;Mutex&lt;Vec&lt;String&gt;&gt;&gt;, packages: Vec&lt;String&gt;)</code>
+          that spawns one <code>std::thread::spawn</code> thread per package. Each thread pushes
+          <code>"installed {name}"</code> onto the shared log. The function must join every thread before returning, so
+          that when it returns, all entries are present and every clone of the <code>Arc</code> has been dropped. Then
+          write <code>sorted_log(log: &amp;Arc&lt;Mutex&lt;Vec&lt;String&gt;&gt;&gt;) -&gt; Vec&lt;String&gt;</code> that
+          returns a sorted copy (threads finish in any order).</p>
+      </div>
+<textarea class="starter">
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+fn install_all(log: &Arc<Mutex<Vec<String>>>, packages: Vec<String>) {
+    todo!()
+}
+
+fn sorted_log(log: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+fn names(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn every_package_is_logged() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    install_all(&log, names(&["scipy", "numpy", "pandas"]));
+    assert_eq!(sorted_log(&log), names(&["installed numpy", "installed pandas", "installed scipy"]), "one entry per package");
+}
+
+#[test]
+fn all_threads_are_joined() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    install_all(&log, names(&["a", "b", "c", "d", "e", "f", "g", "h"]));
+    assert_eq!(Arc::strong_count(&log), 1, "join every thread so all Arc clones are dropped before returning");
+    assert_eq!(log.lock().unwrap().len(), 8, "all eight entries are present when install_all returns");
+}
+
+#[test]
+fn appends_to_existing_entries() {
+    let log = Arc::new(Mutex::new(vec!["start".to_string()]));
+    install_all(&log, names(&["rich"]));
+    install_all(&log, Vec::new());
+    assert_eq!(sorted_log(&log), names(&["installed rich", "start"]), "existing entries are kept; no packages adds nothing");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Collect the <code>JoinHandle</code>s in a <code>Vec</code>. In the
+        loop: <code>let log = Arc::clone(log);</code> then <code>thread::spawn(move || log.lock().unwrap().push(format!(...)))</code>.
+        Afterwards <code>for h in handles { h.join().unwrap(); }</code>. For the sorted copy:
+        <code>let mut v = log.lock().unwrap().clone(); v.sort(); v</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">use std::sync::{Arc, Mutex};
+use std::thread;
+
+fn install_all(log: &amp;Arc&lt;Mutex&lt;Vec&lt;String&gt;&gt;&gt;, packages: Vec&lt;String&gt;) {
+    let handles: Vec&lt;_&gt; = packages
+        .into_iter()
+        .map(|name| {
+            let log = Arc::clone(log);
+            thread::spawn(move || {
+                log.lock().unwrap().push(format!("installed {name}"));
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+}
+
+fn sorted_log(log: &amp;Arc&lt;Mutex&lt;Vec&lt;String&gt;&gt;&gt;) -&gt; Vec&lt;String&gt; {
+    let mut v = log.lock().unwrap().clone();
+    v.sort();
+    v
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m08-e4" data-title="Normalize without allocating">
+      <div class="exercise-prompt">
+        <p>Write <code>normalize(name: &amp;str) -&gt; Cow&lt;'_, str&gt;</code> that lowercases a package name and
+          replaces <code>_</code> and <code>.</code> with <code>-</code>. If the name is already normalized (no uppercase,
+          no <code>_</code>, no <code>.</code>), return it <strong>borrowed</strong>, with no allocation. Then write
+          <code>count_allocations(names: &amp;[&amp;str]) -&gt; usize</code> returning how many names needed an owned
+          result.</p>
+      </div>
+<textarea class="starter">
+use std::borrow::Cow;
+
+fn normalize(name: &str) -> Cow<'_, str> {
+    todo!()
+}
+
+fn count_allocations(names: &[&str]) -> usize {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn normal_names_are_borrowed() {
+    let out = normalize("numpy");
+    assert!(matches!(out, Cow::Borrowed(_)), "an already-normal name must be returned as Cow::Borrowed");
+    assert_eq!(out, "numpy", "the text is unchanged");
+}
+
+#[test]
+fn other_names_are_rewritten() {
+    let out = normalize("Typing_Extensions");
+    assert!(matches!(out, Cow::Owned(_)), "a changed name needs Cow::Owned");
+    assert_eq!(out, "typing-extensions", "lowercase and '_' to '-'");
+    assert_eq!(normalize("zope.interface"), "zope-interface", "'.' to '-'");
+    assert_eq!(normalize("already-fine-2"), "already-fine-2", "dashes and digits are fine");
+}
+
+#[test]
+fn counts_owned_results() {
+    assert_eq!(count_allocations(&["numpy", "PyYAML", "ruamel.yaml", "rich"]), 2, "two of the four names change");
+    assert_eq!(count_allocations(&[]), 0, "no names, no allocations");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Test first:
+        <code>if name.chars().any(|c| c.is_uppercase() || c == '_' || c == '.')</code>. Owned case:
+        <code>Cow::Owned(name.to_lowercase().replace(['_', '.'], "-"))</code>. For counting,
+        <code>.filter(|n| matches!(normalize(n), Cow::Owned(_))).count()</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">use std::borrow::Cow;
+
+fn normalize(name: &amp;str) -&gt; Cow&lt;'_, str&gt; {
+    if name.chars().any(|c| c.is_uppercase() || c == '_' || c == '.') {
+        Cow::Owned(name.to_lowercase().replace(['_', '.'], "-"))
+    } else {
+        Cow::Borrowed(name)
+    }
+}
+
+fn count_allocations(names: &amp;[&amp;str]) -&gt; usize {
+    names.iter().filter(|n| matches!(normalize(n), Cow::Owned(_))).count()
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m08-e5" data-title="A lazily created, shared handle">
+      <div class="exercise-prompt">
+        <p>Model Pixi's <code>concurrent_downloads_semaphore</code> with std types. <code>Workspace</code> has a
+          <code>max_downloads</code> setting, an empty <code>OnceLock&lt;Arc&lt;Budget&gt;&gt;</code>, and a
+          <code>Cell&lt;u32&gt;</code> that counts how many times a budget was created. Write
+          <code>Workspace::new(max_downloads: usize)</code> and <code>budget(&amp;self) -&gt; Arc&lt;Budget&gt;</code>:
+          the first call creates <code>Budget { permits: max_downloads }</code> (incrementing <code>created</code>), and
+          every call returns a clone of the same <code>Arc</code>.</p>
+      </div>
+<textarea class="starter">
+use std::cell::Cell;
+use std::sync::{Arc, OnceLock};
+
+struct Budget {
+    permits: usize,
+}
+
+struct Workspace {
+    max_downloads: usize,
+    budget: OnceLock<Arc<Budget>>,
+    created: Cell<u32>,
+}
+
+impl Workspace {
+    fn new(max_downloads: usize) -> Self {
+        todo!()
+    }
+
+    fn budget(&self) -> Arc<Budget> {
+        todo!()
+    }
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn created_lazily_and_once() {
+    let ws = Workspace::new(50);
+    assert_eq!(ws.created.get(), 0, "nothing is created until budget() is first called");
+    let a = ws.budget();
+    let b = ws.budget();
+    let _c = ws.budget();
+    assert_eq!(ws.created.get(), 1, "the budget is created exactly once");
+    assert!(Arc::ptr_eq(&a, &b), "every call returns the same shared Budget");
+    assert_eq!(a.permits, 50, "permits come from max_downloads");
+}
+
+#[test]
+fn callers_own_their_handles() {
+    let ws = Workspace::new(4);
+    let a = ws.budget();
+    let b = ws.budget();
+    assert_eq!(Arc::strong_count(&a), 3, "the cell holds one Arc and each caller holds one");
+    drop(b);
+    assert_eq!(Arc::strong_count(&a), 2, "dropping a caller's handle decrements the count");
+    drop(ws);
+    assert_eq!(Arc::strong_count(&a), 1, "a handle outlives the workspace that created it");
+    assert_eq!(a.permits, 4, "and still points at the same budget");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>OnceLock::new()</code> and <code>Cell::new(0)</code> in
+        <code>new</code>. In <code>budget</code>: <code>self.budget.get_or_init(|| { self.created.set(...);
+        Arc::new(Budget { permits: self.max_downloads }) }).clone()</code>. The <code>.clone()</code> at the end is
+        the <code>Arc</code> clone.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">use std::cell::Cell;
+use std::sync::{Arc, OnceLock};
+
+struct Budget {
+    permits: usize,
+}
+
+struct Workspace {
+    max_downloads: usize,
+    budget: OnceLock&lt;Arc&lt;Budget&gt;&gt;,
+    created: Cell&lt;u32&gt;,
+}
+
+impl Workspace {
+    fn new(max_downloads: usize) -&gt; Self {
+        Workspace { max_downloads, budget: OnceLock::new(), created: Cell::new(0) }
+    }
+
+    fn budget(&amp;self) -&gt; Arc&lt;Budget&gt; {
+        self.budget
+            .get_or_init(|| {
+                self.created.set(self.created.get() + 1);
+                Arc::new(Budget { permits: self.max_downloads })
+            })
+            .clone()
+    }
+}</code></pre>
+      </details>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="mini-project">
+    <h2>Mini-project</h2>
+    <div class="project-box">
+      <div class="widget-head"><span class="w-kind">Mini-project</span><span class="w-title">A parallel channel indexer</span></div>
+      <div class="widget-body">
+        <p>Simulate the shape of Pixi's fetch stage: a shared, clonable index handle that several worker threads fill
+          concurrently, a lazily initialized default configuration, and name normalization that avoids needless
+          allocation. No network: each "channel" is a hard-coded list of <code>name version</code> strings.</p>
+        <pre data-label="Terminal"><code class="language-bash">pixi init channel-index &amp;&amp; cd channel-index
+pixi add rust
+pixi run cargo init --name channel_index
+pixi run cargo run</code></pre>
+        <p><strong>Spec.</strong></p>
+        <ol>
+          <li><code>static DEFAULT_CHANNELS: LazyLock&lt;Vec&lt;&amp;'static str&gt;&gt;</code> listing three channel names.</li>
+          <li><code>fn normalize(name: &amp;str) -&gt; Cow&lt;'_, str&gt;</code> (from exercise 4).</li>
+          <li><code>#[derive(Clone)] struct Index { inner: Arc&lt;RwLock&lt;BTreeMap&lt;String, Vec&lt;String&gt;&gt;&gt;&gt; }</code>
+            mapping a normalized package name to the channels that provide it, with methods
+            <code>add(&amp;self, channel: &amp;str, package: &amp;str)</code> and
+            <code>providers(&amp;self, package: &amp;str) -&gt; Vec&lt;String&gt;</code>.</li>
+          <li>In <code>main</code>, spawn one <code>thread::spawn</code> worker per channel, each with a clone of the
+            <code>Index</code>, that adds every package in its channel. Join them all.</li>
+          <li>Rewrite the workers with <code>thread::scope</code> so they borrow the channel data instead of owning
+            it. Keep both versions behind a command-line flag and note which one needed <code>move</code> and clones.</li>
+          <li>Print each package with its providers in sorted order (use <code>BTreeMap</code> and sort the provider
+            lists so output is deterministic).</li>
+        </ol>
+        <ul class="checklist" data-id="m08-mini">
+          <li>The program prints the same output on every run</li>
+          <li>A test adds the same package from two threads and checks both channels are listed</li>
+          <li>A test asserts that <code>normalize</code> returns <code>Cow::Borrowed</code> for an already-normal name</li>
+          <li>A test checks <code>Arc::strong_count</code> on the index is 1 after all workers are joined</li>
+          <li>You replaced <code>Arc</code> with <code>Rc</code> once, read the E0277 error, and reverted</li>
+          <li><code>pixi run cargo clippy --all-targets -- -D warnings</code> and <code>pixi run cargo fmt --check</code> pass</li>
+        </ul>
+        <p><strong>Stretch goals.</strong> Add a <code>fetches: AtomicUsize</code> counter to the index and compare it
+          with a <code>Mutex&lt;usize&gt;</code> version. Add <code>Weak</code> back-references from each package entry to
+          its channel record and show the channel is freed when the last strong <code>Arc</code> goes. Swap
+          <code>std::sync::RwLock</code> for <code>parking_lot::RwLock</code> (<code>pixi run cargo add parking_lot</code>)
+          and remove the <code>unwrap()</code>s.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="quiz">
+    <h2>Quiz</h2>
+    <div class="quiz" data-id="m08-quiz">
+<script type="application/json">
+{"title": "Smart pointers quiz", "passScore": 0.7, "questions": [
+  {"type": "single", "prompt": "Why does <code>enum List { Cons(i32, List), Nil }</code> fail to compile?", "options": ["Enums cannot contain integers", "The type contains itself directly, so its size would be infinite (E0072); a <code>Box&lt;List&gt;</code> fixes it", "<code>Nil</code> needs a value", "Recursive types must be <code>Copy</code>"], "answer": 1, "explanation": "<p>Every value needs a size known at compile time. Boxing the recursive field replaces it with a fixed-size pointer.</p>"},
+  {"type": "single", "prompt": "What does <code>Rc::clone(&amp;rc)</code> do?", "options": ["Deep-copies the value", "Increments the reference count and returns another pointer to the same value", "Moves the value out of <code>rc</code>", "Creates a <code>Weak</code> pointer"], "answer": 1, "explanation": "<p>A clone of an <code>Rc</code> or <code>Arc</code> copies one pointer and bumps a counter. The value itself is not copied.</p>"},
+  {"type": "output", "prompt": "What does this print?", "code": "use std::rc::Rc;\n\nfn main() {\n    let a = Rc::new(String::from(\"pixi\"));\n    let b = Rc::clone(&a);\n    {\n        let _c = Rc::clone(&a);\n    }\n    println!(\"{}\", Rc::strong_count(&b));\n}", "answer": "2", "explanation": "<p><code>a</code> and <code>b</code> are alive; <code>_c</code> was dropped at the end of its block.</p>"},
+  {"type": "single", "prompt": "Does this compile?", "code": "use std::rc::Rc;\nuse std::thread;\n\nfn main() {\n    let data = Rc::new(5);\n    let d = Rc::clone(&data);\n    thread::spawn(move || println!(\"{d}\")).join().unwrap();\n}", "options": ["Yes", "No: E0277, <code>Rc&lt;i32&gt;</code> cannot be sent between threads safely", "No: E0373"], "answer": 1, "explanation": "<p><code>Rc</code> is not <code>Send</code>, because its counter is not atomic. Use <code>Arc</code>.</p>"},
+  {"type": "single", "prompt": "What happens at run time?", "code": "use std::cell::RefCell;\n\nfn main() {\n    let c = RefCell::new(1);\n    let r = c.borrow();\n    let mut w = c.borrow_mut();\n    *w += *r;\n}", "options": ["It prints nothing and exits normally", "It panics, because a mutable borrow was requested while a shared borrow is alive", "It fails to compile with E0502"], "answer": 1, "explanation": "<p><code>RefCell</code> enforces the borrow rules at run time. This compiles, then panics on <code>borrow_mut</code> because <code>r</code> is still alive.</p>"},
+  {"type": "multi", "prompt": "Which statements about <code>Mutex&lt;T&gt;</code> are true?", "options": ["The data lives inside the mutex, so it cannot be reached without locking", "The lock is released when the guard is dropped", "<code>std::sync::Mutex::lock()</code> returns a <code>Result</code> because of poisoning", "<code>parking_lot::Mutex::lock()</code> also returns a <code>Result</code>"], "answer": [0, 1, 2], "explanation": "<p><code>parking_lot</code>'s locks do not poison, so their <code>lock()</code> returns the guard directly. That is why Pixi's lock calls have no <code>unwrap()</code>.</p>"},
+  {"type": "single", "prompt": "Which type lets several threads own shared, mutable state?", "options": ["<code>Rc&lt;RefCell&lt;T&gt;&gt;</code>", "<code>Arc&lt;T&gt;</code>", "<code>Arc&lt;Mutex&lt;T&gt;&gt;</code>", "<code>Box&lt;T&gt;</code>"], "answer": 2, "explanation": "<p><code>Arc</code> provides thread-safe shared ownership; <code>Mutex</code> provides thread-safe mutation. <code>Rc</code> and <code>RefCell</code> are single-threaded.</p>"},
+  {"type": "single", "prompt": "Why can threads started with <code>std::thread::scope</code> borrow local variables?", "options": ["They copy the stack", "<code>scope</code> joins every thread before it returns, so the borrows cannot outlive the data", "They run on the same thread", "Scoped threads cannot access locals"], "answer": 1, "explanation": "<p>The guarantee that all scoped threads finish lifts the <code>'static</code> requirement that <code>thread::spawn</code> has.</p>"},
+  {"type": "output", "prompt": "What does this print?", "code": "use std::borrow::Cow;\n\nfn trim_v(s: &str) -> Cow<'_, str> {\n    match s.strip_prefix('v') {\n        Some(rest) => Cow::Owned(rest.to_string()),\n        None => Cow::Borrowed(s),\n    }\n}\n\nfn main() {\n    let a = trim_v(\"v1.2\");\n    let b = trim_v(\"2.0\");\n    println!(\"{} {} {}\", a, b, matches!(b, Cow::Borrowed(_)));\n}", "answer": "1.2 2.0 true", "explanation": "<p><code>Cow</code> displays as its string. The input without a <code>v</code> is returned borrowed. (This function could even return <code>Cow::Borrowed(rest)</code>, since <code>rest</code> is a slice of the input.)</p>"},
+  {"type": "single", "prompt": "What is the difference between <code>OnceLock&lt;T&gt;</code> and <code>LazyLock&lt;T&gt;</code>?", "options": ["<code>OnceLock</code> is not thread-safe", "<code>LazyLock</code> carries its initializer and runs it on first dereference; <code>OnceLock</code> is given the initializer at each <code>get_or_init</code> call", "<code>LazyLock</code> can be set many times", "There is none"], "answer": 1, "explanation": "<p>Both initialize at most once and are thread-safe. <code>LazyLock</code> suits statics with a fixed recipe; <code>OnceLock</code> suits fields and cases where the initializer needs runtime context such as <code>&amp;self</code>.</p>"},
+  {"type": "text", "prompt": "Which crate provides the <code>OnceCell</code> that Pixi's <code>Workspace</code> still uses for its gateway and client, because std lacks a stable fallible initializer?", "answer": ["once_cell", "once-cell"], "explanation": "<p><code>once_cell::sync::OnceCell</code> has <code>get_or_try_init</code>; std's <code>OnceLock::get_or_try_init</code> is still unstable.</p>"},
+  {"type": "multi", "prompt": "Why does Pixi wrap shared services like the gateway or a download semaphore in <code>Arc</code>?", "options": ["Spawned async tasks must own their data (<code>'static</code>), and an <code>Arc</code> clone gives each task an owning handle", "Cloning an <code>Arc</code> is a cheap pointer copy", "<code>Arc</code> makes the inner value mutable", "Many concurrent operations share one instance with no single natural owner"], "answer": [0, 1, 3], "explanation": "<p><code>Arc</code> gives shared ownership, not mutability; a lock or other interior mutability is needed to change the value.</p>"},
+  {"type": "single", "prompt": "In Pixi you see <code>let mut inner = self.inner.write();</code> with no <code>unwrap()</code>. What is <code>self.inner</code> most likely to be?", "options": ["<code>std::sync::RwLock</code>", "<code>parking_lot::RwLock</code>", "<code>RefCell</code>", "<code>Arc</code>"], "answer": 1, "explanation": "<p>std's <code>RwLock::write()</code> returns a <code>LockResult</code>; <code>parking_lot</code>'s returns the guard directly. Check the imports to be sure.</p>"}
+]}
+</script>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="recap">
+    <h2>Recap</h2>
+    <ul>
+      <li><code>Box&lt;T&gt;</code>: one owner, value on the heap. For recursive types, <code>dyn Trait</code>, and large
+        rare enum variants.</li>
+      <li><code>Rc&lt;T&gt;</code>: shared ownership on one thread. Clone bumps a count; the value drops with the last
+        owner; read-only; cycles leak unless broken with <code>Weak</code>.</li>
+      <li><code>Cell</code>/<code>RefCell</code>: mutation through <code>&amp;self</code>. <code>RefCell</code> checks
+        borrows at run time and panics on a violation.</li>
+      <li><code>Send</code>/<code>Sync</code>: may move to / be shared between threads. The compiler derives them and
+        reports violations as E0277.</li>
+      <li><code>Arc&lt;T&gt;</code> is the thread-safe <code>Rc</code>; <code>Mutex</code>/<code>RwLock</code> are the
+        thread-safe <code>RefCell</code>. <code>parking_lot</code>'s locks do not poison, so no
+        <code>unwrap()</code>.</li>
+      <li><code>thread::scope</code> lets threads borrow locals, because they are joined before it returns.</li>
+      <li><code>Cow&lt;'_, str&gt;</code>: borrowed in the common case, owned when changed.</li>
+      <li><code>LazyLock</code> and <code>OnceLock</code> compute once on first use; <code>once_cell</code> is the older
+        crate Pixi still uses where it needs a fallible initializer.</li>
+      <li>Pixi shares long-lived services as <code>Arc&lt;T&gt;</code> because concurrent tasks must own cheap handles,
+        and adds a lock inside only where data changes.</li>
+    </ul>
+    <div class="flashcards" data-title="Smart pointers">
+      <script type="application/json">
+      [{"front": "<code>Box&lt;T&gt;</code>", "back": "Single owner, value on the heap, one pointer wide. Recursive types, <code>dyn Trait</code>, big enum variants."},
+       {"front": "<code>Rc&lt;T&gt;</code>", "back": "Reference-counted shared ownership, single-threaded, read-only. <code>Rc::clone</code> bumps the count."},
+       {"front": "<code>Arc&lt;T&gt;</code>", "back": "Atomically reference counted: the thread-safe <code>Rc</code>. <code>Send + Sync</code> when <code>T</code> is."},
+       {"front": "<code>RefCell&lt;T&gt;</code>", "back": "Interior mutability with run-time borrow checks: <code>borrow()</code>, <code>borrow_mut()</code>, panic on violation."},
+       {"front": "<code>Cell&lt;T&gt;</code>", "back": "Interior mutability by <code>get</code>/<code>set</code> of copies; never panics. Counters and flags."},
+       {"front": "<code>Send</code> vs <code>Sync</code>", "back": "<code>Send</code>: can move to another thread. <code>Sync</code>: <code>&amp;T</code> can be shared between threads."},
+       {"front": "<code>Arc&lt;Mutex&lt;T&gt;&gt;</code>", "back": "Shared mutable state across threads. Clone the <code>Arc</code> per thread; lock briefly; guard drop unlocks."},
+       {"front": "Mutex poisoning", "back": "A panic while holding a std lock poisons it; later <code>lock()</code> returns <code>Err</code>. <code>parking_lot</code> has no poisoning."},
+       {"front": "<code>thread::scope</code>", "back": "Threads joined before the scope returns, so they may borrow locals. No <code>Arc</code> or <code>'static</code> needed."},
+       {"front": "<code>Cow&lt;'_, str&gt;</code>", "back": "<code>Borrowed(&amp;str)</code> or <code>Owned(String)</code>; derefs to <code>&amp;str</code>; allocates only when it must."},
+       {"front": "<code>LazyLock</code> / <code>OnceLock</code>", "back": "Compute once on first use. <code>LazyLock</code> holds its initializer (statics); <code>OnceLock::get_or_init</code> takes one per call (fields)."},
+       {"front": "Why Arc in Pixi", "back": "Shared services, <code>'static</code> async tasks, cheap clones, and mostly immutable data, so no lock needed."}]
+      </script>
+    </div>
+    <h3>Going further</h3>
+    <ul>
+      <li><a href="https://doc.rust-lang.org/book/ch15-00-smart-pointers.html">The Rust Book, chapter 15: Smart Pointers</a> and <a href="https://doc.rust-lang.org/book/ch16-00-concurrency.html">chapter 16: Fearless Concurrency</a></li>
+      <li><a href="https://doc.rust-lang.org/rust-by-example/std/rc.html">Rust by Example: Rc</a> and <a href="https://doc.rust-lang.org/rust-by-example/std/arc.html">Arc</a></li>
+      <li>std docs: <a href="https://doc.rust-lang.org/std/cell/index.html"><code>std::cell</code></a> (an excellent essay on interior mutability), <a href="https://doc.rust-lang.org/std/sync/index.html"><code>std::sync</code></a>, <a href="https://doc.rust-lang.org/std/borrow/enum.Cow.html"><code>Cow</code></a>, <a href="https://doc.rust-lang.org/std/thread/fn.scope.html"><code>thread::scope</code></a></li>
+      <li><a href="https://doc.rust-lang.org/reference/special-types-and-traits.html">The Rust Reference: Special types and traits</a> (<code>Box</code>, <code>Send</code>, <code>Sync</code>)</li>
+      <li>Pixi: <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_command_dispatcher/src/command_dispatcher/mod.rs">crates/pixi_command_dispatcher/src/command_dispatcher/mod.rs</a>, where most of the shared state behind a solve lives</li>
+      <li>Next: <a href="m09-closures-iterators.html">M09 Closures &amp; Iterator Chains</a>, including the <code>move</code> closures you have been passing to threads</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

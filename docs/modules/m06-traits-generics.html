@@ -1,0 +1,1818 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M06 · Traits &amp; Generics · Rust Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-rust.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-module="m06">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Stage 2 · Idiomatic Rust · Module 06</p>
+    <h1>Traits &amp; Generics</h1>
+    <p class="lede">Traits are how Rust says "any type that can do this." They play the part of Python's protocols,
+      abstract base classes, and dunder methods all at once, and the compiler checks every one of them before your
+      program runs. Pixi is built on them: its platform and environment names parse and print through
+      <code>FromStr</code> and <code>Display</code>, its dependency specs convert with <code>From</code>, and its
+      environments, solve groups, and feature collections share dozens of methods through one trait. By the end of
+      this module you can read all of that.</p>
+    <div class="lesson-meta"><span>⏱ ~3 hours</span><span>Prerequisites: <a href="m02-types-structs-enums.html">M02 Types, Structs &amp; Enums</a>, <a href="m04-option-result.html">M04 Option, Result &amp; ?</a>, <a href="m05-collections-iterators.html">M05 Collections &amp; Iterators</a></span></div>
+    <ul class="objectives">
+      <li>Define a trait with required and default methods, implement it for your types, and bring it into scope to call it</li>
+      <li>Write generic functions and structs, and constrain them with trait bounds and <code>where</code> clauses</li>
+      <li>Use <code>impl Trait</code> in argument and return position, and explain its one-concrete-type rule</li>
+      <li>Build trait objects (<code>Box&lt;dyn Trait&gt;</code>, <code>&amp;dyn Trait</code>) and choose between generics and <code>dyn</code></li>
+      <li>Derive the common std traits, and hand-write <code>Display</code>, <code>From</code>, <code>TryFrom</code>, and <code>FromStr</code></li>
+      <li>Read associated types such as <code>Iterator::Item</code> and <code>FromStr::Err</code>, and implement <code>Iterator</code> for a simple type</li>
+      <li>State the orphan rule, recognize <code>E0117</code>, and work around it with a newtype</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="defining-traits">
+    <h2>Defining and implementing a trait</h2>
+    <p>In Python you describe "things that can do X" in one of three ways: duck typing (just call the method and hope),
+      an abstract base class (<code>abc.ABC</code> with <code>@abstractmethod</code>), or a
+      <code>typing.Protocol</code> that a type checker verifies. Rust has one mechanism, the <strong>trait</strong>: a
+      named set of method signatures that a type can promise to provide.</p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">from typing import Protocol
+
+class Describe(Protocol):
+    def describe(self) -&gt; str: ...
+
+class Package:
+    def __init__(self, name: str, version: str):
+        self.name, self.version = name, version
+    def describe(self) -&gt; str:
+        return f"{self.name} {self.version}"</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">trait Describe {
+    fn describe(&amp;self) -&gt; String;
+}
+
+struct Package {
+    name: String,
+    version: String,
+}
+
+impl Describe for Package {
+    fn describe(&amp;self) -&gt; String {
+        format!("{} {}", self.name, self.version)
+    }
+}</code></pre></div>
+    </div>
+    <p>The <code>trait</code> block declares what an implementer must provide: here one method that borrows
+      <code>self</code> and returns a <code>String</code>. The <code>impl Describe for Package</code> block is the
+      promise, and it is checked: leave out a method, or get its signature wrong, and the program does not compile.
+      Compare that with a Python protocol, where nothing stops a class from forgetting a method until a type checker
+      or a test notices.</p>
+    <p>Two differences from Python classes matter immediately:</p>
+    <ul>
+      <li><strong>Implementations are separate from the type.</strong> A struct's fields live in the
+        <code>struct</code>; its inherent methods live in <code>impl Package { ... }</code> (M02); each trait it
+        implements gets its own <code>impl Trait for Package { ... }</code> block, which can even live in a different
+        file. There is no inheritance between structs. Traits are how Rust shares behavior.</li>
+      <li><strong>You can implement your trait for types you did not write.</strong> <code>impl Describe for
+        i32</code> or <code>impl Describe for Vec&lt;String&gt;</code> are both fine. The orphan rule at the end of this
+        module says exactly when that is allowed.</li>
+    </ul>
+    <div class="runnable" data-title="One trait, several types">
+<textarea>
+trait Describe {
+    fn describe(&self) -> String;
+}
+
+struct Package {
+    name: String,
+    version: String,
+}
+
+struct Channel(String);
+
+impl Describe for Package {
+    fn describe(&self) -> String {
+        format!("package {} {}", self.name, self.version)
+    }
+}
+
+impl Describe for Channel {
+    fn describe(&self) -> String {
+        format!("channel {}", self.0)
+    }
+}
+
+impl Describe for bool {
+    fn describe(&self) -> String {
+        if *self { "yes".to_string() } else { "no".to_string() }
+    }
+}
+
+fn main() {
+    let p = Package { name: "numpy".into(), version: "2.1".into() };
+    let c = Channel("conda-forge".into());
+    println!("{}", p.describe());
+    println!("{}", c.describe());
+    println!("{}", true.describe());
+}
+</textarea>
+    </div>
+
+    <h3>A trait must be in scope to call its methods</h3>
+    <p>Here is a rule with no Python equivalent, and one you will meet on your first day in Pixi. A trait's methods can
+      only be called where the trait itself is in scope, either because it was defined in the same module or because
+      you imported it with <code>use</code>. The type implementing it is not enough:</p>
+    <div class="runnable" data-title="The trait is implemented but not imported" data-compile-fail>
+<textarea>
+mod model {
+    pub trait Describe {
+        fn describe(&self) -> String;
+    }
+
+    pub struct Package(pub String);
+
+    impl Describe for Package {
+        fn describe(&self) -> String {
+            format!("package {}", self.0)
+        }
+    }
+}
+
+fn main() {
+    let p = model::Package("numpy".to_string());
+    println!("{}", p.describe());
+}
+</textarea>
+    </div>
+    <p><code>E0599: no method named `describe` found for struct `Package` in the current scope</code>. The
+      <code>help:</code> lines explain it ("items from traits can only be used if the trait is in scope") and offer the
+      fix, <code>use crate::model::Describe;</code>. The rule exists so that adding a trait somewhere in a large program
+      cannot silently change which method a call in your file resolves to: only the traits you import can contribute
+      methods.</p>
+    <aside class="callout pixi"><p>When a Pixi call such as <code>environment.channels()</code> fails with
+      <code>E0599</code>, the method almost always comes from a trait you have not imported. The CLI's
+      <code>tree</code> command starts with
+      <code>use pixi_manifest::{FeaturesExt, HasWorkspaceManifest as _, PixiPlatform, PixiPlatformName};</code>
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_cli/src/tree.rs#L20">crates/pixi_cli/src/tree.rs#L20</a>).
+      <code>as _</code> imports a trait only for its methods, without binding its name, which avoids name clashes.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> a trait is a checked list of methods. <code>impl Trait for
+      Type</code> provides them. Calling a trait method requires the trait in scope, so <code>E0599</code> on a method
+      you know exists means "add a <code>use</code>."</p></aside>
+  </section>
+
+  <section class="lesson-section" id="default-methods">
+    <h2>Default methods</h2>
+    <p>A trait can provide a body for some of its methods. Implementers get those <strong>default methods</strong> for
+      free and may override them. Defaults can call the trait's required methods, which is how a trait with one or
+      two required methods can offer dozens of useful ones. Python's closest equivalent is a mixin class or a
+      non-abstract method on an ABC.</p>
+    <div class="runnable" data-title="Required, default, and overridden" data-predict>
+<textarea>
+trait Describe {
+    fn name(&self) -> String;
+
+    fn kind(&self) -> String {
+        "item".to_string()
+    }
+
+    fn describe(&self) -> String {
+        format!("{} {}", self.kind(), self.name())
+    }
+}
+
+struct Task(String);
+struct Package(String);
+
+impl Describe for Task {
+    fn name(&self) -> String {
+        self.0.clone()
+    }
+}
+
+impl Describe for Package {
+    fn name(&self) -> String {
+        self.0.clone()
+    }
+    fn kind(&self) -> String {
+        "package".to_string()
+    }
+}
+
+fn main() {
+    println!("{}", Task("test".into()).describe());
+    println!("{}", Package("numpy".into()).describe());
+}
+</textarea>
+    </div>
+    <p><code>Task</code> implements only <code>name</code> and inherits both defaults. <code>Package</code> overrides
+      <code>kind</code>, and the default <code>describe</code> calls the overridden version, just as a method on a
+      Python base class calls an overridden method on <code>self</code>.</p>
+    <p>You have already used the most famous example. The <code>Iterator</code> trait has exactly one required
+      method, <code>next</code>, and over seventy default methods: <code>map</code>, <code>filter</code>,
+      <code>collect</code>, <code>sum</code>, and every other adapter and consumer from M05. Implement
+      <code>next</code> for your own type and all of them work on it; you will do that later in this module.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> required methods have only a signature; default methods
+      have a body that may call the required ones. Implementers can override defaults.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="generics">
+    <h2>Generic functions and structs</h2>
+    <p>In Python you write one <code>largest(items)</code> and it works on any list whose items support
+      <code>&gt;</code>; if they do not, you find out with a <code>TypeError</code> at run time. Type hints can say
+      so with a <code>TypeVar</code> bound to a protocol, but nothing enforces it when the program runs. Rust's
+      <strong>generics</strong> are the enforced version: a <strong>type parameter</strong> in angle brackets, such as
+      <code>&lt;T&gt;</code>, stands for "some type, chosen by the caller."</p>
+    <p>The catch is that inside the function you can only do with a <code>T</code> what you have said every
+      <code>T</code> can do. Say nothing, and you can do almost nothing:</p>
+    <div class="runnable" data-title="T could be anything" data-compile-fail>
+<textarea>
+fn largest<T>(items: &[T]) -> &T {
+    let mut best = &items[0];
+    for item in items {
+        if item > best {
+            best = item;
+        }
+    }
+    best
+}
+
+fn main() {
+    println!("{}", largest(&[3, 9, 4]));
+}
+</textarea>
+    </div>
+    <p><code>E0369: binary operation `&gt;` cannot be applied to type `&amp;T`</code>. The compiler checks the generic
+      function once, for every possible <code>T</code>, and some types cannot be compared. The <code>help:</code>
+      line says what to promise: "consider restricting type parameter <code>T</code> with trait
+      <code>PartialOrd</code>." <code>PartialOrd</code> is the trait behind <code>&lt;</code> and <code>&gt;</code>.
+      Adding it, written <code>&lt;T: PartialOrd&gt;</code>, is called a <strong>trait bound</strong>, the subject of
+      the next section.</p>
+    <div class="runnable" data-title="A bound makes it compile" data-predict>
+<textarea>
+fn largest<T: PartialOrd>(items: &[T]) -> Option<&T> {
+    let mut best = items.first()?;
+    for item in items {
+        if item > best {
+            best = item;
+        }
+    }
+    Some(best)
+}
+
+fn main() {
+    println!("{:?}", largest(&[3, 9, 4]));
+    println!("{:?}", largest(&[0.5, -1.0]));
+    println!("{:?}", largest(&["pixi", "conda", "rattler"]));
+    println!("{:?}", largest::<u8>(&[]));
+}
+</textarea>
+    </div>
+    <p>One function works for integers, floats, and strings, and returns <code>None</code> for an empty slice
+      instead of panicking (<code>first()?</code> is M04's <code>?</code> on an <code>Option</code>). The last call
+      uses the turbofish to name <code>T</code>, because an empty slice gives the compiler nothing to infer it from.</p>
+    <h3>How generics are compiled: monomorphization</h3>
+    <p>Generic code has no run-time cost. For each concrete type a generic function is used with, the compiler
+      generates a separate copy specialized for that type: <code>largest::&lt;i32&gt;</code>,
+      <code>largest::&lt;f64&gt;</code>, <code>largest::&lt;&amp;str&gt;</code>. This is called
+      <strong>monomorphization</strong>. Each copy is as fast as one written by hand for that type. The price is
+      compile time and binary size, one reason a large Rust project like Pixi takes minutes to build.</p>
+    <h3>Generic structs and impl blocks</h3>
+    <p>Structs and enums take type parameters too. You have used two already: <code>Option&lt;T&gt;</code> and
+      <code>Vec&lt;T&gt;</code>. Methods are written in <code>impl&lt;T&gt; Name&lt;T&gt; { ... }</code>: the first
+      <code>&lt;T&gt;</code> declares the parameter, the second uses it. An impl block can also be written for one
+      specific type, which adds methods only to that version.</p>
+    <div class="runnable" data-title="A generic struct">
+<textarea>
+#[derive(Debug)]
+struct Pinned<T> {
+    name: String,
+    value: T,
+}
+
+impl<T> Pinned<T> {
+    fn new(name: &str, value: T) -> Self {
+        Pinned { name: name.to_string(), value }
+    }
+    fn into_value(self) -> T {
+        self.value
+    }
+}
+
+impl Pinned<u32> {
+    fn bump(&mut self) {
+        self.value += 1;
+    }
+}
+
+fn main() {
+    let mut build = Pinned::new("build-number", 7);
+    build.bump();
+    let spec = Pinned::new("python", ">=3.12".to_string());
+    println!("{build:?}");
+    println!("{} = {}", spec.name, spec.value);
+    println!("{}", spec.into_value().len());
+    // spec.bump(); // error: bump exists only on Pinned<u32>
+}
+</textarea>
+    </div>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>&lt;T&gt;</code> declares a type parameter; inside,
+      you can only use what the bounds promise. Generics are monomorphized: one fast copy per concrete type.
+      <code>impl&lt;T&gt; S&lt;T&gt;</code> adds methods for every <code>T</code>; <code>impl S&lt;u32&gt;</code> for one.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="bounds">
+    <h2>Trait bounds and where clauses</h2>
+    <p>A <strong>trait bound</strong> is a requirement on a type parameter: <code>T: PartialOrd</code> means "only
+      types that implement <code>PartialOrd</code>." Bounds work in both directions. Inside the function they are what
+      let you call <code>&gt;</code> or <code>.to_string()</code>; at the call site the compiler checks that the
+      caller's type meets them, and rejects the call otherwise.</p>
+    <p>Combine bounds with <code>+</code>. When the list gets long, move it into a <code>where</code> clause after the
+      signature. The two forms mean the same thing; <code>where</code> is easier to read and is what Pixi and rustfmt
+      favor for anything non-trivial.</p>
+    <pre><code class="language-rust">use std::fmt::{Debug, Display};
+use std::hash::Hash;
+
+// Inline bounds
+fn report&lt;T: Display + Clone&gt;(item: &amp;T) -&gt; String { format!("{item}") }
+
+// The same with a where clause, plus a second parameter
+fn index_by&lt;K, V&gt;(items: &amp;[V], key: impl Fn(&amp;V) -&gt; K) -&gt; std::collections::HashMap&lt;K, Vec&lt;V&gt;&gt;
+where
+    K: Hash + Eq,
+    V: Clone + Debug,
+{
+    // ...
+    todo!()
+}</code></pre>
+    <p>Bounds can also sit on an <code>impl</code> block, which adds methods only when the type parameter qualifies.
+      That is how a generic wrapper can be printable only when its contents are. The standard library uses the same
+      idea on single methods: <code>sort</code> on a slice carries the bound <code>where T: Ord</code>, so
+      <code>Vec&lt;String&gt;</code> has it and <code>Vec&lt;f64&gt;</code> does not (M05's <code>E0277</code>).</p>
+    <div class="runnable" data-title="Bounds on functions and impl blocks" data-predict>
+<textarea>
+use std::collections::BTreeSet;
+use std::fmt::Display;
+
+fn join_all<T>(items: &[T], sep: &str) -> String
+where
+    T: Display,
+{
+    items.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(sep)
+}
+
+fn count_distinct<T: Ord>(items: &[T]) -> usize {
+    items.iter().collect::<BTreeSet<_>>().len()
+}
+
+struct Labeled<T> {
+    label: String,
+    value: T,
+}
+
+impl<T: Display> Labeled<T> {
+    fn render(&self) -> String {
+        format!("{}: {}", self.label, self.value)
+    }
+}
+
+fn main() {
+    println!("{}", join_all(&["linux-64", "osx-arm64"], ", "));
+    println!("{}", join_all(&[3, 12, 14], "."));
+    println!("{}", count_distinct(&["numpy", "rich", "numpy"]));
+    let l = Labeled { label: "python".to_string(), value: 3.14 };
+    println!("{}", l.render());
+}
+</textarea>
+    </div>
+    <p>Notice that <code>count_distinct</code> collects references (<code>&amp;T</code>) into the set. That needs
+      <code>&amp;T: Ord</code>, and the standard library provides it: whenever <code>T: Ord</code>, so is
+      <code>&amp;T</code>, by comparing what the references point at.</p>
+    <aside class="callout warn"><p>A Python habit to drop: adding bounds "just in case." Each bound is a requirement
+      every caller must meet. Ask for exactly what the body uses, and nothing more; the compiler tells you when
+      something is missing, with <code>E0369</code>, <code>E0599</code>, or <code>E0277</code> and a
+      <code>help:</code> line naming the trait.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>T: A + B</code> requires both traits.
+      <code>where</code> clauses say the same thing more readably. Bounds on an <code>impl</code> block make its
+      methods conditional.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="impl-trait">
+    <h2>impl Trait in argument and return position</h2>
+    <p>Writing out a type parameter and its bound is verbose when the parameter is used once. Rust offers a shorthand,
+      <code>impl Trait</code>, which means "some type that implements this trait." Its meaning depends on where you put
+      it.</p>
+    <h3>In argument position: shorthand for a generic</h3>
+    <p><code>fn new(name: impl Into&lt;String&gt;)</code> means exactly <code>fn new&lt;S: Into&lt;String&gt;&gt;(name:
+      S)</code>. The caller picks the type. You lose only the ability to name it, for example in a turbofish.</p>
+    <aside class="callout pixi"><p>Pixi uses this for friendly constructors. <code>NewEnvironment::new</code> takes
+      <code>name: impl Into&lt;String&gt;</code> and calls <code>name.into()</code>, so callers can pass a
+      <code>&amp;str</code> or a <code>String</code> without converting first
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/environment.rs#L168-L175">crates/pixi_manifest/src/environment.rs#L168-L175</a>).
+      <code>Into</code> is covered in the conversions section below.</p></aside>
+    <h3>In return position: "I return one type, and I am not telling you which"</h3>
+    <p>Returning <code>impl Trait</code> is different: the <em>function</em> picks the type, and callers only know the
+      trait. It is essential for iterators. The real type of <code>v.iter().filter(...).map(...)</code> is something
+      like <code>Map&lt;Filter&lt;Iter&lt;'_, String&gt;, {closure}&gt;, {closure}&gt;</code>, and closure types cannot
+      even be written down. So you return <code>impl Iterator&lt;Item = ...&gt;</code>:</p>
+    <div class="runnable" data-title="Returning an iterator" data-predict>
+<textarea>
+fn python_deps(deps: &[&'static str]) -> impl Iterator<Item = String> {
+    deps.iter()
+        .filter(|d| d.starts_with("py"))
+        .map(|d| d.to_uppercase())
+}
+
+fn main() {
+    let deps = ["python", "numpy", "pytest", "pyyaml"];
+    for d in python_deps(&deps).take(2) {
+        println!("{d}");
+    }
+    println!("{}", python_deps(&deps).count());
+}
+</textarea>
+    </div>
+    <p>The returned iterator is still lazy and still has every adapter. (The <code>&amp;'static str</code> is a lifetime
+      annotation, which M07 explains; read it as "string literals.")</p>
+    <p>The rule to remember: return-position <code>impl Trait</code> stands for <strong>one</strong> concrete type. A
+      function cannot return one iterator type in one branch and another in a different branch:</p>
+    <div class="runnable" data-title="Two branches, two types" data-compile-fail>
+<textarea>
+fn deps(include_dev: bool) -> impl Iterator<Item = &'static str> {
+    let run = ["python", "numpy"].into_iter();
+    if include_dev {
+        run.chain(["pytest"])
+    } else {
+        run
+    }
+}
+
+fn main() {
+    println!("{}", deps(true).count());
+}
+</textarea>
+    </div>
+    <p><code>E0308: `if` and `else` have incompatible types</code>: one branch is a <code>Chain&lt;...&gt;</code>, the
+      other an <code>array::IntoIter&lt;...&gt;</code>. Both implement <code>Iterator</code>, but <code>impl
+      Iterator</code> must be a single type. The compiler suggests one fix, returning
+      <code>Box&lt;dyn Iterator&lt;Item = &amp;'static str&gt;&gt;</code> (next section). Another is a two-variant
+      enum that is an iterator whenever both variants are, which is what the <code>itertools</code> crate's
+      <code>Either</code> type is, and exactly what Pixi does in <a href="#pixi-reading">Reading Pixi</a>.</p>
+    <aside class="callout note"><p>In edition 2024, a return-position <code>impl Trait</code> automatically captures
+      every lifetime in scope, so <code>fn f(v: &amp;[T]) -&gt; impl Iterator&lt;Item = &amp;T&gt;</code> borrows from
+      <code>v</code> without extra annotations. M07 covers what "captures" means.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>impl Trait</code> as an argument is a generic the
+      caller chooses. As a return type it is one hidden concrete type the function chooses; different types in
+      different branches need <code>Box&lt;dyn Trait&gt;</code> or an enum such as <code>Either</code>.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="dyn-trait">
+    <h2>Trait objects: dyn Trait</h2>
+    <p>Generics decide types at compile time. Sometimes you need the decision at run time: a list holding a mix of
+      types, chosen while the program runs, such as a list of checks loaded from configuration. In Python every list
+      is like this. In Rust you ask for it explicitly with a <strong>trait object</strong>, written
+      <code>dyn Trait</code>: "some value whose type implements <code>Trait</code>, I do not know which."</p>
+    <p>Because different types have different sizes, a <code>dyn Trait</code> value cannot sit in a variable or a
+      <code>Vec</code> slot directly. It always lives behind a pointer: <code>&amp;dyn Trait</code> (borrowed) or
+      <code>Box&lt;dyn Trait&gt;</code> (owned, on the heap; M08 covers <code>Box</code>). The pointer is "fat": it
+      holds the address of the value and the address of a <strong>vtable</strong>, a table of that type's method
+      implementations. Each method call looks up the function in the table, which is called <strong>dynamic
+      dispatch</strong>. Python does that on every method call.</p>
+    <div class="runnable" data-title="A heterogeneous list" data-predict>
+<textarea>
+trait Check {
+    fn name(&self) -> String;
+    fn passes(&self, value: &str) -> bool;
+}
+
+struct NonEmpty;
+struct MaxLen(usize);
+
+impl Check for NonEmpty {
+    fn name(&self) -> String { "non-empty".to_string() }
+    fn passes(&self, value: &str) -> bool { !value.is_empty() }
+}
+
+impl Check for MaxLen {
+    fn name(&self) -> String { format!("max-len {}", self.0) }
+    fn passes(&self, value: &str) -> bool { value.len() <= self.0 }
+}
+
+fn run_one(check: &dyn Check, value: &str) {
+    println!("{}: {}", check.name(), check.passes(value));
+}
+
+fn main() {
+    let checks: Vec<Box<dyn Check>> = vec![Box::new(NonEmpty), Box::new(MaxLen(5))];
+    for check in &checks {
+        run_one(check.as_ref(), "pixi-build");
+    }
+    run_one(&NonEmpty, "");
+}
+</textarea>
+    </div>
+    <p><code>check.as_ref()</code> turns a <code>&amp;Box&lt;dyn Check&gt;</code> into a <code>&amp;dyn Check</code>.
+      In many places Rust does that conversion for you, but spelling it out once shows what is going on.
+      <code>&amp;NonEmpty</code> converts to <code>&amp;dyn Check</code> automatically.</p>
+    <h3>Not every trait can be a trait object</h3>
+    <p>A vtable has one entry per method, so every method must be callable without knowing the concrete type. A
+      generic method has no single entry (each <code>T</code> would need its own copy), and a method returning
+      <code>Self</code> has no size the caller can know. Traits that avoid those are <strong>dyn compatible</strong>
+      (older material says "object safe").</p>
+    <div class="runnable" data-title="A generic method blocks dyn" data-compile-fail>
+<textarea>
+use std::fmt::Write;
+
+trait Render {
+    fn render<W: Write>(&self, out: &mut W);
+}
+
+struct Task;
+
+impl Render for Task {
+    fn render<W: Write>(&self, out: &mut W) {
+        let _ = out.write_str("task");
+    }
+}
+
+fn main() {
+    let items: Vec<Box<dyn Render>> = vec![Box::new(Task)];
+    println!("{}", items.len());
+}
+</textarea>
+    </div>
+    <p><code>E0038: the trait `Render` is not dyn compatible</code>, "because method <code>render</code> has generic type
+      parameters." The usual fixes are to take a trait object in the method too (<code>out: &amp;mut dyn Write</code>),
+      or to add <code>where Self: Sized</code> to the generic method, which excludes it from the vtable.</p>
+    <h3>Generics or dyn?</h3>
+    <table>
+      <thead><tr><th></th><th>Generics / <code>impl Trait</code></th><th><code>dyn Trait</code></th></tr></thead>
+      <tbody>
+        <tr><td>Type chosen</td><td>At compile time</td><td>At run time</td></tr>
+        <tr><td>Mixed types in one collection</td><td>No</td><td>Yes</td></tr>
+        <tr><td>Call cost</td><td>Direct call, can be inlined</td><td>One indirect call through the vtable</td></tr>
+        <tr><td>Code size</td><td>One copy per type used</td><td>One copy</td></tr>
+        <tr><td>Restrictions</td><td>None beyond the bounds</td><td>Trait must be dyn compatible; value behind a pointer</td></tr>
+      </tbody>
+    </table>
+    <p>Default to generics. Reach for <code>dyn</code> when you need a heterogeneous collection, when the set of
+      types is open-ended (plugins, user configuration), when a function must return different types from different
+      branches, or when compile time and binary size matter more than a few nanoseconds per call.</p>
+    <aside class="callout pixi"><p>You will see both in Pixi. Most code is generic, but errors use trait objects:
+      <code>Box&lt;dyn std::error::Error + Send + Sync&gt;</code> (M04's <code>Box&lt;dyn Error&gt;</code> plus the thread
+      markers from M08) and <code>miette</code> diagnostics as <code>Box&lt;dyn Diagnostic + Send + Sync + 'static&gt;</code>,
+      because any of many error types can end up in the same place. Level 2 covers <code>miette</code>.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>dyn Trait</code> lives behind
+      <code>&amp;</code> or <code>Box</code> and dispatches through a vtable. Use it for mixed collections and run-time
+      choice; use generics otherwise. Generic methods make a trait not dyn compatible (<code>E0038</code>).</p></aside>
+  </section>
+
+  <section class="lesson-section" id="derive">
+    <h2>Derive and the common std traits</h2>
+    <p>Python gives every class a default <code>__repr__</code>, <code>__eq__</code> by identity, and
+      <code>__hash__</code> by identity, and you override dunder methods to change them. A Rust type starts with
+      <em>none</em> of this: it cannot be printed, compared, copied, or used as a map key until it implements the
+      corresponding trait. For most of them you do not write the code; you ask the compiler to generate it with
+      <code>#[derive(...)]</code>, as in M02. A derive generates the obvious implementation: field by field, in
+      declaration order.</p>
+    <table>
+      <thead><tr><th>Trait</th><th>Gives you</th><th>Python analogue</th><th>Derived behavior</th></tr></thead>
+      <tbody>
+        <tr><td><code>Debug</code></td><td><code>{:?}</code> and <code>{:#?}</code></td><td><code>__repr__</code></td><td>Struct name and every field</td></tr>
+        <tr><td><code>Clone</code></td><td><code>.clone()</code></td><td><code>copy.deepcopy</code></td><td>Clones each field</td></tr>
+        <tr><td><code>Copy</code></td><td>Implicit copies instead of moves</td><td>none</td><td>Only if every field is <code>Copy</code>; requires <code>Clone</code></td></tr>
+        <tr><td><code>PartialEq</code> / <code>Eq</code></td><td><code>==</code>, <code>!=</code></td><td><code>__eq__</code></td><td>All fields equal. <code>Eq</code> adds "equality is reflexive" (no NaN)</td></tr>
+        <tr><td><code>Hash</code></td><td>Use as a <code>HashMap</code>/<code>HashSet</code> key</td><td><code>__hash__</code></td><td>Hashes each field; keep consistent with <code>Eq</code></td></tr>
+        <tr><td><code>PartialOrd</code> / <code>Ord</code></td><td><code>&lt;</code>, <code>&gt;</code>, <code>sort</code>, <code>BTreeMap</code> keys</td><td><code>__lt__</code> etc.</td><td>Compares fields in order, like a tuple; enum variants by declaration order</td></tr>
+        <tr><td><code>Default</code></td><td><code>T::default()</code>, <code>or_default()</code></td><td>default arguments</td><td>Each field's default (0, empty, <code>false</code>, <code>None</code>); enums mark one variant <code>#[default]</code></td></tr>
+      </tbody>
+    </table>
+    <div class="runnable" data-title="Derived ordering is field order" data-predict>
+<textarea>
+use std::collections::BTreeSet;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+struct Version {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+
+#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum Channel {
+    #[default]
+    Stable,
+    Beta,
+    Nightly,
+}
+
+fn main() {
+    let a = Version { major: 1, minor: 10, patch: 0 };
+    let b = Version { major: 1, minor: 9, patch: 7 };
+    println!("{}", a > b);
+    let mut versions = vec![a, b, Version::default()];
+    versions.sort();
+    println!("{:?}", versions.iter().map(|v| v.minor).collect::<Vec<_>>());
+    let set: BTreeSet<Version> = versions.into_iter().collect();
+    println!("{}", set.len());
+    println!("{:?} {}", Channel::default(), Channel::Beta < Channel::Nightly);
+}
+</textarea>
+    </div>
+    <p><code>1.10.0 &gt; 1.9.7</code> is true because derived <code>Ord</code> compares <code>major</code>, then
+      <code>minor</code> as numbers, then <code>patch</code>: exactly semantic-version order, and unlike comparing the
+      strings <code>"1.10.0"</code> and <code>"1.9.7"</code>. The field order in the struct <em>is</em> the sort
+      order, so choose it deliberately.</p>
+    <h3>Display is never derived</h3>
+    <p><code>Debug</code> is for developers, so a mechanical format is fine. <code>Display</code>, used by
+      <code>{}</code> and <code>.to_string()</code>, is what users see, and only you know what that should look like.
+      So it cannot be derived, and forgetting it is a common first error:</p>
+    <div class="runnable" data-title="Printing without Display" data-compile-fail>
+<textarea>
+#[derive(Debug)]
+struct Version {
+    major: u32,
+    minor: u32,
+}
+
+fn main() {
+    let v = Version { major: 1, minor: 2 };
+    println!("{v}");
+}
+</textarea>
+    </div>
+    <p><code>E0277: `Version` doesn't implement `std::fmt::Display`</code>, and the note suggests <code>{:?}</code>
+      instead. To implement it, write one method that writes into a <code>Formatter</code>:</p>
+    <div class="runnable" data-title="Implementing Display">
+<textarea>
+use std::fmt;
+
+struct Version {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+fn main() {
+    let v = Version { major: 3, minor: 14, patch: 0 };
+    println!("python {v}");
+    let s: String = v.to_string();
+    println!("{} chars, padded: [{v:>8}]", s.len());
+}
+</textarea>
+    </div>
+    <p><code>write!</code> is <code>format!</code> that writes into <code>f</code> and returns a
+      <code>fmt::Result</code>. Implementing <code>Display</code> also gives you <code>to_string()</code> for free,
+      through a blanket implementation in the standard library (the last section explains those). The padded output
+      shows a subtlety: <code>write!</code> ignores width options like <code>{:&gt;8}</code>, which is why Pixi's
+      <code>PixiPlatformName</code> forwards to the inner string's <code>fmt</code> instead (Reading Pixi).</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> derive <code>Debug</code>, <code>Clone</code>,
+      <code>PartialEq</code> and friends; derived comparisons go field by field in declaration order. Write
+      <code>Display</code> by hand; it gives you <code>to_string()</code>.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="conversions">
+    <h2>Conversion traits: From, Into, TryFrom, FromStr, AsRef</h2>
+    <p>Python converts with constructors and class methods: <code>str(x)</code>, <code>int("3")</code>,
+      <code>Path(s)</code>, <code>Version.parse(s)</code>. Rust standardizes conversions as traits, so every type
+      converts the same way and generic code can ask for "anything that converts into X."</p>
+    <table>
+      <thead><tr><th>Trait</th><th>Meaning</th><th>Can fail?</th><th>You call</th></tr></thead>
+      <tbody>
+        <tr><td><code>From&lt;T&gt; for U</code></td><td>Build a <code>U</code> from a <code>T</code></td><td>No</td><td><code>U::from(t)</code> or <code>t.into()</code></td></tr>
+        <tr><td><code>Into&lt;U&gt; for T</code></td><td>The same conversion, seen from the source side</td><td>No</td><td><code>t.into()</code></td></tr>
+        <tr><td><code>TryFrom&lt;T&gt; for U</code></td><td>Build a <code>U</code> from a <code>T</code>, or fail</td><td>Yes: <code>Result&lt;U, Self::Error&gt;</code></td><td><code>U::try_from(t)</code> or <code>t.try_into()</code></td></tr>
+        <tr><td><code>FromStr for U</code></td><td>Parse a <code>U</code> from <code>&amp;str</code></td><td>Yes: <code>Result&lt;U, Self::Err&gt;</code></td><td><code>s.parse::&lt;U&gt;()</code></td></tr>
+        <tr><td><code>AsRef&lt;T&gt; for U</code></td><td>Cheaply borrow a <code>&amp;T</code> from a <code>&amp;U</code></td><td>No</td><td><code>u.as_ref()</code></td></tr>
+      </tbody>
+    </table>
+    <h3>From and Into</h3>
+    <p>You implement <code>From</code>, never <code>Into</code>: the standard library has a blanket implementation
+      that gives you <code>Into</code> automatically for every <code>From</code>. Use <code>U::from(t)</code> when you
+      want the target type visible, and <code>t.into()</code> when the target is already known from context, such as
+      a function argument or a typed <code>let</code>. M04 showed the other big use: <code>?</code> calls
+      <code>From::from</code> on the error, so a <code>From</code> impl between error types makes <code>?</code>
+      convert them.</p>
+    <div class="runnable" data-title="From gives you Into" data-predict>
+<textarea>
+#[derive(Debug, PartialEq)]
+struct TaskName(String);
+
+impl From<&str> for TaskName {
+    fn from(name: &str) -> Self {
+        TaskName(name.to_string())
+    }
+}
+
+impl From<String> for TaskName {
+    fn from(name: String) -> Self {
+        TaskName(name)
+    }
+}
+
+fn run(task: impl Into<TaskName>) -> String {
+    let task: TaskName = task.into();
+    format!("running {}", task.0)
+}
+
+fn main() {
+    let a = TaskName::from("test");
+    let b: TaskName = String::from("lint").into();
+    println!("{a:?} {b:?}");
+    println!("{}", run("build"));
+    println!("{}", run(String::from("docs")));
+}
+</textarea>
+    </div>
+    <aside class="callout pixi"><p>This cell is a near copy of Pixi's real <code>TaskName</code>, a
+      <strong>newtype</strong> (a one-field tuple struct wrapping another type to give it its own identity) with
+      <code>From&lt;&amp;str&gt;</code> and <code>From&lt;String&gt;</code> implementations
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/task.rs#L22-L47">crates/pixi_manifest/src/task.rs#L22-L47</a>).
+      The dependency-spec crate goes further: <code>PixiSpec</code>, the enum for everything you can write on the
+      right of <code>numpy = ...</code>, has a <code>From</code> impl for each kind of spec, so code can write
+      <code>detailed_spec.into()</code> or <code>git_spec.into()</code>
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_spec/src/lib.rs#L747-L791">crates/pixi_spec/src/lib.rs#L747-L791</a>).</p></aside>
+    <h3>TryFrom and FromStr: conversions that validate</h3>
+    <p>When a conversion can fail, implement <code>TryFrom</code>, or <code>FromStr</code> for parsing text. Each has
+      an <strong>associated type</strong> for the error, <code>type Error</code> and <code>type Err</code> (the names
+      differ for historical reasons), which the next section explains. <code>FromStr</code> is what
+      <code>str::parse</code> calls, so implementing it lets your type be parsed exactly like <code>u32</code>.</p>
+    <div class="runnable" data-title="A validated type" data-predict>
+<textarea>
+use std::fmt;
+use std::str::FromStr;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct EnvName(String);
+
+impl FromStr for EnvName {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let valid = !s.is_empty()
+            && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if valid {
+            Ok(EnvName(s.to_string()))
+        } else {
+            Err(format!("invalid environment name '{s}'"))
+        }
+    }
+}
+
+impl fmt::Display for EnvName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+fn main() {
+    let ok: Result<EnvName, _> = "py314-test".parse();
+    println!("{ok:?}");
+    match "Test Env".parse::<EnvName>() {
+        Ok(name) => println!("ok {name}"),
+        Err(e) => println!("{e}"),
+    }
+    let names: Result<Vec<EnvName>, String> = ["default", "lint"].iter().map(|s| s.parse()).collect();
+    println!("{}", names.unwrap().len());
+}
+</textarea>
+    </div>
+    <p>This is the "parse, don't validate" pattern Pixi uses for every kind of name. Once you hold an
+      <code>EnvName</code>, you know it is valid, because the only way to build one from text is through
+      <code>from_str</code>. Functions that take an <code>EnvName</code> never re-check it. Python can approximate this
+      with a class whose constructor validates; Rust makes it airtight by keeping the field private to its module
+      (M10).</p>
+    <aside class="callout pixi"><p>Pixi's <code>EnvironmentName</code> implements <code>FromStr</code> with a regex
+      (<code>^[a-z0-9-]+$</code>) and maps the literal <code>"default"</code> to its <code>Default</code> variant
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/environment.rs#L123-L141">crates/pixi_manifest/src/environment.rs#L123-L141</a>).
+      That is why <code>pixi run -e Test</code> fails with "please use only lowercase letters, numbers and dashes."</p></aside>
+    <h3>AsRef: accept anything that can lend a view</h3>
+    <p><code>AsRef&lt;T&gt;</code> means "I can cheaply give you a <code>&amp;T</code>." Its main use is flexible
+      parameters: <code>fn open(path: impl AsRef&lt;Path&gt;)</code> accepts a <code>&amp;str</code>, a
+      <code>String</code>, a <code>PathBuf</code>, or a <code>&amp;Path</code>, because all of them implement
+      <code>AsRef&lt;Path&gt;</code>. Inside, <code>path.as_ref()</code> gives a <code>&amp;Path</code>. Pixi's script
+      manifest loaders take <code>path: impl AsRef&lt;Path&gt;</code> for exactly this reason. The difference from
+      <code>Into</code>: <code>AsRef</code> borrows and never allocates; <code>Into</code> may build a new owned value.</p>
+    <div class="runnable" data-title="AsRef for flexible arguments">
+<textarea>
+use std::path::{Path, PathBuf};
+
+fn file_name(path: impl AsRef<Path>) -> String {
+    let path: &Path = path.as_ref();
+    path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+}
+
+fn shout(s: impl AsRef<str>) -> String {
+    s.as_ref().to_uppercase()
+}
+
+fn main() {
+    println!("{}", file_name("workspace/pixi.toml"));
+    println!("{}", file_name(String::from("a/b/pixi.lock")));
+    println!("{}", file_name(PathBuf::from("/tmp/env")));
+    println!("{} {}", shout("pixi"), shout(String::from("conda")));
+}
+</textarea>
+    </div>
+    <aside class="callout tip"><p><strong>Remember:</strong> implement <code>From</code> and get <code>Into</code>
+      free. Fallible conversions are <code>TryFrom</code> (any input) and <code>FromStr</code> (text, via
+      <code>.parse()</code>). <code>impl Into&lt;String&gt;</code> and <code>impl AsRef&lt;Path&gt;</code> make
+      friendly parameters.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="associated-types">
+    <h2>Associated types: Iterator::Item and friends</h2>
+    <p>Look at how <code>Iterator</code> is defined in the standard library (simplified):</p>
+    <pre><code class="language-rust">pub trait Iterator {
+    type Item;
+    fn next(&amp;mut self) -&gt; Option&lt;Self::Item&gt;;
+    // ...seventy-odd default methods: map, filter, collect, sum...
+}</code></pre>
+    <p><code>type Item;</code> is an <strong>associated type</strong>: a type that each implementation chooses, named
+      <code>Self::Item</code> inside the trait. A <code>Vec&lt;String&gt;</code>'s <code>iter()</code> sets
+      <code>Item = &amp;String</code>; a <code>chars()</code> iterator sets <code>Item = char</code>. When you write
+      <code>impl Iterator&lt;Item = String&gt;</code>, you are constraining that associated type.
+      <code>FromStr::Err</code> and <code>TryFrom::Error</code> are associated types too.</p>
+    <p>Why not a generic parameter, <code>Iterator&lt;T&gt;</code>? Because a generic trait can be implemented many times
+      for one type (<code>From&lt;&amp;str&gt;</code> and <code>From&lt;String&gt;</code> for <code>TaskName</code>), while
+      an associated type allows exactly one choice per type. An iterator yields one kind of item, so
+      <code>Item</code> is associated; a type can be built from many sources, so <code>From&lt;T&gt;</code> is generic.
+      The one-choice rule also means the compiler never needs you to say which <code>Item</code> you meant.</p>
+    <h3>Implement Iterator, get everything</h3>
+    <p>Implement <code>next</code> and choose <code>Item</code>, and your type has every adapter and consumer from M05.
+      This is default methods paying off at scale:</p>
+    <div class="runnable" data-title="A custom iterator" data-predict>
+<textarea>
+struct Retry {
+    attempt: u32,
+    max: u32,
+}
+
+impl Iterator for Retry {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.attempt >= self.max {
+            return None;
+        }
+        self.attempt += 1;
+        Some(100 * 2u32.pow(self.attempt - 1))
+    }
+}
+
+fn main() {
+    let delays: Vec<u32> = Retry { attempt: 0, max: 4 }.collect();
+    println!("{delays:?}");
+    let total: u32 = Retry { attempt: 0, max: 4 }.sum();
+    let long = Retry { attempt: 0, max: 10 }.filter(|d| *d > 1000).take(2).collect::<Vec<_>>();
+    println!("{total} {long:?}");
+}
+</textarea>
+    </div>
+    <p>A retry schedule with exponential backoff (100, 200, 400, 800 ms) in a dozen lines, and it already supports
+      <code>sum</code>, <code>filter</code>, <code>take</code>, and <code>collect</code>. M09 goes further with custom
+      iterators.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> an associated type (<code>type Item;</code>) is chosen once
+      per implementation and named <code>Self::Item</code>. Use a generic trait parameter when a type should implement
+      the trait several ways; use an associated type when there is one natural answer.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="orphan-rule">
+    <h2>The orphan rule, newtypes, and blanket impls</h2>
+    <p>Python lets any code monkey-patch any class. Rust has a rule that prevents two crates from both implementing the
+      same trait for the same type, which would leave the compiler unable to choose. The <strong>orphan rule</strong>:
+      you may write <code>impl Trait for Type</code> only if the trait or the type is defined in your crate. Your
+      trait for <code>Vec</code>: fine. <code>Display</code> for your struct: fine. <code>Display</code> (from std) for
+      <code>Vec</code> (from std): not yours to decide.</p>
+    <div class="runnable" data-title="A foreign trait for a foreign type" data-compile-fail>
+<textarea>
+use std::fmt;
+
+impl fmt::Display for Vec<String> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.join(", "))
+    }
+}
+
+fn main() {
+    let deps = vec!["numpy".to_string(), "rich".to_string()];
+    println!("{deps}");
+}
+</textarea>
+    </div>
+    <p><code>E0117: only traits defined in the current crate can be implemented for types defined outside of the
+      crate</code>. The last note gives the standard way out: "define and implement a trait or new type instead." The
+      <strong>newtype pattern</strong> wraps the foreign type in a local one-field struct, which you are free to give any
+      trait:</p>
+    <div class="runnable" data-title="The newtype fix" data-predict>
+<textarea>
+use std::fmt;
+
+struct DepList(Vec<String>);
+
+impl fmt::Display for DepList {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0.join(", "))
+    }
+}
+
+fn main() {
+    let deps = DepList(vec!["numpy".to_string(), "rich".to_string()]);
+    println!("deps: {deps}");
+    println!("{}", deps.0.len());
+}
+</textarea>
+    </div>
+    <p>The wrapper costs nothing at run time; it has the same layout as the <code>Vec</code> it holds. That is why Pixi
+      is full of newtypes such as <code>TaskName(String)</code> and <code>PixiPlatformName(String)</code>: each one gets
+      its own <code>Display</code>, its own validation, and its own identity, so a task name cannot be passed where a
+      platform name is expected.</p>
+    <h3>Blanket implementations</h3>
+    <p>A <strong>blanket implementation</strong> implements a trait for every type that meets some bound:
+      <code>impl&lt;T: Display&gt; ToString for T</code> is the one in std that gave your <code>Version</code> a
+      <code>to_string()</code> as soon as it implemented <code>Display</code>. The <code>From</code>-gives-<code>Into</code>
+      rule is another. You can write your own, and Pixi does, as you will see next.</p>
+    <div class="runnable" data-title="A blanket impl" data-predict>
+<textarea>
+use std::fmt::Display;
+
+trait Shout {
+    fn shout(&self) -> String;
+}
+
+impl<T: Display> Shout for T {
+    fn shout(&self) -> String {
+        format!("{}!", self.to_string().to_uppercase())
+    }
+}
+
+fn main() {
+    println!("{}", "pixi".shout());
+    println!("{}", 42.shout());
+    println!("{}", 'x'.shout());
+}
+</textarea>
+    </div>
+    <aside class="callout tip"><p><strong>Remember:</strong> implement a trait only if the trait or the type is yours
+      (<code>E0117</code> otherwise). Wrap a foreign type in a newtype to give it foreign traits. A blanket impl
+      (<code>impl&lt;T: Bound&gt; Trait for T</code>) gives a trait to every qualifying type at once.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="pixi-reading">
+    <h2>Reading Pixi</h2>
+    <h3>A validated newtype: PixiPlatformName</h3>
+    <p>Platform names in a Pixi manifest (<code>linux-64</code>, or a custom name like <code>linux-64-cuda</code>) are
+      represented by a newtype that can only be built through validation. First the type and its <code>Display</code>
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/platform.rs#L59-L76">crates/pixi_manifest/src/platform.rs#L59-L76</a>):</p>
+    <pre data-label="crates/pixi_manifest/src/platform.rs"><code class="language-rust">// `Deserialize` is implemented by hand (below) to route through `TryFrom` so
+// the name validation can't be bypassed; the derive would accept any string.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize)]
+#[serde(transparent)]
+pub struct PixiPlatformName(String);
+
+// ... a hand-written serde::Deserialize impl that calls try_from ...
+
+impl Display for PixiPlatformName {
+    fn fmt(&amp;self, f: &amp;mut Formatter&lt;'_&gt;) -&gt; fmt::Result {
+        self.0.fmt(f)
+    }
+}</code></pre>
+    <p>Then the conversions
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/platform.rs#L117-L143">crates/pixi_manifest/src/platform.rs#L117-L143</a>):</p>
+    <pre data-label="crates/pixi_manifest/src/platform.rs"><code class="language-rust">impl TryFrom&lt;&amp;str&gt; for PixiPlatformName {
+    type Error = PixiPlatformNameError;
+
+    fn try_from(input: &amp;str) -&gt; Result&lt;Self, Self::Error&gt; {
+        let validated = Self::valid_pixi_platform_name(input)?;
+        // Family selectors (`linux`/`unix`/`win`/`osx`/`macos`) double as
+        // `target.&lt;family&gt;.*` keys; a platform named after one would shadow them.
+        if crate::target::family_name_to_selector(&amp;validated).is_some() {
+            return Err(PixiPlatformNameError::ReservedName(validated));
+        }
+        Ok(PixiPlatformName(validated))
+    }
+}
+
+impl From&lt;Platform&gt; for PixiPlatformName {
+    fn from(subdir: Platform) -&gt; Self {
+        PixiPlatformName(subdir.to_string())
+    }
+}
+
+impl std::str::FromStr for PixiPlatformName {
+    type Err = PixiPlatformNameError;
+
+    fn from_str(s: &amp;str) -&gt; Result&lt;Self, Self::Err&gt; {
+        PixiPlatformName::try_from(s)
+    }
+}</code></pre>
+    <ul>
+      <li><strong>The derive line</strong> gives the name everything a map key and a sorted list need: <code>Eq</code>
+        and <code>Hash</code> for <code>HashSet&lt;PixiPlatformName&gt;</code> (M05's <code>FeaturesExt::platforms</code>
+        returns one), <code>Ord</code> for <code>BTreeMap</code> and sorting. <code>Default</code> is deliberately
+        absent: an empty platform name is invalid. <code>Serialize</code> comes from serde, a Level 2 topic.</li>
+      <li><strong>The comment</strong> explains a design decision you now understand: deriving
+        <code>Deserialize</code> would build the struct directly from any string, bypassing validation, so the impl is
+        hand-written and routes through <code>try_from</code>.</li>
+      <li><strong><code>Display</code></strong> forwards to the <code>String</code>'s own <code>fmt</code>, which
+        respects width and alignment flags, unlike <code>write!(f, "{}", self.0)</code>.</li>
+      <li><strong><code>TryFrom&lt;&amp;str&gt;</code></strong> chooses its error with the associated type
+        <code>type Error</code>, validates the characters with a helper (<code>?</code> propagates its error), then rejects
+        reserved names like <code>linux</code>, and only then wraps the string.</li>
+      <li><strong><code>From&lt;Platform&gt;</code></strong> is infallible: a rattler <code>Platform</code> (a conda
+        subdir such as <code>osx-arm64</code>) is always a valid name, so this conversion needs no
+        <code>Result</code>.</li>
+      <li><strong><code>FromStr</code></strong> delegates to <code>try_from</code>, so <code>"linux-64".parse()</code>,
+        <code>PixiPlatformName::try_from("linux-64")</code>, and deserializing from TOML all run the same checks.</li>
+    </ul>
+
+    <h3>One trait, many collections: HasFeaturesIter and FeaturesExt</h3>
+    <p>An environment, a grouped environment, and a solve group are different types, but each is "a collection of
+      features," and each needs the same questions answered: which channels, which platforms, which dependencies.
+      Pixi writes those answers once. The required part is a tiny trait
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/has_features_iter.rs#L9-L12">crates/pixi_manifest/src/has_features_iter.rs#L9-L12</a>):</p>
+    <pre data-label="crates/pixi_manifest/src/has_features_iter.rs"><code class="language-rust">pub trait HasFeaturesIter&lt;'source&gt; {
+    /// Returns an iterator to all Features in this collection
+    fn features(&amp;self) -&gt; impl DoubleEndedIterator&lt;Item = &amp;'source Feature&gt; + 'source;
+}</code></pre>
+    <p>The shared methods live in <code>FeaturesExt</code>, whose supertraits require both
+      <code>HasWorkspaceManifest</code> and <code>HasFeaturesIter</code>, and a blanket impl gives it to every type that has
+      both
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/features_ext.rs#L41">line 41</a>,
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/features_ext.rs#L393-L396">lines 393-396</a>):</p>
+    <pre data-label="crates/pixi_manifest/src/features_ext.rs"><code class="language-rust">pub trait FeaturesExt&lt;'source&gt;: HasWorkspaceManifest&lt;'source&gt; + HasFeaturesIter&lt;'source&gt; {
+    // ... about twenty default methods: channels(), platforms(), dependencies(), ...
+}
+
+impl&lt;'source, FeatureCollection&gt; FeaturesExt&lt;'source&gt; for FeatureCollection where
+    FeatureCollection: HasWorkspaceManifest&lt;'source&gt; + HasFeaturesIter&lt;'source&gt;
+{
+}</code></pre>
+    <p>And here is <code>Environment</code> providing the one required method
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_core/src/workspace/environment.rs#L510-L526">crates/pixi_core/src/workspace/environment.rs#L510-L526</a>):</p>
+    <pre data-label="crates/pixi_core/src/workspace/environment.rs"><code class="language-rust">impl&lt;'p&gt; HasFeaturesIter&lt;'p&gt; for Environment&lt;'p&gt; {
+    /// Returns references to the features that make up this environment.
+    fn features(&amp;self) -&gt; impl DoubleEndedIterator&lt;Item = &amp;'p Feature&gt; + 'p {
+        let manifest = self.workspace_manifest();
+        let environment_features = self.environment.features.iter().map(|feature_name| {
+            manifest
+                .feature(feature_name)
+                .expect("feature usage should have been validated upfront")
+        });
+
+        if self.environment.no_default_feature {
+            Either::Right(environment_features)
+        } else {
+            Either::Left(environment_features.chain([self.workspace_manifest().default_feature()]))
+        }
+    }
+}</code></pre>
+    <ul>
+      <li><strong><code>'source</code> and <code>'p</code></strong> are lifetime parameters, the subject of M07. Read
+        them as "the features are borrowed from the workspace."</li>
+      <li><strong>Return-position <code>impl Trait</code> in a trait.</strong> <code>features</code> returns "some
+        double-ended iterator of feature references"; each implementer picks its own concrete iterator type.
+        <code>DoubleEndedIterator</code> is <code>Iterator</code> plus the ability to iterate from the back
+        (<code>.rev()</code>).</li>
+      <li><strong>Supertraits.</strong> <code>FeaturesExt: HasWorkspaceManifest + HasFeaturesIter</code> means
+        "anything implementing <code>FeaturesExt</code> must also implement both," so its default methods may call
+        <code>self.features()</code> and <code>self.workspace_manifest()</code>. That is how
+        <code>channels()</code> and <code>platforms()</code> from M05's reading can be written once.</li>
+      <li><strong>The blanket impl</strong> has an empty body: every method is a default. Implementing the two small
+        traits is enough to receive all of <code>FeaturesExt</code>, automatically.</li>
+      <li><strong><code>Either</code></strong> solves the <code>E0308</code> problem from the impl Trait section. One
+        branch returns the mapped iterator, the other the same iterator chained with the default feature. Those are
+        different types, so each is wrapped in a variant of <code>itertools::Either</code>, which implements
+        <code>Iterator</code> (and <code>DoubleEndedIterator</code>) when both sides do. The function now returns one
+        type, with no heap allocation.</li>
+    </ul>
+    <details class="reveal"><summary>Why does <code>PixiPlatformName</code> implement both <code>TryFrom&lt;&amp;str&gt;</code> and <code>FromStr</code> when they do the same thing?</summary>
+      <p>They serve different callers. <code>FromStr</code> is what <code>str::parse</code> and many libraries (clap for
+        command-line arguments, for example) look for; <code>TryFrom</code> is the general conversion trait that generic
+        code and the hand-written <code>Deserialize</code> use. Delegating one to the other keeps a single validation
+        path.</p></details>
+    <details class="reveal"><summary>Why not return <code>Box&lt;dyn DoubleEndedIterator&lt;...&gt;&gt;</code> instead of using <code>Either</code>?</summary>
+      <p>It would work, but it costs a heap allocation per call and a vtable call for every <code>next</code>.
+        <code>features()</code> is called all over Pixi (every <code>FeaturesExt</code> method starts with it), so the
+        zero-cost <code>Either</code> is worth the extra import. That is the generics-versus-dyn trade-off in a real
+        codebase.</p></details>
+    <details class="reveal"><summary>A new type <code>Preset</code> implements <code>HasWorkspaceManifest</code> and <code>HasFeaturesIter</code>. What else must it do to get <code>preset.channels()</code>?</summary>
+      <p>Nothing in its own code: the blanket impl gives it <code>FeaturesExt</code>. The <em>caller</em> must have
+        <code>FeaturesExt</code> in scope (<code>use pixi_manifest::FeaturesExt;</code>) to call
+        <code>channels()</code>, or the call fails with <code>E0599</code>.</p></details>
+  </section>
+
+  <section class="lesson-section" id="practice">
+    <h2>Practice</h2>
+    <p>Five exercises, ending with a small type that sorts, prints, and parses like a real Pixi type.</p>
+
+    <div class="exercise" data-id="m06-e1" data-title="Implement a trait with defaults">
+      <div class="exercise-prompt">
+        <p>The <code>Describe</code> trait has one required method and two defaults. Implement it for both structs:</p>
+        <ul>
+          <li><code>Package</code>: <code>name()</code> is the name and version separated by a space
+            (<code>"numpy 2.1"</code>); override <code>kind()</code> to return <code>"package"</code>.</li>
+          <li><code>Task</code>: <code>name()</code> is the task name; keep the default <code>kind()</code>.</li>
+        </ul>
+        <p>Do not change the trait. <code>describe()</code> must come from the default.</p>
+      </div>
+<textarea class="starter">
+trait Describe {
+    fn name(&self) -> String;
+
+    fn kind(&self) -> String {
+        "item".to_string()
+    }
+
+    fn describe(&self) -> String {
+        format!("{} {}", self.kind(), self.name())
+    }
+}
+
+struct Package {
+    name: String,
+    version: String,
+}
+
+struct Task {
+    name: String,
+}
+
+impl Describe for Package {
+    fn name(&self) -> String {
+        todo!()
+    }
+}
+
+impl Describe for Task {
+    fn name(&self) -> String {
+        todo!()
+    }
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+fn numpy() -> Package {
+    Package { name: "numpy".to_string(), version: "2.1".to_string() }
+}
+
+#[test]
+fn package_name_and_kind() {
+    assert_eq!(numpy().name(), "numpy 2.1", "Package::name is name, a space, then version");
+    assert_eq!(numpy().kind(), "package", "Package overrides kind()");
+}
+
+#[test]
+fn package_describe_uses_default() {
+    assert_eq!(numpy().describe(), "package numpy 2.1", "the default describe() calls your kind() and name()");
+}
+
+#[test]
+fn task_keeps_default_kind() {
+    let t = Task { name: "test".to_string() };
+    assert_eq!(t.kind(), "item", "Task should not override kind()");
+    assert_eq!(t.describe(), "item test", "default kind plus the task name");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>format!("{} {}", self.name, self.version)</code> for the
+        package. Add a <code>fn kind(&amp;self) -&gt; String</code> inside <code>impl Describe for Package</code> to
+        override the default.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-rust">trait Describe {
+    fn name(&amp;self) -&gt; String;
+
+    fn kind(&amp;self) -&gt; String {
+        "item".to_string()
+    }
+
+    fn describe(&amp;self) -&gt; String {
+        format!("{} {}", self.kind(), self.name())
+    }
+}
+
+struct Package {
+    name: String,
+    version: String,
+}
+
+struct Task {
+    name: String,
+}
+
+impl Describe for Package {
+    fn name(&amp;self) -&gt; String {
+        format!("{} {}", self.name, self.version)
+    }
+
+    fn kind(&amp;self) -&gt; String {
+        "package".to_string()
+    }
+}
+
+impl Describe for Task {
+    fn name(&amp;self) -&gt; String {
+        self.name.clone()
+    }
+}</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m06-e2" data-title="Add the bounds the body needs">
+      <div class="exercise-prompt">
+        <p>Implement three generic functions. The starter signatures have <strong>no trait bounds</strong>; add exactly
+          the bounds each body needs (the compiler's <code>help:</code> lines will tell you which).</p>
+        <ul>
+          <li><code>largest(items)</code>: the largest item, or <code>None</code> for an empty slice.</li>
+          <li><code>count_distinct(items)</code>: how many distinct values the slice holds.</li>
+          <li><code>join_all(items, sep)</code>: each item formatted with <code>{}</code>, joined by <code>sep</code>.</li>
+        </ul>
+        <p>The tests call them with integers, floats, and string slices.</p>
+      </div>
+<textarea class="starter">
+fn largest<T>(items: &[T]) -> Option<&T> {
+    todo!()
+}
+
+fn count_distinct<T>(items: &[T]) -> usize {
+    todo!()
+}
+
+fn join_all<T>(items: &[T], sep: &str) -> String {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn largest_works_for_several_types() {
+    assert_eq!(largest(&[3, 9, 4]), Some(&9), "largest of 3, 9, 4");
+    assert_eq!(largest(&[0.5, -1.0, 2.25]), Some(&2.25), "floats are PartialOrd, so they work too");
+    assert_eq!(largest(&["pixi", "conda", "rattler"]), Some(&"rattler"), "strings compare alphabetically");
+    assert_eq!(largest::<i32>(&[]), None, "an empty slice has no largest item");
+}
+
+#[test]
+fn count_distinct_counts_unique_values() {
+    assert_eq!(count_distinct(&["numpy", "rich", "numpy"]), 2, "numpy is counted once");
+    assert_eq!(count_distinct(&[1, 1, 1]), 1, "all the same");
+    assert_eq!(count_distinct::<u8>(&[]), 0, "empty slice");
+}
+
+#[test]
+fn join_all_formats_with_display() {
+    assert_eq!(join_all(&[3, 12, 14], "."), "3.12.14", "numbers joined by dots");
+    assert_eq!(join_all(&["linux-64", "win-64"], ", "), "linux-64, win-64", "strings joined by a comma and space");
+    assert_eq!(join_all::<i32>(&[], ","), "", "nothing to join");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>largest</code> needs <code>PartialOrd</code> (not
+        <code>Ord</code>, or floats would be rejected). <code>count_distinct</code> can collect into a
+        <code>BTreeSet</code>, which needs <code>Ord</code>, or a <code>HashSet</code>, which needs
+        <code>Hash + Eq</code>. <code>join_all</code> needs <code>Display</code> for <code>to_string()</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-rust">use std::collections::BTreeSet;
+use std::fmt::Display;
+
+fn largest&lt;T: PartialOrd&gt;(items: &amp;[T]) -&gt; Option&lt;&amp;T&gt; {
+    let mut best = items.first()?;
+    for item in items {
+        if item &gt; best {
+            best = item;
+        }
+    }
+    Some(best)
+}
+
+fn count_distinct&lt;T: Ord&gt;(items: &amp;[T]) -&gt; usize {
+    items.iter().collect::&lt;BTreeSet&lt;_&gt;&gt;().len()
+}
+
+fn join_all&lt;T: Display&gt;(items: &amp;[T], sep: &amp;str) -&gt; String {
+    items.iter().map(|i| i.to_string()).collect::&lt;Vec&lt;_&gt;&gt;().join(sep)
+}</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m06-e3" data-title="A validated platform name">
+      <div class="exercise-prompt">
+        <p>Build a small <code>PlatformName</code> in the style of Pixi's <code>PixiPlatformName</code>. Implement
+          <code>TryFrom&lt;&amp;str&gt;</code>, <code>FromStr</code> (delegating to <code>try_from</code>), and
+          <code>Display</code> (the bare name). The rules, checked character by character with the position counted in
+          characters from 0:</p>
+        <ul>
+          <li>The empty string is <code>PlatformNameError::Empty</code>.</li>
+          <li>The first character must be an ASCII lowercase letter.</li>
+          <li>Every other character must be an ASCII lowercase letter, an ASCII digit, or <code>-</code>.</li>
+          <li>The first character that breaks a rule is reported as
+            <code>PlatformNameError::InvalidCharacter { character, position }</code>.</li>
+        </ul>
+      </div>
+<textarea class="starter">
+use std::fmt;
+use std::str::FromStr;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct PlatformName(String);
+
+#[derive(Debug, PartialEq)]
+enum PlatformNameError {
+    Empty,
+    InvalidCharacter { character: char, position: usize },
+}
+
+impl TryFrom<&str> for PlatformName {
+    type Error = PlatformNameError;
+
+    fn try_from(input: &str) -> Result<Self, Self::Error> {
+        todo!()
+    }
+}
+
+impl FromStr for PlatformName {
+    type Err = PlatformNameError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        todo!()
+    }
+}
+
+impl fmt::Display for PlatformName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        todo!()
+    }
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn accepts_valid_names() {
+    let name = PlatformName::try_from("linux-64").expect("linux-64 is valid");
+    assert_eq!(name.to_string(), "linux-64", "Display prints the bare name");
+    assert!(PlatformName::try_from("osx-arm64").is_ok(), "osx-arm64 is valid");
+    assert!(PlatformName::try_from("linux-64-cuda12").is_ok(), "custom names with digits and dashes are valid");
+}
+
+#[test]
+fn rejects_empty() {
+    assert_eq!(PlatformName::try_from(""), Err(PlatformNameError::Empty), "empty input is the Empty error");
+}
+
+#[test]
+fn rejects_bad_first_character() {
+    assert_eq!(PlatformName::try_from("Linux"),
+        Err(PlatformNameError::InvalidCharacter { character: 'L', position: 0 }), "uppercase first letter");
+    assert_eq!(PlatformName::try_from("64bit"),
+        Err(PlatformNameError::InvalidCharacter { character: '6', position: 0 }), "a name cannot start with a digit");
+    assert_eq!(PlatformName::try_from("-linux"),
+        Err(PlatformNameError::InvalidCharacter { character: '-', position: 0 }), "a name cannot start with a dash");
+}
+
+#[test]
+fn reports_first_bad_character_and_position() {
+    assert_eq!(PlatformName::try_from("linux_64"),
+        Err(PlatformNameError::InvalidCharacter { character: '_', position: 5 }), "underscore at position 5");
+    assert_eq!(PlatformName::try_from("win-64 x"),
+        Err(PlatformNameError::InvalidCharacter { character: ' ', position: 6 }), "the space comes first");
+}
+
+#[test]
+fn parse_uses_from_str() {
+    let parsed: PlatformName = "win-64".parse().expect("parse should accept win-64");
+    assert_eq!(parsed, PlatformName::try_from("win-64").unwrap(), "parse and try_from agree");
+    assert!("WIN".parse::<PlatformName>().is_err(), "parse rejects what try_from rejects");
+}
+
+#[test]
+fn names_sort_and_pad() {
+    let mut names: Vec<PlatformName> = ["win-64", "linux-64", "osx-arm64"]
+        .iter()
+        .map(|s| s.parse().unwrap())
+        .collect();
+    names.sort();
+    let printed: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    assert_eq!(printed, vec!["linux-64", "osx-arm64", "win-64"], "derived Ord sorts by the inner string");
+    let padded = format!("[{:>8}]", PlatformName::try_from("win-64").unwrap());
+    assert_eq!(padded, "[  win-64]", "forward to the inner String's fmt so width flags work");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Check for empty first. Then
+        <code>for (position, character) in input.chars().enumerate()</code>, with
+        <code>let ok = if position == 0 { character.is_ascii_lowercase() } else { ... };</code>.
+        <code>from_str</code> is one line: <code>PlatformName::try_from(s)</code>. For <code>Display</code>, use
+        <code>self.0.fmt(f)</code> so the padding test passes.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-rust">use std::fmt;
+use std::str::FromStr;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct PlatformName(String);
+
+#[derive(Debug, PartialEq)]
+enum PlatformNameError {
+    Empty,
+    InvalidCharacter { character: char, position: usize },
+}
+
+impl TryFrom&lt;&amp;str&gt; for PlatformName {
+    type Error = PlatformNameError;
+
+    fn try_from(input: &amp;str) -&gt; Result&lt;Self, Self::Error&gt; {
+        if input.is_empty() {
+            return Err(PlatformNameError::Empty);
+        }
+        for (position, character) in input.chars().enumerate() {
+            let ok = if position == 0 {
+                character.is_ascii_lowercase()
+            } else {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+            };
+            if !ok {
+                return Err(PlatformNameError::InvalidCharacter { character, position });
+            }
+        }
+        Ok(PlatformName(input.to_string()))
+    }
+}
+
+impl FromStr for PlatformName {
+    type Err = PlatformNameError;
+
+    fn from_str(s: &amp;str) -&gt; Result&lt;Self, Self::Err&gt; {
+        PlatformName::try_from(s)
+    }
+}
+
+impl fmt::Display for PlatformName {
+    fn fmt(&amp;self, f: &amp;mut fmt::Formatter&lt;'_&gt;) -&gt; fmt::Result {
+        self.0.fmt(f)
+    }
+}</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m06-e4" data-title="A list of checks as trait objects">
+      <div class="exercise-prompt">
+        <p>Implement the <code>Check</code> trait for three validators, then two functions:</p>
+        <ul>
+          <li><code>NonEmpty</code>: name <code>"non-empty"</code>; passes when the value is not empty.</li>
+          <li><code>MaxLen(n)</code>: name <code>"max-len N"</code> (for example <code>"max-len 20"</code>); passes when
+            the value has at most <code>n</code> bytes.</li>
+          <li><code>Lowercase</code>: name <code>"lowercase"</code>; passes when the value equals its lowercase form.</li>
+          <li><code>default_checks()</code> returns the three in that order, with <code>MaxLen(20)</code>.</li>
+          <li><code>failing(checks, value)</code> returns the names of the checks that fail, in order.</li>
+        </ul>
+        <p>The tests also pass in a check type of their own, which your <code>failing</code> must accept without
+          changes. That is the point of <code>dyn</code>.</p>
+      </div>
+<textarea class="starter">
+trait Check {
+    fn name(&self) -> String;
+    fn passes(&self, value: &str) -> bool;
+}
+
+struct NonEmpty;
+struct MaxLen(usize);
+struct Lowercase;
+
+impl Check for NonEmpty {
+    fn name(&self) -> String { todo!() }
+    fn passes(&self, value: &str) -> bool { todo!() }
+}
+
+impl Check for MaxLen {
+    fn name(&self) -> String { todo!() }
+    fn passes(&self, value: &str) -> bool { todo!() }
+}
+
+impl Check for Lowercase {
+    fn name(&self) -> String { todo!() }
+    fn passes(&self, value: &str) -> bool { todo!() }
+}
+
+fn default_checks() -> Vec<Box<dyn Check>> {
+    todo!()
+}
+
+fn failing(checks: &[Box<dyn Check>], value: &str) -> Vec<String> {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn default_checks_in_order() {
+    let names: Vec<String> = default_checks().iter().map(|c| c.name()).collect();
+    assert_eq!(names, vec!["non-empty", "max-len 20", "lowercase"], "three checks, in this order, with MaxLen(20)");
+}
+
+#[test]
+fn valid_value_fails_nothing() {
+    assert!(failing(&default_checks(), "py314-test").is_empty(), "a short lowercase name passes every check");
+}
+
+#[test]
+fn reports_each_failure() {
+    assert_eq!(failing(&default_checks(), ""), vec!["non-empty"], "empty fails only non-empty");
+    assert_eq!(failing(&default_checks(), "NumPy"), vec!["lowercase"], "mixed case fails lowercase");
+    assert_eq!(failing(&default_checks(), "A-VERY-LONG-ENVIRONMENT-NAME"), vec!["max-len 20", "lowercase"],
+        "failures are reported in check order");
+}
+
+struct NoDash;
+
+impl Check for NoDash {
+    fn name(&self) -> String { "no-dash".to_string() }
+    fn passes(&self, value: &str) -> bool { !value.contains('-') }
+}
+
+#[test]
+fn accepts_new_check_types() {
+    let checks: Vec<Box<dyn Check>> = vec![Box::new(NoDash), Box::new(MaxLen(3))];
+    assert_eq!(failing(&checks, "a-b"), vec!["no-dash"], "a check defined elsewhere works through dyn Check");
+    assert_eq!(failing(&checks, "abcd"), vec!["max-len 3"], "MaxLen(3) rejects 4 bytes");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>format!("max-len {}", self.0)</code>;
+        <code>value == value.to_lowercase()</code>; <code>vec![Box::new(NonEmpty), Box::new(MaxLen(20)), Box::new(Lowercase)]</code>
+        (the return type tells the compiler to treat each box as <code>Box&lt;dyn Check&gt;</code>);
+        <code>checks.iter().filter(|c| !c.passes(value)).map(|c| c.name()).collect()</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-rust">trait Check {
+    fn name(&amp;self) -&gt; String;
+    fn passes(&amp;self, value: &amp;str) -&gt; bool;
+}
+
+struct NonEmpty;
+struct MaxLen(usize);
+struct Lowercase;
+
+impl Check for NonEmpty {
+    fn name(&amp;self) -&gt; String { "non-empty".to_string() }
+    fn passes(&amp;self, value: &amp;str) -&gt; bool { !value.is_empty() }
+}
+
+impl Check for MaxLen {
+    fn name(&amp;self) -&gt; String { format!("max-len {}", self.0) }
+    fn passes(&amp;self, value: &amp;str) -&gt; bool { value.len() &lt;= self.0 }
+}
+
+impl Check for Lowercase {
+    fn name(&amp;self) -&gt; String { "lowercase".to_string() }
+    fn passes(&amp;self, value: &amp;str) -&gt; bool { value == value.to_lowercase() }
+}
+
+fn default_checks() -&gt; Vec&lt;Box&lt;dyn Check&gt;&gt; {
+    vec![Box::new(NonEmpty), Box::new(MaxLen(20)), Box::new(Lowercase)]
+}
+
+fn failing(checks: &amp;[Box&lt;dyn Check&gt;], value: &amp;str) -&gt; Vec&lt;String&gt; {
+    checks.iter().filter(|c| !c.passes(value)).map(|c| c.name()).collect()
+}</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m06-e5" data-title="A Version that sorts, prints, and parses">
+      <div class="exercise-prompt">
+        <p>This exercise <strong>starts with a compile error</strong>: the tests compare, sort, and print
+          <code>Version</code> values with <code>assert_eq!</code>, and the struct derives nothing. Read the errors
+          (<code>E0369</code>, <code>E0277</code>) and add the derives they ask for. Then implement:</p>
+        <ul>
+          <li><code>Display</code>: <code>MAJOR.MINOR.PATCH</code>, for example <code>1.10.0</code>.</li>
+          <li><code>FromStr</code> with <code>type Err = String</code>: exactly three dot-separated parts, each a
+            <code>u32</code>. A wrong number of parts or a part that does not parse is an <code>Err</code> (any
+            message).</li>
+          <li><code>latest(inputs)</code>: parse every string, <strong>skip</strong> the ones that fail, and return the
+            highest version, or <code>None</code> if nothing parsed.</li>
+        </ul>
+        <p>Versions must compare numerically, so <code>1.10.0 &gt; 1.9.9</code>.</p>
+      </div>
+<textarea class="starter">
+use std::fmt;
+use std::str::FromStr;
+
+struct Version {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        todo!()
+    }
+}
+
+impl FromStr for Version {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        todo!()
+    }
+}
+
+fn latest(inputs: &[&str]) -> Option<Version> {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+fn v(major: u32, minor: u32, patch: u32) -> Version {
+    Version { major, minor, patch }
+}
+
+#[test]
+fn displays_dotted() {
+    assert_eq!(v(1, 10, 0).to_string(), "1.10.0", "Display is MAJOR.MINOR.PATCH");
+}
+
+#[test]
+fn parses_valid_versions() {
+    assert_eq!("3.14.0".parse::<Version>(), Ok(v(3, 14, 0)), "three numeric parts");
+    assert_eq!("0.81.0".parse::<Version>(), Ok(v(0, 81, 0)), "zero is a valid part");
+}
+
+#[test]
+fn rejects_invalid_versions() {
+    assert!("1.2".parse::<Version>().is_err(), "two parts is an error");
+    assert!("1.2.3.4".parse::<Version>().is_err(), "four parts is an error");
+    assert!("1.x.3".parse::<Version>().is_err(), "a non-numeric part is an error");
+    assert!("".parse::<Version>().is_err(), "empty input is an error");
+}
+
+#[test]
+fn compares_numerically() {
+    assert!(v(1, 10, 0) > v(1, 9, 9), "1.10.0 is newer than 1.9.9: compare numbers, not strings");
+    assert!(v(2, 0, 0) > v(1, 99, 99), "major version wins");
+    let mut vs = vec![v(1, 2, 3), v(0, 9, 0), v(1, 2, 0)];
+    vs.sort();
+    assert_eq!(vs, vec![v(0, 9, 0), v(1, 2, 0), v(1, 2, 3)], "sort uses the derived order");
+}
+
+#[test]
+fn latest_skips_bad_inputs() {
+    assert_eq!(latest(&["1.2.3", "oops", "1.10.0", "1.9.9"]), Some(v(1, 10, 0)), "highest valid version");
+    assert_eq!(latest(&["nope", "1.2"]), None, "nothing parsed");
+    assert_eq!(latest(&[]), None, "no inputs");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]</code>
+        on the struct; the field order already gives semantic-version ordering. In <code>from_str</code>, collect
+        <code>s.split('.').map(|p| p.parse::&lt;u32&gt;().map_err(|e| e.to_string())).collect::&lt;Result&lt;Vec&lt;_&gt;, _&gt;&gt;()?</code>,
+        then check there are exactly three. <code>latest</code> is
+        <code>inputs.iter().filter_map(|s| s.parse().ok()).max()</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-rust">use std::fmt;
+use std::str::FromStr;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Version {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+
+impl fmt::Display for Version {
+    fn fmt(&amp;self, f: &amp;mut fmt::Formatter&lt;'_&gt;) -&gt; fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+impl FromStr for Version {
+    type Err = String;
+
+    fn from_str(s: &amp;str) -&gt; Result&lt;Self, Self::Err&gt; {
+        let parts = s
+            .split('.')
+            .map(|p| p.parse::&lt;u32&gt;().map_err(|e| format!("invalid part '{p}': {e}")))
+            .collect::&lt;Result&lt;Vec&lt;_&gt;, _&gt;&gt;()?;
+        match parts.as_slice() {
+            [major, minor, patch] =&gt; Ok(Version { major: *major, minor: *minor, patch: *patch }),
+            _ =&gt; Err(format!("expected MAJOR.MINOR.PATCH, got '{s}'")),
+        }
+    }
+}
+
+fn latest(inputs: &amp;[&amp;str]) -&gt; Option&lt;Version&gt; {
+    inputs.iter().filter_map(|s| s.parse().ok()).max()
+}</code></pre></details>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="mini-project">
+    <h2>Mini-project: a typed spec crate</h2>
+    <div class="project-box">
+      <div class="widget-head"><span class="w-kind">Mini-project</span><span class="w-title">spec-types: platforms and version requirements as real types</span></div>
+      <div class="widget-body">
+        <p>Write a small library crate that turns strings from a manifest into types, in the style of
+          <code>pixi_manifest</code> and <code>pixi_spec</code>. It is the start of the type layer you will need in
+          Capstone 1.</p>
+        <pre data-label="Terminal"><code class="language-bash">pixi init spec-types &amp;&amp; cd spec-types
+pixi add rust
+pixi run cargo init --lib --name spec_types
+pixi run cargo test
+pixi run cargo clippy --all-targets -- -D warnings</code></pre>
+        <p><strong>What to build</strong></p>
+        <ul>
+          <li><code>enum Platform { Linux64, OsxArm64, Osx64, Win64, NoArch }</code> with derived <code>Debug</code>,
+            <code>Clone</code>, <code>Copy</code>, <code>PartialEq</code>, <code>Eq</code>, <code>Hash</code>,
+            <code>PartialOrd</code>, <code>Ord</code>; <code>Display</code> and <code>FromStr</code> using conda subdir
+            names (<code>linux-64</code>, <code>osx-arm64</code>, <code>osx-64</code>, <code>win-64</code>,
+            <code>noarch</code>), and an error enum for unknown names.</li>
+          <li><code>struct Version</code> from exercise 5.</li>
+          <li><code>trait Requirement { fn matches(&amp;self, v: &amp;Version) -&gt; bool; fn describe(&amp;self) -&gt; String { ... } }</code>
+            with a default <code>describe</code>, implemented by <code>Any</code>, <code>Exact(Version)</code>,
+            <code>AtLeast(Version)</code>, and <code>Below(Version)</code>.</li>
+          <li><code>fn parse_requirement(s: &amp;str) -&gt; Result&lt;Box&lt;dyn Requirement&gt;, String&gt;</code> for
+            <code>*</code>, <code>==1.2.3</code>, <code>&gt;=1.2.3</code>, and <code>&lt;2.0.0</code>, using
+            <code>strip_prefix</code> and <code>Version::from_str</code>.</li>
+          <li><code>fn best_match(req: &amp;dyn Requirement, available: &amp;[Version]) -&gt; Option&lt;Version&gt;</code>: the
+            highest available version the requirement matches.</li>
+        </ul>
+        <ul class="checklist" data-id="m06-mini">
+          <li>Every <code>Platform</code> round-trips: <code>p.to_string().parse::&lt;Platform&gt;() == Ok(p)</code>, tested for all five</li>
+          <li>Unknown platform names return a typed error, not a <code>String</code></li>
+          <li><code>Requirement</code> is dyn compatible and <code>parse_requirement</code> returns a <code>Box&lt;dyn Requirement&gt;</code></li>
+          <li><code>best_match</code> is written with iterator adapters and <code>max</code></li>
+          <li>A <code>From&lt;Version&gt; for Box&lt;dyn Requirement&gt;</code> (or a helper) turns a bare version into an exact requirement</li>
+          <li>Tests cover each requirement kind and an invalid spec</li>
+          <li><code>pixi run cargo clippy --all-targets -- -D warnings</code> is clean</li>
+        </ul>
+        <p><strong>Stretch goals:</strong> add <code>And(Vec&lt;Box&lt;dyn Requirement&gt;&gt;)</code> and parse
+          <code>&gt;=1.2,&lt;2</code>; make <code>best_match</code> generic over <code>impl Requirement</code> and compare the
+          two versions' signatures; implement <code>TryFrom&lt;&amp;str&gt;</code> for <code>Platform</code> and make
+          <code>FromStr</code> delegate to it, as Pixi does.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="quiz">
+    <h2>Quiz</h2>
+    <div class="quiz" data-id="m06-quiz">
+<script type="application/json">
+{"title": "Traits & Generics quiz", "passScore": 0.7, "questions": [
+  {"type": "single", "prompt": "<code>environment.channels()</code> fails with E0599 \"no method named `channels` found\", but you know the method exists in Pixi. What is the most likely fix?", "options": ["Add <code>#[derive(Channels)]</code>", "Import the trait that provides it, e.g. <code>use pixi_manifest::FeaturesExt;</code>", "Make <code>environment</code> mutable", "Clone the environment first"], "answer": 1, "explanation": "<p>Trait methods are only callable when the trait is in scope. <code>channels()</code> is a default method of <code>FeaturesExt</code>.</p>"},
+  {"type": "output", "prompt": "What does this print?", "code": "trait Greet {\n    fn name(&self) -> String;\n    fn greet(&self) -> String {\n        format!(\"hello {}\", self.name())\n    }\n}\n\nstruct Pixi;\n\nimpl Greet for Pixi {\n    fn name(&self) -> String {\n        \"pixi\".to_string()\n    }\n}\n\nfn main() {\n    println!(\"{}\", Pixi.greet());\n}", "answer": "hello pixi", "explanation": "<p><code>greet</code> is a default method that calls the required <code>name</code>.</p>"},
+  {"type": "single", "prompt": "Does this compile?", "code": "fn biggest<T>(a: T, b: T) -> T {\n    if a > b { a } else { b }\n}", "options": ["Yes", "No: E0369, <code>&gt;</code> needs a <code>PartialOrd</code> bound on T", "No: E0382, a is moved", "No: generic functions cannot return T"], "answer": 1, "explanation": "<p>Inside a generic function you can only use what the bounds promise. <code>fn biggest&lt;T: PartialOrd&gt;</code> fixes it.</p>"},
+  {"type": "single", "prompt": "What does <code>fn add(name: impl Into&lt;String&gt;)</code> mean?", "options": ["<code>name</code> must be a <code>String</code>", "The same as <code>fn add&lt;S: Into&lt;String&gt;&gt;(name: S)</code>: the caller picks any type convertible into <code>String</code>", "<code>name</code> is a trait object", "The function returns a String"], "answer": 1, "explanation": "<p>In argument position, <code>impl Trait</code> is shorthand for an anonymous generic parameter.</p>"},
+  {"type": "single", "prompt": "A function returning <code>impl Iterator&lt;Item = u32&gt;</code> returns <code>a.into_iter()</code> in one branch and <code>a.into_iter().chain(b)</code> in the other. What happens?", "options": ["It compiles; both are iterators", "E0308: the branches have different concrete types, and impl Trait stands for exactly one", "It compiles but panics", "E0599"], "answer": 1, "explanation": "<p>Return-position <code>impl Trait</code> hides a single concrete type. Use <code>Box&lt;dyn Iterator&gt;</code> or an enum like <code>itertools::Either</code>, as Pixi's <code>Environment::features</code> does.</p>"},
+  {"type": "multi", "prompt": "When is <code>Vec&lt;Box&lt;dyn Trait&gt;&gt;</code> a better choice than a generic <code>Vec&lt;T&gt;</code>?", "options": ["The vector must hold values of different concrete types", "The set of types is open-ended, e.g. chosen from configuration at run time", "You want the fastest possible inlined calls", "The trait has generic methods"], "answer": [0, 1], "explanation": "<p>Trait objects allow mixed types chosen at run time. Generics are faster (no vtable) and a trait with generic methods is not dyn compatible at all.</p>"},
+  {"type": "text", "prompt": "Which error code means a trait cannot be used as <code>dyn Trait</code> (it is not dyn compatible)?", "answer": ["E0038"], "explanation": "<p>E0038 appears, for example, when a trait has a generic method or returns <code>Self</code>.</p>"},
+  {"type": "output", "prompt": "What does this print?", "code": "#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]\nstruct V {\n    major: u32,\n    minor: u32,\n}\n\nfn main() {\n    let mut vs = vec![V { major: 1, minor: 10 }, V { major: 1, minor: 9 }, V { major: 0, minor: 99 }];\n    vs.sort();\n    let minors: Vec<u32> = vs.iter().map(|v| v.minor).collect();\n    println!(\"{minors:?}\");\n}", "answer": "[99, 9, 10]", "explanation": "<p>Derived <code>Ord</code> compares fields in declaration order, numerically: 0.99 &lt; 1.9 &lt; 1.10.</p>"},
+  {"type": "single", "prompt": "Why can't <code>Display</code> be derived?", "options": ["It is an unstable trait", "It is user-facing text, and only the author knows the right format", "It conflicts with <code>Debug</code>", "It can, with <code>#[derive(Display)]</code> in std"], "answer": 1, "explanation": "<p><code>Debug</code> has an obvious mechanical format; <code>Display</code> does not. Implement <code>fmt</code> by hand and get <code>to_string()</code> free.</p>"},
+  {"type": "single", "prompt": "You implement <code>From&lt;&amp;str&gt; for TaskName</code>. What else do you get for free?", "options": ["Nothing", "<code>Into&lt;TaskName&gt; for &amp;str</code>, so <code>\"test\".into()</code> works where a <code>TaskName</code> is expected", "<code>FromStr for TaskName</code>", "<code>Display for TaskName</code>"], "answer": 1, "explanation": "<p>A blanket impl in std gives <code>Into</code> for every <code>From</code>. <code>FromStr</code> and <code>Display</code> are separate traits.</p>"},
+  {"type": "single", "prompt": "Does this compile?", "code": "use std::fmt;\n\nimpl fmt::Display for Vec<u32> {\n    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {\n        write!(f, \"{} items\", self.len())\n    }\n}", "options": ["Yes", "No: E0117, the orphan rule; neither Display nor Vec is defined in this crate", "No: E0277, Vec is not Display", "No: E0038"], "answer": 1, "explanation": "<p>You may implement a trait only if the trait or the type is local. Wrap the vector in a newtype, <code>struct Counts(Vec&lt;u32&gt;)</code>, and implement <code>Display</code> for that.</p>"},
+  {"type": "single", "prompt": "Why is <code>Iterator::Item</code> an associated type rather than a generic parameter <code>Iterator&lt;T&gt;</code>?", "options": ["Associated types are faster", "An iterator yields one kind of item, so each implementing type has exactly one natural choice, and callers never have to specify it", "Generic traits cannot have default methods", "Historical accident with no consequences"], "answer": 1, "explanation": "<p>A generic trait can be implemented many times for one type (<code>From&lt;&amp;str&gt;</code>, <code>From&lt;String&gt;</code>); an associated type allows exactly one choice per implementation.</p>"},
+  {"type": "multi", "prompt": "In Pixi, <code>impl&lt;'source, FeatureCollection&gt; FeaturesExt&lt;'source&gt; for FeatureCollection where FeatureCollection: HasWorkspaceManifest&lt;'source&gt; + HasFeaturesIter&lt;'source&gt; {}</code> is:", "options": ["A blanket implementation", "A way to give every type with those two traits all of <code>FeaturesExt</code>'s default methods", "A violation of the orphan rule", "A trait object"], "answer": [0, 1], "explanation": "<p>It implements <code>FeaturesExt</code> for every qualifying type, with an empty body because every method is a default. <code>FeaturesExt</code> is local to <code>pixi_manifest</code>, so the orphan rule is satisfied.</p>"},
+  {"type": "text", "prompt": "Which trait does <code>\"linux-64\".parse::&lt;PixiPlatformName&gt;()</code> call into?", "answer": ["FromStr", "std::str::FromStr"], "explanation": "<p><code>str::parse::&lt;T&gt;()</code> calls <code>T::from_str</code>. Pixi's <code>FromStr</code> delegates to <code>TryFrom&lt;&amp;str&gt;</code> so there is one validation path.</p>"}
+]}
+</script>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="recap">
+    <h2>Recap</h2>
+    <ul>
+      <li>A trait is a checked set of methods; <code>impl Trait for Type</code> provides them. Required methods have no
+        body, default methods do and can call the required ones.</li>
+      <li>Trait methods are callable only with the trait in scope: <code>E0599</code> on a method you know exists means
+        a missing <code>use</code>.</li>
+      <li>Generics (<code>&lt;T&gt;</code>) are monomorphized: one specialized copy per type, no run-time cost. Inside, you can
+        use only what the bounds (<code>T: A + B</code>, <code>where</code>) promise.</li>
+      <li><code>impl Trait</code> as an argument is an anonymous generic; as a return type it is one hidden concrete
+        type, which is why branches returning different iterators need <code>Box&lt;dyn ...&gt;</code> or
+        <code>Either</code>.</li>
+      <li><code>dyn Trait</code> lives behind <code>&amp;</code> or <code>Box</code> and dispatches through a vtable: use it
+        for mixed collections and run-time choice. Generic methods make a trait not dyn compatible
+        (<code>E0038</code>).</li>
+      <li>Derive <code>Debug</code>, <code>Clone</code>, <code>Copy</code>, <code>PartialEq</code>/<code>Eq</code>,
+        <code>Hash</code>, <code>PartialOrd</code>/<code>Ord</code>, <code>Default</code>; derived comparisons follow field
+        order. Write <code>Display</code> by hand.</li>
+      <li>Implement <code>From</code> to get <code>Into</code>; <code>TryFrom</code> and <code>FromStr</code> validate;
+        <code>AsRef</code> borrows a view. Pixi's names are validated newtypes built this way.</li>
+      <li>Associated types (<code>Iterator::Item</code>, <code>FromStr::Err</code>) are one choice per implementation.</li>
+      <li>The orphan rule: the trait or the type must be yours (<code>E0117</code>). Newtypes get around it; blanket impls
+        give a trait to every qualifying type.</li>
+    </ul>
+    <div class="flashcards" data-title="Traits and generics">
+      <script type="application/json">
+      [{"front": "Required vs default trait method", "back": "Required: signature only, every implementer writes it. Default: has a body, can call required methods, may be overridden."},
+       {"front": "E0599 on a trait method you know exists", "back": "The trait is not in scope. Add <code>use path::to::Trait;</code> (or <code>use Trait as _;</code>)."},
+       {"front": "Monomorphization", "back": "The compiler generates one specialized copy of a generic function per concrete type used: no run-time cost, more compile time and code size."},
+       {"front": "<code>T: A + B</code> vs <code>where T: A + B</code>", "back": "Identical meaning. <code>where</code> reads better when bounds are long."},
+       {"front": "<code>impl Trait</code> in argument position", "back": "Shorthand for an anonymous generic parameter; the caller chooses the type."},
+       {"front": "<code>impl Trait</code> in return position", "back": "One concrete type chosen by the function and hidden from callers. Different types per branch need <code>Box&lt;dyn&gt;</code> or <code>Either</code>."},
+       {"front": "<code>dyn Trait</code>", "back": "A trait object behind <code>&amp;</code> or <code>Box</code>: a fat pointer (data + vtable) with dynamic dispatch. Allows mixed types."},
+       {"front": "Derived <code>Ord</code> on a struct", "back": "Compares fields in declaration order, like a tuple. Enum variants compare by declaration order."},
+       {"front": "Implement <code>From</code> or <code>Into</code>?", "back": "<code>From</code>. A blanket impl gives you <code>Into</code>, and <code>?</code> uses <code>From</code> to convert errors."},
+       {"front": "<code>TryFrom</code> vs <code>FromStr</code>", "back": "Both fallible. <code>FromStr</code> parses <code>&amp;str</code> and powers <code>.parse()</code>; <code>TryFrom&lt;T&gt;</code> converts from any <code>T</code>. Pixi delegates one to the other."},
+       {"front": "The orphan rule", "back": "<code>impl Trait for Type</code> is allowed only if the trait or the type is defined in your crate (otherwise E0117). Use a newtype."},
+       {"front": "Blanket impl", "back": "<code>impl&lt;T: Bound&gt; Trait for T</code>: implements a trait for every qualifying type, e.g. <code>ToString</code> for every <code>Display</code>, <code>FeaturesExt</code> in Pixi."}]
+      </script>
+    </div>
+    <h3>Going further</h3>
+    <ul>
+      <li><a href="https://doc.rust-lang.org/book/ch10-00-generics.html">The Rust Book, chapter 10: Generic Types, Traits, and Lifetimes</a> and <a href="https://doc.rust-lang.org/book/ch18-02-trait-objects.html">18.2: Using Trait Objects</a></li>
+      <li><a href="https://doc.rust-lang.org/rust-by-example/trait.html">Rust by Example: Traits</a>, <a href="https://doc.rust-lang.org/rust-by-example/generics.html">Generics</a>, and <a href="https://doc.rust-lang.org/rust-by-example/conversion.html">Conversion</a></li>
+      <li>std docs: <a href="https://doc.rust-lang.org/std/convert/index.html"><code>std::convert</code></a> (<code>From</code>, <code>Into</code>, <code>TryFrom</code>, <code>AsRef</code>), <a href="https://doc.rust-lang.org/std/str/trait.FromStr.html"><code>FromStr</code></a>, <a href="https://doc.rust-lang.org/std/fmt/trait.Display.html"><code>Display</code></a>, <a href="https://doc.rust-lang.org/std/cmp/trait.Ord.html"><code>Ord</code></a></li>
+      <li>The Rust Reference: <a href="https://doc.rust-lang.org/reference/items/traits.html">Traits</a> (including dyn compatibility) and <a href="https://doc.rust-lang.org/reference/items/implementations.html#orphan-rules">the orphan rules</a></li>
+      <li>Pixi source: <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/platform.rs">crates/pixi_manifest/src/platform.rs</a>, <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/features_ext.rs">crates/pixi_manifest/src/features_ext.rs</a>, and <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_spec/src/lib.rs">crates/pixi_spec/src/lib.rs</a></li>
+      <li>Next: <a href="m07-lifetimes.html">M07 Lifetimes in Practice</a>, where the <code>'source</code> and <code>'p</code> in this module's Pixi code finally get explained</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

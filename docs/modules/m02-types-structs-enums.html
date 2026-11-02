@@ -1,0 +1,1511 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M02 · Types, Structs &amp; Enums · Rust Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-rust.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-module="m02">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Stage 1 · The Core Language · Module 02</p>
+    <h1>Types, Structs &amp; Enums</h1>
+    <p class="lede">Python lets a value be anything until it is used. Rust makes you say what each value is, and then
+      uses that knowledge to rule out mistakes before the program runs. This module covers the building blocks: numbers
+      and their exact sizes, tuples and arrays, a first look at the two string types, and the two ways you define your
+      own types, structs and enums. Almost every line of Pixi uses them; by the end you will read Pixi's
+      <code>Task</code> and <code>SpecType</code> definitions without effort.</p>
+    <div class="lesson-meta"><span>⏱ ~2.5 hours</span><span>Prerequisites: <a href="m01-cargo-crates-modules.html">M01 Cargo, Crates &amp; Modules</a></span></div>
+    <ul class="objectives">
+      <li>Use immutable bindings, <code>let mut</code>, and shadowing, and explain why immutability is the default</li>
+      <li>Choose integer and float types, predict overflow behavior, and convert with <code>as</code> knowing what it does to out-of-range values</li>
+      <li>Build and destructure tuples and fixed-size arrays</li>
+      <li>Tell <code>String</code> (owned) from <code>&amp;str</code> (borrowed) and pick the right one for a parameter</li>
+      <li>Define structs (named, tuple, and newtype) and give them methods and associated functions such as <code>new</code> in <code>impl</code> blocks</li>
+      <li>Define enums whose variants carry data, and handle them with exhaustive <code>match</code></li>
+      <li>Derive <code>Debug</code>, <code>Clone</code>, and <code>PartialEq</code>, and read the errors you get without them</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="bindings">
+    <h2>Bindings: immutable by default, <code>mut</code>, and shadowing</h2>
+    <p>In Python, <code>x = 1</code> creates a name, and you can point it at something else at any time:
+      <code>x = x + 1</code>, <code>x = "now a string"</code>. In Rust, <code>let x = 1;</code> creates a
+      <strong>binding</strong>, and by default a binding can never be changed. You saw <code>E0384</code> in
+      <a href="m00-orientation.html">M00</a> when you tried. If a value must change, you declare that with
+      <code>let mut</code>.</p>
+    <p>Why make immutability the default? Because most values never change after they are computed, and when you read
+      code, knowing that is valuable: if you see <code>let spec = ...;</code> at the top of a 60-line function, you know
+      <code>spec</code> still has that value at the bottom. Only the <code>mut</code> bindings need watching. The
+      compiler also uses this to check that no one changes data while someone else is reading it
+      (<a href="m03-ownership-borrowing.html">M03</a>).</p>
+    <p>There is a second way to "change" a name: <strong>shadowing</strong>. A new <code>let</code> with the same name
+      creates a <em>new</em> binding that hides the old one. The new binding can even have a different type. Predict
+      the output:</p>
+    <div class="runnable" data-title="Shadowing and mut" data-predict>
+<textarea>
+fn main() {
+    let spec = "  numpy>=1.26  ";
+    let spec = spec.trim();
+    let spec = spec.len();
+    println!("{spec}");
+
+    let mut retries = 0;
+    retries += 1;
+    retries += 1;
+    println!("retries = {retries}");
+}
+</textarea>
+    </div>
+    <p>The first <code>spec</code> is a string with spaces, the second is the trimmed string (<code>"numpy&gt;=1.26"</code>,
+      11 characters), and the third is a number. Each <code>let</code> made a new binding; none was mutated. Shadowing
+      is idiomatic for a value that goes through a series of transformations where you never need the old version again,
+      as in <code>let line = line.trim();</code>. Use <code>mut</code> when a value really does change over time, such as
+      a counter or a vector you push to.</p>
+    <p>For values known at compile time, use a <strong>constant</strong>: <code>const MAX_RETRIES: u32 = 3;</code>.
+      Constants are written in <code>SCREAMING_SNAKE_CASE</code>, must have their type written out, and can be declared
+      at module level, like module-level constants in Python (except these really cannot change).</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>let</code> is immutable; <code>let mut</code> can
+      change; a second <code>let</code> with the same name shadows the first and may change its type.
+      <code>const</code> is for compile-time constants.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="scalars">
+    <h2>Scalar types: integers, floats, booleans, characters</h2>
+    <p>Python has one <code>int</code> that grows as large as needed and one <code>float</code>. Rust has a family of
+      fixed-size numbers, because a fixed size is what lets the compiler lay data out in memory with no overhead:</p>
+    <table>
+      <thead><tr><th>Type</th><th>What it is</th><th>Range or notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>i8</code>, <code>i16</code>, <code>i32</code>, <code>i64</code>, <code>i128</code></td><td>Signed integers of 8 to 128 bits</td><td><code>i32</code>: about ±2.1 billion. The default for integer literals.</td></tr>
+        <tr><td><code>u8</code>, <code>u16</code>, <code>u32</code>, <code>u64</code>, <code>u128</code></td><td>Unsigned (never negative)</td><td><code>u8</code>: 0 to 255, used for bytes</td></tr>
+        <tr><td><code>usize</code>, <code>isize</code></td><td>Pointer-sized integers (64 bits on 64-bit machines)</td><td><code>usize</code> is the type of lengths and indexes: <code>v.len()</code> returns <code>usize</code></td></tr>
+        <tr><td><code>f64</code>, <code>f32</code></td><td>Floating-point numbers</td><td><code>f64</code> is the default, same as Python's <code>float</code></td></tr>
+        <tr><td><code>bool</code></td><td><code>true</code> or <code>false</code></td><td>Lowercase, unlike Python</td></tr>
+        <tr><td><code>char</code></td><td>One Unicode scalar value, in single quotes: <code>'a'</code>, <code>'π'</code></td><td>4 bytes. Strings are <em>not</em> arrays of <code>char</code> (see below).</td></tr>
+      </tbody>
+    </table>
+    <div class="runnable" data-title="Scalars and arithmetic">
+<textarea>
+fn main() {
+    let packages: u32 = 1_250;
+    let bytes: u64 = 3_000_000_000;
+    let offset: i32 = -40;
+    let ratio = 2.5;
+    let ok = true;
+    let letter = 'π';
+    println!("{packages} {bytes} {offset} {ratio} {ok} {letter}");
+    println!("{}", 7 / 2);
+    println!("{}", 7.0 / 2.0);
+    println!("{}", -7 % 3);
+    println!("{} {}", u8::MAX, i64::MIN);
+}
+</textarea>
+    </div>
+    <p>Some differences from Python stand out. Underscores in literals are only for readability, as in Python.
+      <code>7 / 2</code> is <code>3</code>: dividing two integers gives an integer, truncated toward zero, like Python's
+      <code>int(7 / 2)</code>, not <code>3.5</code>. <code>-7 % 3</code> is <code>-1</code> (Python gives
+      <code>2</code>), because Rust's <code>%</code> is a remainder that keeps the sign of the left side. And each type
+      knows its limits: <code>u8::MAX</code>, <code>i64::MIN</code>.</p>
+    <h3>Type inference and annotations</h3>
+    <p>You rarely need to write the types of local variables. The compiler <strong>infers</strong> them from how they
+      are used, and falls back to <code>i32</code> and <code>f64</code> for bare literals. Function signatures are the
+      exception: parameters and return types must always be written. That is a deliberate rule. A signature is a
+      contract other code relies on, so it should not change because someone edited the function body.</p>
+    <h3>Overflow</h3>
+    <p>A Python <code>int</code> never overflows. A <code>u8</code> holds at most 255, so what is
+      <code>250 + 10</code>? In a debug build, Rust checks and <strong>panics</strong> (stops the program with an error
+      message) when arithmetic overflows. In a release build it does not check, and the value wraps around (260 becomes
+      4). Run this:</p>
+    <div class="runnable" data-title="Overflow panics in debug builds">
+<textarea>
+fn add_downloads(done: u8, more: u8) -> u8 {
+    done + more
+}
+
+fn main() {
+    println!("{}", add_downloads(200, 50));
+    println!("{}", add_downloads(250, 10));
+}
+</textarea>
+    </div>
+    <p>The first call prints 250; the second panics with "attempt to add with overflow". When you need specific
+      behavior, ask for it with a method: <code>checked_add</code> returns "no value" on overflow (an
+      <code>Option</code>, <a href="m04-option-result.html">M04</a>), <code>saturating_add</code> stops at the maximum,
+      and <code>wrapping_add</code> wraps on purpose.</p>
+    <aside class="callout warn"><p>Pick integer types for the values they must hold, not to save memory. For counts and
+      indexes, use <code>usize</code> (it is what <code>len()</code> returns, so you avoid casts). For sizes in bytes,
+      use <code>u64</code>. Small types such as <code>u8</code> are for bytes and for data formats that define them.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> integers have fixed sizes; <code>i32</code> and
+      <code>f64</code> are the defaults; <code>usize</code> is for lengths and indexes. Integer division truncates.
+      Overflow panics in debug and wraps in release unless you choose a <code>checked_</code>, <code>saturating_</code>, or
+      <code>wrapping_</code> method.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="casts">
+    <h2>Converting numbers with <code>as</code></h2>
+    <p>Python mixes <code>int</code> and <code>float</code> freely: <code>7.5 / 3</code> just works. Rust never converts
+      between number types implicitly, not even from a smaller integer to a larger one. Compile this:</p>
+    <div class="runnable" data-title="No implicit conversion" data-compile-fail>
+<textarea>
+fn main() {
+    let files: usize = 3;
+    let total_mb: f64 = 7.5;
+    println!("{}", total_mb / files);
+}
+</textarea>
+    </div>
+    <p>The error is <code>E0277: cannot divide `f64` by `usize`</code>, with the label "no implementation for
+      <code>f64 / usize</code>". (The many <code>note:</code> lines after it list the combinations that <em>are</em>
+      implemented; you can skip them.) Arithmetic in Rust is defined between two values of the same type. Why so
+      strict? Because silent conversions are a classic source of bugs: a negative number becoming a huge unsigned one,
+      or a 64-bit size quietly cut down to 32 bits.</p>
+    <p>The <code>as</code> keyword converts between number types explicitly: <code>total_mb / files as f64</code>.
+      It always succeeds, so you must know what it does when the value does not fit:</p>
+    <div class="runnable" data-title="What as does" data-predict>
+<textarea>
+fn main() {
+    let big: i32 = 300;
+    let negative: i32 = -1;
+    let pi = 3.99_f64;
+    println!("{}", big as u8);
+    println!("{}", negative as u32);
+    println!("{}", pi as i32);
+    println!("{}", -5.0_f64 as u32);
+    println!("{}", 65u8 as char);
+    let files: usize = 3;
+    let total_mb: f64 = 7.5;
+    println!("{:.2}", total_mb / files as f64);
+}
+</textarea>
+    </div>
+    <ul>
+      <li>Integer to a smaller integer <strong>truncates</strong>: 300 does not fit in a <code>u8</code>, and keeps only
+        its low 8 bits, giving 44.</li>
+      <li>Signed to unsigned reinterprets the bits: <code>-1i32 as u32</code> is 4294967295.</li>
+      <li>Float to integer rounds toward zero and <strong>saturates</strong>: 3.99 becomes 3, and a negative float
+        becomes 0 for an unsigned type.</li>
+      <li><code>u8 as char</code> turns a byte into the character with that code (65 is <code>'A'</code>).</li>
+      <li><code>{:.2}</code> prints a float with two decimals, like Python's <code>f"{x:.2f}"</code>.</li>
+    </ul>
+    <aside class="callout pro"><p><code>as</code> is fine for widening (<code>u32</code> to <code>u64</code>), for
+      integers to floats, and when you have already checked the range. When a value might not fit, use the checked
+      conversions <code>u8::try_from(x)</code> and <code>u64::from(x)</code> from <a href="m06-traits-generics.html">M06</a>,
+      which report failure instead of truncating. Clippy has lints for lossy casts that many projects turn on.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> no implicit numeric conversions. <code>as</code> converts
+      explicitly and never fails: it truncates integers, saturates floats, and reinterprets signs.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="tuples-arrays">
+    <h2>Tuples and arrays</h2>
+    <p>A <strong>tuple</strong> groups a fixed number of values of possibly different types, like a Python tuple. Its
+      type lists each element's type: <code>(&amp;str, u32, bool)</code>. You read elements with <code>.0</code>,
+      <code>.1</code>, and so on, or unpack them all at once with a pattern, as in Python.</p>
+    <p>An <strong>array</strong> is a fixed number of values of the <em>same</em> type. Its type includes the length:
+      <code>[&amp;str; 3]</code> is "three string slices". The length is part of the type, so it can never change. For a
+      list that grows, use <code>Vec&lt;T&gt;</code> (<a href="m05-collections-iterators.html">M05</a>); arrays are for
+      things like "the three supported platforms" or a fixed-size buffer.</p>
+    <div class="runnable" data-title="Tuples and arrays">
+<textarea>
+fn main() {
+    let pinned: (&str, u32, bool) = ("python", 3, true);
+    println!("{} {} {}", pinned.0, pinned.1, pinned.2);
+
+    let (name, major, _) = pinned;
+    println!("{name} {major}");
+
+    let platforms: [&str; 3] = ["linux-64", "osx-arm64", "win-64"];
+    println!("{} platforms, first {}", platforms.len(), platforms[0]);
+
+    let zeros = [0u8; 4];
+    println!("{zeros:?}");
+}
+</textarea>
+    </div>
+    <p><code>_</code> in a pattern means "ignore this one". <code>[0u8; 4]</code> means "four copies of <code>0u8</code>".
+      <code>{zeros:?}</code> prints with the <code>Debug</code> format (more on that at the end of the module), which for
+      arrays looks like a Python list.</p>
+    <p>Indexing is checked. Reading past the end does not return garbage and is not an exception you can catch; it
+      panics:</p>
+    <div class="runnable" data-title="Index out of bounds">
+<textarea>
+fn main() {
+    let platforms = ["linux-64", "osx-arm64", "win-64"];
+    let index = platforms.len();
+    println!("{}", platforms[index]);
+}
+</textarea>
+    </div>
+    <p>The message is "index out of bounds: the len is 3 but the index is 3". This check is one of the reasons Rust is
+      memory-safe: in C the same code would read whatever memory happens to follow the array.</p>
+    <p>One special tuple has no elements: <code>()</code>, called <strong>unit</strong>. It is the type of "no
+      meaningful value", what a function returns when it has no return type, like Python's <code>None</code> as a
+      return value. You met it in M00's semicolon error.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> tuples are fixed-size and mixed-type, accessed with
+      <code>.0</code> or a pattern. Arrays are fixed-size and single-type, <code>[T; N]</code>. Out-of-bounds indexing
+      panics. <code>()</code> is unit, the empty tuple.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="strings">
+    <h2><code>String</code> and <code>&amp;str</code>: a first look</h2>
+    <p>Python has one string type. Rust has two that you use constantly, and the difference is about
+      <strong>ownership</strong>, the subject of the next module:</p>
+    <ul>
+      <li><code>String</code> is an <strong>owned</strong>, growable string stored on the heap. The variable that holds
+        it is responsible for it and frees it when done. You create one with <code>String::from("...")</code>,
+        <code>"...".to_string()</code>, or <code>format!(...)</code>, and you can change it if it is <code>mut</code>
+        (<code>push</code>, <code>push_str</code>).</li>
+      <li><code>&amp;str</code> (say "string slice" or "str ref") is a <strong>borrowed</strong> view into string data
+        owned by someone else. It cannot grow, and it does not free anything. String literals such as
+        <code>"pixi"</code> have type <code>&amp;'static str</code>: a view of text built into the program, valid for the
+        program's whole life (<code>'static</code>).</li>
+    </ul>
+    <p>Think of <code>String</code> as the file and <code>&amp;str</code> as a read-only window onto (part of) it. Both
+      hold UTF-8 text. Because of that, <code>s.len()</code> counts <strong>bytes</strong>, not characters, and you cannot
+      write <code>s[0]</code> to get a character (<a href="m05-collections-iterators.html">M05</a> shows <code>chars()</code>).</p>
+    <div class="runnable" data-title="Owned and borrowed strings">
+<textarea>
+fn shout(name: &str) -> String {
+    let mut loud = name.to_uppercase();
+    loud.push('!');
+    loud
+}
+
+fn main() {
+    let literal: &str = "pixi";
+    let owned: String = String::from("rattler");
+    let also_owned = literal.to_string();
+
+    println!("{}", shout(literal));
+    println!("{}", shout(&owned));
+    println!("{}", shout(&also_owned));
+    println!("{} {}", owned.len(), literal.len());
+}
+</textarea>
+    </div>
+    <p><code>shout</code> takes <code>&amp;str</code>, so it accepts a literal directly and a <code>String</code> when you
+      put <code>&amp;</code> in front (<code>&amp;owned</code> borrows it, and Rust converts <code>&amp;String</code> to
+      <code>&amp;str</code> automatically). It returns a <code>String</code> because it builds new text that the caller
+      will own. That is the rule of thumb for now:</p>
+    <ul>
+      <li><strong>Parameters:</strong> take <code>&amp;str</code> when you only need to read the text.</li>
+      <li><strong>Return values and struct fields:</strong> use <code>String</code> when the value must own its text.</li>
+    </ul>
+    <p>Going the other way does not happen automatically. A function that wants a <code>String</code> will not accept a
+      literal:</p>
+    <div class="runnable" data-title="A literal is not a String" data-compile-fail>
+<textarea>
+fn shout(name: String) -> String {
+    name.to_uppercase()
+}
+
+fn main() {
+    println!("{}", shout("pixi"));
+}
+</textarea>
+    </div>
+    <p><code>E0308: mismatched types</code>, "expected <code>String</code>, found <code>&amp;str</code>". The
+      <code>help:</code> suggests <code>"pixi".to_string()</code>, which compiles, but the better fix is usually to change
+      the parameter to <code>&amp;str</code>, since <code>shout</code> only reads its input. <a href="m03-ownership-borrowing.html">M03</a>
+      explains why, with the ownership visualizer.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>String</code> owns its text; <code>&amp;str</code>
+      borrows a view of text someone else owns. Read with <code>&amp;str</code>, own with <code>String</code>.
+      <code>len()</code> is in bytes.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="structs">
+    <h2>Structs: your own record types</h2>
+    <p>In Python you might hold a workspace's settings in a dict (<code>{"name": ..., "channels": [...]}</code>) or a
+      dataclass. A dict accepts any key and any value, so a typo such as <code>ws["chanels"]</code> is found only when
+      that line runs. A Rust <strong>struct</strong> is closer to a frozen dataclass with type hints that are enforced:
+      a named type with a fixed set of named, typed fields.</p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">from dataclasses import dataclass
+
+@dataclass
+class Workspace:
+    name: str
+    version: str
+    channels: list[str]
+    requires_pixi: bool</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">struct Workspace {
+    name: String,
+    version: String,
+    channels: Vec&lt;String&gt;,
+    requires_pixi: bool,
+}</code></pre></div>
+    </div>
+    <div class="runnable" data-title="Creating and using a struct">
+<textarea>
+struct Workspace {
+    name: String,
+    version: String,
+    channels: Vec<String>,
+    requires_pixi: bool,
+}
+
+fn main() {
+    let name = String::from("hello-rust");
+    let ws = Workspace {
+        name,
+        version: String::from("0.1.0"),
+        channels: vec![String::from("conda-forge")],
+        requires_pixi: false,
+    };
+    println!("{} {} with {} channel(s)", ws.name, ws.version, ws.channels.len());
+
+    let renamed = Workspace { name: String::from("hello-2"), ..ws };
+    println!("{} {} {}", renamed.name, renamed.version, renamed.requires_pixi);
+}
+</textarea>
+    </div>
+    <ul>
+      <li>To create a value you must give <strong>every</strong> field. There are no default values unless you write a
+        constructor (next section) or derive <code>Default</code> (<a href="m06-traits-generics.html">M06</a>).</li>
+      <li><code>name,</code> on its own is <strong>field init shorthand</strong> for <code>name: name,</code>.</li>
+      <li><code>..ws</code> is <strong>struct update syntax</strong>: "take the remaining fields from <code>ws</code>",
+        like <code>dataclasses.replace(ws, name="hello-2")</code>. It moves those fields out of <code>ws</code>, so
+        afterwards <code>ws</code> can no longer be used as a whole (M03 explains moves).</li>
+      <li>Fields are read with a dot. To change a field, the whole binding must be <code>mut</code>; Rust has no
+        per-field mutability.</li>
+    </ul>
+    <h3>Tuple structs and newtypes</h3>
+    <p>A <strong>tuple struct</strong> has fields without names, accessed as <code>.0</code>, <code>.1</code>. The most
+      useful form has exactly one field and is called a <strong>newtype</strong>: a new, distinct type that wraps an
+      existing one. Pixi's <code>TaskName</code> is <code>struct TaskName(String);</code>. Why wrap a
+      <code>String</code>? Because then a function that takes a <code>TaskName</code> cannot be given an environment
+      name or a file path by mistake, even though all three are strings inside.</p>
+    <div class="runnable" data-title="Newtypes keep values apart" data-compile-fail>
+<textarea>
+struct Bytes(u64);
+struct Count(u64);
+
+fn download_size(size: Bytes) -> u64 {
+    size.0 / 1024
+}
+
+fn main() {
+    let packages = Count(42);
+    println!("{}", download_size(packages));
+}
+</textarea>
+    </div>
+    <p><code>E0308</code>: "expected <code>Bytes</code>, found <code>Count</code>". Both wrap a <code>u64</code>, but they
+      are different types. A newtype costs nothing at run time; it exists only for the type checker. Python's
+      <code>typing.NewType</code> has the same idea, but only a type checker such as mypy enforces it, and only if you
+      run it.</p>
+    <p>Finally, a <strong>unit struct</strong> has no fields at all (<code>struct Marker;</code>). It is used as a type
+      that carries no data, for example to implement a trait (M06).</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> structs have fixed, typed fields; all are given at
+      creation. Shorthand <code>name,</code> and update syntax <code>..other</code> save typing. A one-field tuple struct
+      (newtype) makes a distinct type at no run-time cost.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="impl">
+    <h2><code>impl</code> blocks: methods and associated functions</h2>
+    <p>A Python class keeps its data and its methods together in one <code>class</code> body. Rust separates them: the
+      <code>struct</code> declares the data, and an <code>impl</code> block ("implementation") holds the functions for
+      that type. There can be several <code>impl</code> blocks for one type, even in different files of the same crate.</p>
+    <div class="runnable" data-title="Methods and new" data-predict>
+<textarea>
+struct Version {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+
+impl Version {
+    fn new(major: u32, minor: u32, patch: u32) -> Self {
+        Self { major, minor, patch }
+    }
+
+    fn render(&self) -> String {
+        format!("{}.{}.{}", self.major, self.minor, self.patch)
+    }
+
+    fn bump_patch(&mut self) {
+        self.patch += 1;
+    }
+
+    fn into_tuple(self) -> (u32, u32, u32) {
+        (self.major, self.minor, self.patch)
+    }
+}
+
+fn main() {
+    let mut v = Version::new(0, 81, 0);
+    println!("{}", v.render());
+    v.bump_patch();
+    v.bump_patch();
+    println!("{}", v.render());
+    let parts = v.into_tuple();
+    println!("{parts:?}");
+}
+</textarea>
+    </div>
+    <p>Read the first parameter of each function. It decides what kind of function it is:</p>
+    <table>
+      <thead><tr><th>First parameter</th><th>Kind</th><th>Called as</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td>none</td><td>Associated function</td><td><code>Version::new(0, 81, 0)</code></td><td>Belongs to the type, not to a value. Like a Python <code>@staticmethod</code> or <code>@classmethod</code>.</td></tr>
+        <tr><td><code>&amp;self</code></td><td>Method, borrows</td><td><code>v.render()</code></td><td>Reads the value. The most common kind.</td></tr>
+        <tr><td><code>&amp;mut self</code></td><td>Method, borrows mutably</td><td><code>v.bump_patch()</code></td><td>Changes the value in place. Needs a <code>mut</code> binding.</td></tr>
+        <tr><td><code>self</code></td><td>Method, takes ownership</td><td><code>v.into_tuple()</code></td><td>Consumes the value; <code>v</code> is gone afterwards. Common for conversions (<code>into_...</code>) and builders.</td></tr>
+      </tbody>
+    </table>
+    <p><code>Self</code> (capital S) inside an <code>impl</code> is another name for the type being implemented, here
+      <code>Version</code>. <code>self</code> (lowercase) is the value, like Python's <code>self</code>, except that you
+      access fields with <code>self.major</code> and must always write <code>self.</code>.</p>
+    <p><code>new</code> is not a keyword. It is just the conventional name for the main constructor, and a type can have
+      several (<code>Version::parse</code>, <code>Version::zero</code>). Rust has no <code>__init__</code>; struct
+      literals like <code>Version { major, minor, patch }</code> are the only way to build a value, and
+      <code>new</code> is a function that wraps one.</p>
+    <p>Calling a <code>&amp;mut self</code> method on an immutable binding is an error, and a common one:</p>
+    <div class="runnable" data-title="A &amp;mut self method needs a mut binding" data-compile-fail>
+<textarea>
+struct Version {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+
+impl Version {
+    fn bump_patch(&mut self) {
+        self.patch += 1;
+    }
+}
+
+fn main() {
+    let v = Version { major: 0, minor: 81, patch: 0 };
+    v.bump_patch();
+    println!("{}.{}.{}", v.major, v.minor, v.patch);
+}
+</textarea>
+    </div>
+    <p><code>E0596: cannot borrow `v` as mutable, as it is not declared as mutable</code>, with
+      <code>help: consider changing this to be mutable</code> and the <code>let mut v</code> diff. The signature
+      <code>&amp;mut self</code> tells every caller "this changes the value", and the compiler holds callers to it.</p>
+    <aside class="callout pro"><p>Choose the receiver by what the method needs: <code>&amp;self</code> unless it must
+      change the value (<code>&amp;mut self</code>) or consume it (<code>self</code>). Pixi's getters are almost all
+      <code>&amp;self</code> methods returning a reference, such as <code>TaskName::as_str(&amp;self) -&gt; &amp;str</code>
+      in the Reading Pixi section.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> data in <code>struct</code>, behavior in <code>impl</code>.
+      No <code>self</code> parameter: associated function, called with <code>Type::name()</code>. <code>&amp;self</code>
+      reads, <code>&amp;mut self</code> changes, <code>self</code> consumes. <code>new</code> is a convention.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="enums">
+    <h2>Enums: one of several kinds, each with its own data</h2>
+    <p>Python's <code>enum.Enum</code> gives you a fixed set of named constants. Rust's <code>enum</code> starts there
+      and goes much further: each <strong>variant</strong> can carry its own data, of its own shape. The simplest form
+      matches Python's. Pixi's <code>SpecType</code> names the four kinds of dependency table:</p>
+    <div class="runnable" data-title="A simple enum">
+<textarea>
+enum SpecType {
+    Host,
+    Build,
+    Run,
+    RunConstraints,
+}
+
+fn table_name(spec: SpecType) -> &'static str {
+    match spec {
+        SpecType::Host => "host-dependencies",
+        SpecType::Build => "build-dependencies",
+        SpecType::Run => "dependencies",
+        SpecType::RunConstraints => "run-constraints",
+    }
+}
+
+fn main() {
+    for spec in [SpecType::Run, SpecType::Host, SpecType::Build, SpecType::RunConstraints] {
+        println!("{}", table_name(spec));
+    }
+}
+</textarea>
+    </div>
+    <p>A value of type <code>SpecType</code> is always exactly one of the four variants, written
+      <code>SpecType::Host</code> and so on. Now the more powerful form. A Pixi task can be a plain command string, a
+      command with options such as <code>depends-on</code>, or an alias that only runs other tasks. In Python you might
+      model that with a class hierarchy, or a dict with a <code>"kind"</code> key and different other keys per kind.
+      In Rust it is one enum:</p>
+    <div class="runnable" data-title="Variants that carry data">
+<textarea>
+enum Task {
+    Plain(String),
+    Execute { cmd: String, depends_on: Vec<String> },
+    Alias(Vec<String>),
+}
+
+fn describe(task: &Task) -> String {
+    match task {
+        Task::Plain(cmd) => format!("run `{cmd}`"),
+        Task::Execute { cmd, depends_on } => {
+            format!("run `{cmd}` after {} task(s)", depends_on.len())
+        }
+        Task::Alias(names) => format!("alias for {}", names.join(", ")),
+    }
+}
+
+fn main() {
+    let tasks = [
+        Task::Plain(String::from("cargo test")),
+        Task::Execute { cmd: String::from("cargo build"), depends_on: vec![String::from("fmt")] },
+        Task::Alias(vec![String::from("lint"), String::from("test")]),
+    ];
+    for task in &tasks {
+        println!("{}", describe(task));
+    }
+}
+</textarea>
+    </div>
+    <p>Variants come in the same three shapes as structs: no data (<code>Host</code>), tuple-like
+      (<code>Plain(String)</code>), and struct-like with named fields (<code>Execute { cmd, depends_on }</code>). The key
+      property is that the data belongs to the variant. An <code>Alias</code> has no <code>cmd</code> at all, so there is
+      no way to read the command of an alias by mistake. In the Python dict version, <code>task["cmd"]</code> on an
+      alias is a <code>KeyError</code> at run time; in Rust, the code that would do it does not compile.</p>
+    <p>Enums like this are called <strong>sum types</strong> or <strong>tagged unions</strong>. They are one of the most
+      important tools in Rust. The two most-used types in the standard library are enums:
+      <code>Option&lt;T&gt;</code> (<code>Some(value)</code> or <code>None</code>) and <code>Result&lt;T, E&gt;</code>
+      (<code>Ok(value)</code> or <code>Err(error)</code>). <a href="m04-option-result.html">M04</a> is about them.</p>
+    <aside class="callout think"><p>Pixi's <code>pixi.toml</code> lets a dependency be a version string
+      (<code>numpy = "&gt;=1.26"</code>), a table with a version and a channel, a git source, or a local path. How would you
+      model "one dependency spec" as an enum? Which variants would carry which fields? (Level 3 shows how
+      <code>pixi_spec</code> does it.)</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> an enum value is exactly one variant. Variants can be bare,
+      tuple-like, or struct-like, and each carries only its own data. "One of several kinds" in Rust is an enum, not a
+      string tag or a class hierarchy.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="match">
+    <h2><code>match</code>: exhaustive by design</h2>
+    <p><code>match</code> compares a value against a list of <strong>patterns</strong> and runs the arm for the first one
+      that fits. Python 3.10's <code>match</code> statement looks similar, but there is one crucial difference: Rust's
+      <code>match</code> must be <strong>exhaustive</strong>. Every possible value must be handled by some arm, or the
+      code does not compile. Remove the last arm and see:</p>
+    <div class="runnable" data-title="A missing variant" data-compile-fail>
+<textarea>
+enum SpecType {
+    Host,
+    Build,
+    Run,
+    RunConstraints,
+}
+
+fn table_name(spec: SpecType) -> &'static str {
+    match spec {
+        SpecType::Host => "host-dependencies",
+        SpecType::Build => "build-dependencies",
+        SpecType::Run => "dependencies",
+    }
+}
+
+fn main() {
+    println!("{}", table_name(SpecType::Run));
+}
+</textarea>
+    </div>
+    <p><code>error[E0004]: non-exhaustive patterns: `SpecType::RunConstraints` not covered</code>. The primary span is the
+      value being matched, a <code>note:</code> points at the variant you forgot, and the <code>help:</code> shows the arm
+      to add. This is why Rust developers like enums so much. When someone adds a variant to <code>SpecType</code>
+      later, every <code>match</code> that does not handle it becomes a compile error, pointing at exactly the places
+      that need updating. In Python, a new enum member slips through every <code>if</code>/<code>elif</code> chain
+      silently.</p>
+    <h3>Patterns you will use</h3>
+    <div class="runnable" data-title="Literal, or, guard, and wildcard patterns" data-predict>
+<textarea>
+fn classify(retries: u32) -> &'static str {
+    match retries {
+        0 => "first try",
+        1 | 2 => "a few retries",
+        n if n < 10 => "many retries",
+        _ => "giving up",
+    }
+}
+
+fn main() {
+    for r in [0, 2, 5, 10] {
+        println!("{r}: {}", classify(r));
+    }
+}
+</textarea>
+    </div>
+    <ul>
+      <li><strong>Literals</strong> such as <code>0</code> match that value.</li>
+      <li><code>|</code> means "or": <code>1 | 2</code>.</li>
+      <li>A plain name such as <code>n</code> matches anything and <strong>binds</strong> it, so the arm can use it.</li>
+      <li><code>if n &lt; 10</code> after a pattern is a <strong>guard</strong>, an extra condition.</li>
+      <li><code>_</code> is the wildcard: anything not matched above. A <code>u32</code> has four billion values, so
+        without <code>_</code> this match would not be exhaustive.</li>
+      <li>Patterns destructure data: <code>Task::Execute { cmd, depends_on }</code> binds both fields;
+        <code>Task::Execute { cmd, .. }</code> binds one and ignores the rest; <code>Task::Plain(_)</code> ignores the
+        payload.</li>
+    </ul>
+    <p><code>match</code> is an <strong>expression</strong>: it produces a value, so you can return it or assign it
+      (<code>let name = match spec { ... };</code>). Every arm must then produce the same type.</p>
+    <h3><code>if let</code> for one pattern</h3>
+    <p>When you care about only one variant, a full <code>match</code> with a <code>_ =&gt; {}</code> arm is noisy.
+      <code>if let</code> runs a block only if the value matches one pattern:</p>
+    <pre><code class="language-rust">if let Task::Alias(names) = &amp;task {
+    println!("alias for {} tasks", names.len());
+}</code></pre>
+    <aside class="callout warn"><p>Be careful with <code>_</code> on your own enums. A wildcard arm makes the match
+      exhaustive forever, so when a new variant is added it silently falls into <code>_</code> instead of producing an
+      error. Listing the variants explicitly, as Pixi's <code>Task::is_executable</code> does below, keeps the compiler
+      on your side.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>match</code> must cover every value
+      (<code>E0004</code>). Patterns can be literals, <code>|</code> alternatives, bindings, guards, <code>_</code>, and
+      destructuring. <code>match</code> is an expression. <code>if let</code> handles one pattern.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="derive">
+    <h2><code>#[derive(Debug, Clone, PartialEq)]</code>: a first look</h2>
+    <p>A Python dataclass gives you <code>__repr__</code> and <code>__eq__</code> for free. A new Rust struct or enum
+      gets nothing: it cannot be printed for debugging, copied, or compared with <code>==</code> until you say so. The
+      quickest way to say so is the <code>derive</code> attribute, which asks the compiler to generate the code:</p>
+    <div class="runnable" data-title="Deriving common behavior">
+<textarea>
+#[derive(Debug, Clone, PartialEq)]
+struct Channel {
+    name: String,
+    priority: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Platform {
+    Linux64,
+    OsxArm64,
+}
+
+fn main() {
+    let a = Channel { name: String::from("conda-forge"), priority: 0 };
+    let b = a.clone();
+    println!("{a:?}");
+    println!("{}", a == b);
+    println!("{:?}", Platform::OsxArm64);
+    println!("{}", Platform::Linux64 == Platform::OsxArm64);
+    println!("{a:#?}");
+}
+</textarea>
+    </div>
+    <ul>
+      <li><code>Debug</code> enables <code>{:?}</code> (one line) and <code>{:#?}</code> (pretty, multi-line), like
+        <code>repr()</code>. It is for developers; user-facing output uses <code>Display</code> and <code>{}</code>
+        (<a href="m06-traits-generics.html">M06</a>).</li>
+      <li><code>Clone</code> adds <code>.clone()</code>, an explicit deep copy.</li>
+      <li><code>PartialEq</code> enables <code>==</code> and <code>!=</code>, comparing field by field.</li>
+      <li><code>Copy</code>, on the enum, makes copying implicit, like a number. Only types with no heap data may be
+        <code>Copy</code>. <a href="m03-ownership-borrowing.html">M03</a> explains the difference from <code>Clone</code>.</li>
+    </ul>
+    <p>Here is what happens without the derives. The compiler tells you exactly what to add.</p>
+    <div class="two-col">
+      <div class="runnable" data-title="Printing without Debug" data-compile-fail>
+<textarea>
+struct Channel {
+    name: String,
+    priority: i32,
+}
+
+fn main() {
+    let a = Channel { name: String::from("conda-forge"), priority: 0 };
+    println!("{a:?}");
+}
+</textarea>
+      </div>
+      <div class="runnable" data-title="Comparing without PartialEq" data-compile-fail>
+<textarea>
+#[derive(Debug)]
+struct Channel {
+    name: String,
+    priority: i32,
+}
+
+fn main() {
+    let a = Channel { name: String::from("conda-forge"), priority: 0 };
+    let b = Channel { name: String::from("conda-forge"), priority: 0 };
+    println!("{}", a == b);
+}
+</textarea>
+      </div>
+    </div>
+    <p>The first gives <code>E0277: `Channel` doesn't implement `Debug`</code> with "consider annotating
+      <code>Channel</code> with <code>#[derive(Debug)]</code>". The second gives <code>E0369: binary operation `==` cannot
+      be applied to type `Channel`</code> with a suggestion to derive <code>PartialEq</code>. These are the two you will
+      hit most in tests, because <code>assert_eq!(a, b)</code> needs both: <code>PartialEq</code> to compare, and
+      <code>Debug</code> to print the two values when they differ.</p>
+    <p>What are <code>Debug</code>, <code>Clone</code> and <code>PartialEq</code>, exactly? They are
+      <strong>traits</strong>, Rust's interfaces, and derive writes their implementations for you.
+      <a href="m06-traits-generics.html">M06</a> covers traits fully, including writing implementations by hand.</p>
+    <aside class="callout pixi"><p>Almost every Pixi type starts with a derive line. <code>SpecType</code> has
+      <code>#[derive(Deserialize, Serialize, Debug, Copy, Clone, Hash, PartialEq, Eq)]</code>. <code>Serialize</code> and
+      <code>Deserialize</code> come from the <code>serde</code> crate (Level 2) and generate code that reads and writes
+      the type as TOML or JSON. Derive macros from crates work exactly like the built-in ones.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> new types have no printing, copying, or comparison until
+      you derive or implement them. <code>Debug</code> for <code>{:?}</code>, <code>Clone</code> for
+      <code>.clone()</code>, <code>PartialEq</code> for <code>==</code>. <code>assert_eq!</code> needs <code>Debug</code> and
+      <code>PartialEq</code>.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="pixi-reading">
+    <h2>Reading Pixi: <code>SpecType</code>, <code>TaskName</code>, and <code>Task</code></h2>
+    <h3>1. A simple enum with methods</h3>
+    <p>From
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/spec_type.rs#L3-L39"><code>crates/pixi_manifest/src/spec_type.rs</code>, lines 3-39</a>:</p>
+    <pre data-label="crates/pixi_manifest/src/spec_type.rs"><code class="language-rust">#[derive(Deserialize, Serialize, Debug, Copy, Clone, Hash, PartialEq, Eq)]
+/// What kind of dependency spec do we have
+pub enum SpecType {
+    /// Host dependencies are used that are needed by the host environment when
+    /// running the project
+    Host,
+    /// Build dependencies are used when we need to build the project, may not
+    /// be required at runtime
+    Build,
+    /// Regular dependencies that are used when we need to run the project
+    Run,
+    /// Runtime constraints on packages we might have
+    RunConstraints,
+}
+
+impl SpecType {
+    /// Convert to a name used in the manifest
+    pub fn name(&amp;self) -&gt; &amp;'static str {
+        match self {
+            SpecType::Host =&gt; "host-dependencies",
+            SpecType::Build =&gt; "build-dependencies",
+            SpecType::Run =&gt; "dependencies",
+            SpecType::RunConstraints =&gt; "run-constraints",
+        }
+    }
+
+    /// Returns all the variants of the enum
+    pub fn all() -&gt; impl Iterator&lt;Item = SpecType&gt; {
+        [
+            SpecType::Run,
+            SpecType::Host,
+            SpecType::Build,
+            SpecType::RunConstraints,
+        ]
+        .into_iter()
+    }
+}</code></pre>
+    <ul>
+      <li>Line 3 derives eight traits. <code>Copy</code> is allowed because the enum carries no data; it makes
+        <code>SpecType</code> as cheap to pass around as an integer. <code>Hash</code> and <code>Eq</code> let it be a
+        key in a <code>HashMap</code> (M05).</li>
+      <li><code>///</code> lines are <strong>doc comments</strong>; they become the crate's documentation
+        (<a href="m10-crate-design.html">M10</a>).</li>
+      <li><code>name(&amp;self)</code> is a method. <code>match self</code> lists all four variants with no
+        <code>_</code>, so adding a fifth variant would fail to compile right here until someone writes its table
+        name. The return type <code>&amp;'static str</code> says "a string literal": the names are built into the
+        program.</li>
+      <li><code>all()</code> has no <code>self</code>, so it is an associated function: <code>SpecType::all()</code>. It
+        builds an array of the four variants and turns it into an iterator. <code>impl Iterator&lt;Item = SpecType&gt;</code>
+        means "some iterator of <code>SpecType</code>" (M06 and M09); read it as "returns the variants one by one".</li>
+    </ul>
+    <h3>2. A newtype</h3>
+    <p>From
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/task.rs#L22-L30"><code>crates/pixi_manifest/src/task.rs</code>, lines 22-30</a>:</p>
+    <pre data-label="crates/pixi_manifest/src/task.rs"><code class="language-rust">/// Represents a task name
+#[derive(Debug, Clone, Serialize, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize)]
+pub struct TaskName(String);
+
+impl TaskName {
+    pub fn as_str(&amp;self) -&gt; &amp;str {
+        self.0.as_str()
+    }
+}</code></pre>
+    <p><code>TaskName</code> wraps a <code>String</code> so that a task name cannot be confused with any other string.
+      The field has no <code>pub</code>, so code outside the module cannot reach <code>.0</code>; it must go through
+      <code>as_str()</code>, which lends out a <code>&amp;str</code> view of the owned <code>String</code>. That is the
+      <code>String</code>/<code>&amp;str</code> rule from this module: the struct owns, the getter lends. (The lines that
+      follow, 32-47, implement <code>Display</code> so a name prints with <code>{}</code>, and let you create one with
+      <code>TaskName::from("build")</code>; those are the <code>Display</code> and <code>From</code> traits from M06.)</p>
+    <h3>3. An enum with data</h3>
+    <p>From
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/task.rs#L157-L190"><code>task.rs</code>, lines 157-190</a>, trimmed:</p>
+    <pre data-label="crates/pixi_manifest/src/task.rs"><code class="language-rust">/// Represents different types of scripts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Task {
+    Plain(TemplateString),
+    Execute(Box&lt;Execute&gt;),
+    Alias(Alias),
+    Custom(Custom),
+}
+
+impl Task {
+    /// Returns the names of the task that this task depends on
+    pub fn depends_on(&amp;self) -&gt; &amp;[Dependency] {
+        match self {
+            Task::Plain(_) | Task::Custom(_) =&gt; &amp;[],
+            Task::Execute(cmd) =&gt; &amp;cmd.depends_on,
+            Task::Alias(cmd) =&gt; &amp;cmd.depends_on,
+        }
+    }
+
+    // ...
+
+    /// Returns true if this task is directly executable
+    pub fn is_executable(&amp;self) -&gt; bool {
+        match self {
+            Task::Plain(_) | Task::Custom(_) | Task::Execute(_) =&gt; true,
+            Task::Alias(_) =&gt; false,
+        }
+    }</code></pre>
+    <ul>
+      <li>Each variant wraps one value. <code>TemplateString</code> is a command string that may contain template
+        variables. <code>Execute</code>, <code>Alias</code>, and <code>Custom</code> are structs defined further down the
+        file: for example <code>Alias</code> has <code>depends_on</code>, <code>description</code>, and <code>args</code>
+        fields (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/task.rs#L816-L825">lines 816-825</a>).
+        Wrapping a struct in a tuple variant is a common Pixi style: the struct can have its own methods.</li>
+      <li><code>Box&lt;Execute&gt;</code> puts the large <code>Execute</code> struct on the heap so that every
+        <code>Task</code> value stays small (<a href="m08-smart-pointers.html">M08</a>). Code can still read
+        <code>cmd.depends_on</code> through the box.</li>
+      <li><code>depends_on</code> returns <code>&amp;[Dependency]</code>, a borrowed slice (a view of a list; M03). Plain
+        and custom tasks have no dependencies, so they return <code>&amp;[]</code>, an empty slice. The others lend out
+        their own field.</li>
+      <li><code>Task::Plain(_) | Task::Custom(_)</code> uses <code>|</code> to share an arm and <code>_</code> to ignore
+        the payload. Both matches list every variant explicitly instead of using a wildcard.</li>
+    </ul>
+    <details class="reveal"><summary>Question: Pixi adds a fifth <code>Task</code> variant. What happens when it compiles?</summary>
+      <p>Both <code>depends_on</code> and <code>is_executable</code> fail with <code>E0004</code> (non-exhaustive
+        patterns), naming the new variant. The person adding it is forced to decide, at each place, whether the new kind
+        of task has dependencies and whether it can be executed. That is exactly why these matches avoid
+        <code>_</code>.</p>
+    </details>
+    <details class="reveal"><summary>Question: why can <code>SpecType</code> derive <code>Copy</code>, but <code>Task</code> cannot?</summary>
+      <p><code>SpecType</code>'s variants carry no data, so a value is just a small tag and copying it is trivial.
+        <code>Task</code>'s variants own heap data (strings, vectors, a <code>Box</code>), and <code>Copy</code> is only
+        allowed for types that can be duplicated by copying bytes. <code>Task</code> derives <code>Clone</code> instead,
+        which makes copying explicit with <code>.clone()</code>.</p>
+    </details>
+    <details class="reveal"><summary>Question: outside <code>pixi_manifest</code>, can you write <code>name.0</code> for a <code>TaskName</code>?</summary>
+      <p>No. The struct is <code>pub</code> but its field is not (<code>pub struct TaskName(String);</code>), so
+        <code>.0</code> is private to the module. You must use <code>name.as_str()</code>. Keeping fields private lets the
+        type guarantee things about its contents, for example that a name was validated when it was created.</p>
+    </details>
+  </section>
+
+  <section class="lesson-section" id="practice">
+    <h2>Practice</h2>
+
+    <div class="exercise" data-id="m02-e1" data-title="Numbers and casts">
+      <div class="exercise-prompt">
+        <p>Write two small functions:</p>
+        <ul>
+          <li><code>percent(done: u32, total: u32) -&gt; f64</code>: the percentage of <code>total</code> that is done, as a
+            float. <code>percent(1, 4)</code> is <code>25.0</code>. When <code>total</code> is 0, return <code>0.0</code>
+            instead of dividing by zero.</li>
+          <li><code>mib(bytes: u64) -&gt; u64</code>: whole mebibytes (1 MiB = 1024 × 1024 bytes), rounded down.
+            <code>mib(3_145_728)</code> is 3 and <code>mib(1_048_575)</code> is 0.</li>
+        </ul>
+      </div>
+<textarea class="starter">
+fn percent(done: u32, total: u32) -> f64 {
+    todo!()
+}
+
+fn mib(bytes: u64) -> u64 {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn quarter_is_25_percent() {
+    assert_eq!(percent(1, 4), 25.0, "percent(1, 4) should be 25.0");
+    assert_eq!(percent(3, 3), 100.0, "percent(3, 3) should be 100.0");
+}
+
+#[test]
+fn zero_total_is_zero_percent() {
+    assert_eq!(percent(0, 0), 0.0, "percent(0, 0) should be 0.0, not NaN");
+}
+
+#[test]
+fn not_integer_division() {
+    assert!((percent(1, 3) - 33.333).abs() < 0.01, "percent(1, 3) should be about 33.33; did you divide integers before converting?");
+}
+
+#[test]
+fn mib_rounds_down() {
+    assert_eq!(mib(3_145_728), 3, "3 * 1024 * 1024 bytes is 3 MiB");
+    assert_eq!(mib(1_048_575), 0, "one byte short of 1 MiB rounds down to 0");
+    assert_eq!(mib(5_000_000_000), 4768, "5 GB is 4768 whole MiB");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Convert <em>before</em> dividing: <code>done as f64 / total as f64
+        * 100.0</code>. Integer division on <code>u64</code> already rounds down, so <code>mib</code> is one division.
+        Use an <code>if</code> expression for the zero case.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn percent(done: u32, total: u32) -&gt; f64 {
+    if total == 0 {
+        0.0
+    } else {
+        done as f64 / total as f64 * 100.0
+    }
+}
+
+fn mib(bytes: u64) -&gt; u64 {
+    bytes / (1024 * 1024)
+}</code></pre>
+        <p><code>as</code> binds tighter than <code>/</code>, so <code>done as f64 / total as f64</code> converts both sides
+          first. Converting <code>u32</code> to <code>f64</code> is always exact. Writing <code>(done / total) as f64</code>
+          would divide integers first and give 0 for 1/3.</p>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m02-e2" data-title="A Version struct with methods">
+      <div class="exercise-prompt">
+        <p>Complete the <code>impl</code> block for <code>Version</code>:</p>
+        <ul>
+          <li><code>Version::new(major, minor, patch)</code> builds a version.</li>
+          <li><code>render(&amp;self)</code> returns <code>"major.minor.patch"</code>, such as <code>"0.81.0"</code>.</li>
+          <li><code>bump_minor(&amp;mut self)</code> adds 1 to <code>minor</code> and resets <code>patch</code> to 0.</li>
+          <li><code>is_compatible_with(&amp;self, other: &amp;Version)</code> applies Cargo's caret rule from M01: if
+            <code>major</code> is greater than 0, versions are compatible when their majors are equal; if
+            <code>major</code> is 0, both major and minor must be equal.</li>
+        </ul>
+      </div>
+<textarea class="starter">
+#[derive(Debug, Clone, PartialEq)]
+struct Version {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+
+impl Version {
+    fn new(major: u32, minor: u32, patch: u32) -> Self {
+        todo!()
+    }
+
+    fn render(&self) -> String {
+        todo!()
+    }
+
+    fn bump_minor(&mut self) {
+        todo!()
+    }
+
+    fn is_compatible_with(&self, other: &Version) -> bool {
+        todo!()
+    }
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn new_sets_fields() {
+    let v = Version::new(1, 2, 3);
+    assert_eq!(v, Version { major: 1, minor: 2, patch: 3 }, "Version::new(1, 2, 3) should set major, minor and patch in order");
+}
+
+#[test]
+fn renders_dotted() {
+    assert_eq!(Version::new(0, 81, 0).render(), "0.81.0", "render() should join the parts with dots");
+}
+
+#[test]
+fn bump_minor_resets_patch() {
+    let mut v = Version::new(1, 4, 7);
+    v.bump_minor();
+    assert_eq!(v, Version::new(1, 5, 0), "bump_minor on 1.4.7 should give 1.5.0");
+}
+
+#[test]
+fn caret_rule_for_1_x() {
+    let base = Version::new(1, 2, 3);
+    assert!(base.is_compatible_with(&Version::new(1, 9, 0)), "1.2.3 and 1.9.0 share major 1, so they are compatible");
+    assert!(!base.is_compatible_with(&Version::new(2, 0, 0)), "1.2.3 and 2.0.0 have different majors");
+}
+
+#[test]
+fn caret_rule_for_0_x() {
+    let base = Version::new(0, 15, 0);
+    assert!(base.is_compatible_with(&Version::new(0, 15, 3)), "0.15.0 and 0.15.3 are compatible");
+    assert!(!base.is_compatible_with(&Version::new(0, 16, 0)), "for 0.x versions the minor must match: 0.15 and 0.16 are not compatible");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>new</code> can use field init shorthand:
+        <code>Self { major, minor, patch }</code>. For the caret rule, an <code>if self.major == 0 { ... } else { ... }</code>
+        expression whose branches are boolean comparisons joined with <code>&amp;&amp;</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">#[derive(Debug, Clone, PartialEq)]
+struct Version {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+
+impl Version {
+    fn new(major: u32, minor: u32, patch: u32) -&gt; Self {
+        Self { major, minor, patch }
+    }
+
+    fn render(&amp;self) -&gt; String {
+        format!("{}.{}.{}", self.major, self.minor, self.patch)
+    }
+
+    fn bump_minor(&amp;mut self) {
+        self.minor += 1;
+        self.patch = 0;
+    }
+
+    fn is_compatible_with(&amp;self, other: &amp;Version) -&gt; bool {
+        if self.major == 0 {
+            other.major == 0 &amp;&amp; self.minor == other.minor
+        } else {
+            self.major == other.major
+        }
+    }
+}</code></pre>
+        <p>The tests compare whole versions with <code>assert_eq!</code>, which works because of
+          <code>#[derive(Debug, Clone, PartialEq)]</code>. Try removing <code>Debug</code> and read the error.</p>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m02-e3" data-title="Make the match exhaustive">
+      <div class="exercise-prompt">
+        <p>This starter does <strong>not compile</strong>: Check shows <code>E0004</code>, because
+          <code>table_name</code> forgets a variant. Fix it so that <code>RunConstraints</code> maps to
+          <code>"run-constraints"</code>, without using <code>_</code>. Then implement <code>is_build_time</code>: it
+          returns <code>true</code> for <code>Host</code> and <code>Build</code> and <code>false</code> otherwise. Use one
+          arm with <code>|</code> for the two <code>true</code> cases, and list the others too instead of using
+          <code>_</code>.</p>
+      </div>
+<textarea class="starter">
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SpecType {
+    Host,
+    Build,
+    Run,
+    RunConstraints,
+}
+
+impl SpecType {
+    fn table_name(&self) -> &'static str {
+        match self {
+            SpecType::Host => "host-dependencies",
+            SpecType::Build => "build-dependencies",
+            SpecType::Run => "dependencies",
+        }
+    }
+
+    fn is_build_time(&self) -> bool {
+        todo!()
+    }
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn every_table_name() {
+    assert_eq!(SpecType::Host.table_name(), "host-dependencies", "Host should map to host-dependencies");
+    assert_eq!(SpecType::Build.table_name(), "build-dependencies", "Build should map to build-dependencies");
+    assert_eq!(SpecType::Run.table_name(), "dependencies", "Run should map to dependencies");
+    assert_eq!(SpecType::RunConstraints.table_name(), "run-constraints", "RunConstraints should map to run-constraints");
+}
+
+#[test]
+fn build_time_kinds() {
+    assert!(SpecType::Host.is_build_time(), "Host dependencies are used at build time");
+    assert!(SpecType::Build.is_build_time(), "Build dependencies are used at build time");
+}
+
+#[test]
+fn run_time_kinds() {
+    assert!(!SpecType::Run.is_build_time(), "Run dependencies are not build-time");
+    assert!(!SpecType::RunConstraints.is_build_time(), "RunConstraints are not build-time");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>The <code>help:</code> in the error shows the arm to add. For
+        <code>is_build_time</code>: <code>SpecType::Host | SpecType::Build =&gt; true,</code> and a second arm for the
+        other two.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">#[derive(Debug, Clone, Copy, PartialEq)]
+enum SpecType {
+    Host,
+    Build,
+    Run,
+    RunConstraints,
+}
+
+impl SpecType {
+    fn table_name(&amp;self) -&gt; &amp;'static str {
+        match self {
+            SpecType::Host =&gt; "host-dependencies",
+            SpecType::Build =&gt; "build-dependencies",
+            SpecType::Run =&gt; "dependencies",
+            SpecType::RunConstraints =&gt; "run-constraints",
+        }
+    }
+
+    fn is_build_time(&amp;self) -&gt; bool {
+        match self {
+            SpecType::Host | SpecType::Build =&gt; true,
+            SpecType::Run | SpecType::RunConstraints =&gt; false,
+        }
+    }
+}</code></pre>
+        <p>The standard library also has a <code>matches!</code> macro for this:
+          <code>matches!(self, SpecType::Host | SpecType::Build)</code>. It is shorter, but like <code>_</code> it would not
+          flag a new variant.</p>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m02-e4" data-title="A Task enum like Pixi's">
+      <div class="exercise-prompt">
+        <p>Here is a simplified version of Pixi's <code>Task</code>. Implement three methods with <code>match</code>:</p>
+        <ul>
+          <li><code>depends_on(&amp;self) -&gt; &amp;[String]</code>: the task's dependencies. <code>Plain</code> has none
+            (return <code>&amp;[]</code>); <code>Execute</code> and <code>Alias</code> lend out their
+            <code>depends_on</code> field.</li>
+          <li><code>is_executable(&amp;self) -&gt; bool</code>: <code>false</code> only for <code>Alias</code>.</li>
+          <li><code>summary(&amp;self) -&gt; String</code>: for <code>Plain</code> and <code>Execute</code>, the command;
+            for <code>Alias</code>, <code>"alias: "</code> followed by its dependencies joined with <code>", "</code>, such as
+            <code>"alias: lint, test"</code>.</li>
+        </ul>
+      </div>
+<textarea class="starter">
+enum Task {
+    Plain(String),
+    Execute { cmd: String, depends_on: Vec<String> },
+    Alias { depends_on: Vec<String> },
+}
+
+impl Task {
+    fn depends_on(&self) -> &[String] {
+        todo!()
+    }
+
+    fn is_executable(&self) -> bool {
+        todo!()
+    }
+
+    fn summary(&self) -> String {
+        todo!()
+    }
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+fn s(text: &str) -> String {
+    text.to_string()
+}
+
+#[test]
+fn plain_task() {
+    let t = Task::Plain(s("cargo test"));
+    assert!(t.depends_on().is_empty(), "a Plain task has no dependencies");
+    assert!(t.is_executable(), "a Plain task is executable");
+    assert_eq!(t.summary(), "cargo test", "a Plain task's summary is its command");
+}
+
+#[test]
+fn execute_task() {
+    let t = Task::Execute { cmd: s("cargo build"), depends_on: vec![s("fmt"), s("lint")] };
+    assert_eq!(t.depends_on(), &[s("fmt"), s("lint")], "an Execute task lends out its depends_on list");
+    assert!(t.is_executable(), "an Execute task is executable");
+    assert_eq!(t.summary(), "cargo build", "an Execute task's summary is its cmd");
+}
+
+#[test]
+fn alias_task() {
+    let t = Task::Alias { depends_on: vec![s("lint"), s("test")] };
+    assert_eq!(t.depends_on(), &[s("lint"), s("test")], "an Alias lends out its depends_on list");
+    assert!(!t.is_executable(), "an Alias is not directly executable");
+    assert_eq!(t.summary(), "alias: lint, test", "an Alias summary lists its dependencies");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary>
+        <p>Destructure in the patterns: <code>Task::Execute { depends_on, .. } =&gt; depends_on</code> gives you a
+          reference to the vector (because <code>self</code> is a reference), which Rust turns into a slice for the
+          return type. Two variants with a field of the same name and type can share an arm:
+          <code>Task::Execute { depends_on, .. } | Task::Alias { depends_on } =&gt; depends_on</code>.</p>
+        <p>For <code>summary</code>, <code>cmd.clone()</code> or <code>cmd.to_string()</code> turns the borrowed command into
+          an owned <code>String</code>, and <code>format!("alias: {}", depends_on.join(", "))</code> builds the alias text.</p>
+      </details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">enum Task {
+    Plain(String),
+    Execute { cmd: String, depends_on: Vec&lt;String&gt; },
+    Alias { depends_on: Vec&lt;String&gt; },
+}
+
+impl Task {
+    fn depends_on(&amp;self) -&gt; &amp;[String] {
+        match self {
+            Task::Plain(_) =&gt; &amp;[],
+            Task::Execute { depends_on, .. } | Task::Alias { depends_on } =&gt; depends_on,
+        }
+    }
+
+    fn is_executable(&amp;self) -&gt; bool {
+        match self {
+            Task::Plain(_) | Task::Execute { .. } =&gt; true,
+            Task::Alias { .. } =&gt; false,
+        }
+    }
+
+    fn summary(&amp;self) -&gt; String {
+        match self {
+            Task::Plain(cmd) | Task::Execute { cmd, .. } =&gt; cmd.clone(),
+            Task::Alias { depends_on } =&gt; format!("alias: {}", depends_on.join(", ")),
+        }
+    }
+}</code></pre>
+        <p>Compare with Pixi's <code>Task::depends_on</code> in the Reading Pixi section: same shape, same empty slice for
+          tasks with no dependencies, and no wildcard arms.</p>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m02-e5" data-title="An Environment builder">
+      <div class="exercise-prompt">
+        <p>A Pixi environment is a list of features, and it includes the <code>default</code> feature unless
+          <code>no-default-feature = true</code>. Implement:</p>
+        <ul>
+          <li><code>Environment::new(name)</code>: no extra features, <code>no_default_feature</code> false.</li>
+          <li><code>with_feature(self, feature)</code> and <code>without_default(self)</code>: <strong>builder</strong>
+            methods. Each takes <code>self</code> by value, changes it, and returns it, so calls can be chained:
+            <code>Environment::new("test").with_feature("py312").with_feature("test")</code>.</li>
+          <li><code>all_features(&amp;self) -&gt; Vec&lt;String&gt;</code>: <code>"default"</code> first (unless
+            <code>no_default_feature</code>), then the added features in the order they were added.</li>
+        </ul>
+      </div>
+<textarea class="starter">
+#[derive(Debug, Clone, PartialEq)]
+struct Environment {
+    name: String,
+    features: Vec<String>,
+    no_default_feature: bool,
+}
+
+impl Environment {
+    fn new(name: &str) -> Self {
+        todo!()
+    }
+
+    fn with_feature(self, feature: &str) -> Self {
+        todo!()
+    }
+
+    fn without_default(self) -> Self {
+        todo!()
+    }
+
+    fn all_features(&self) -> Vec<String> {
+        todo!()
+    }
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn new_environment_is_empty() {
+    let env = Environment::new("default");
+    assert_eq!(env.name, "default", "new should store the name");
+    assert!(env.features.is_empty(), "new should start with no extra features");
+    assert!(!env.no_default_feature, "new should include the default feature");
+}
+
+#[test]
+fn default_feature_comes_first() {
+    let env = Environment::new("test").with_feature("py312").with_feature("test");
+    assert_eq!(env.all_features(), vec!["default", "py312", "test"], "default first, then features in the order added");
+}
+
+#[test]
+fn without_default_drops_it() {
+    let env = Environment::new("lint").without_default().with_feature("lint");
+    assert_eq!(env.all_features(), vec!["lint"], "without_default() should leave out \"default\"");
+}
+
+#[test]
+fn builder_keeps_name() {
+    let env = Environment::new("cuda").with_feature("cuda");
+    assert_eq!(env.name, "cuda", "builder methods must not change the name");
+    assert_eq!(env.features, vec!["cuda"], "with_feature should push onto features");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary>
+        <p>A method that takes <code>self</code> owns the value, so it may change it if the parameter is declared
+          mutable: write <code>fn with_feature(mut self, feature: &amp;str) -&gt; Self</code>, then
+          <code>self.features.push(feature.to_string());</code> and end with <code>self</code>. Adding <code>mut</code>
+          there does not change the method's signature for callers.</p>
+        <p>For <code>all_features</code>: start with <code>let mut all = Vec::new();</code>, push
+          <code>"default".to_string()</code> if needed, then loop over <code>&amp;self.features</code> pushing
+          <code>f.clone()</code>.</p>
+      </details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">#[derive(Debug, Clone, PartialEq)]
+struct Environment {
+    name: String,
+    features: Vec&lt;String&gt;,
+    no_default_feature: bool,
+}
+
+impl Environment {
+    fn new(name: &amp;str) -&gt; Self {
+        Self { name: name.to_string(), features: Vec::new(), no_default_feature: false }
+    }
+
+    fn with_feature(mut self, feature: &amp;str) -&gt; Self {
+        self.features.push(feature.to_string());
+        self
+    }
+
+    fn without_default(mut self) -&gt; Self {
+        self.no_default_feature = true;
+        self
+    }
+
+    fn all_features(&amp;self) -&gt; Vec&lt;String&gt; {
+        let mut all = Vec::new();
+        if !self.no_default_feature {
+            all.push("default".to_string());
+        }
+        for f in &amp;self.features {
+            all.push(f.clone());
+        }
+        all
+    }
+}</code></pre>
+        <p>The builder pattern is common in Rust because there are no keyword arguments or default parameter values. You
+          will see it in Pixi for things like HTTP clients and solver settings. Taking <code>self</code> by value means a
+          builder chain needs no <code>mut</code> binding at all.</p>
+      </details>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="mini-project">
+    <h2>Mini-project: model a manifest with types</h2>
+    <div class="project-box">
+      <div class="widget-head"><span class="w-kind">Mini-project</span><span class="w-title">manifest-model: a small pixi.toml as Rust structs and enums</span></div>
+      <div class="widget-body">
+        <p>Design Rust types for a small piece of a <code>pixi.toml</code>, build a value by hand, and test it. This is a
+          warm-up for Capstone 1, where you will fill the same kind of types from a real TOML file.</p>
+        <pre data-label="Terminal"><code class="language-bash">pixi init manifest-model &amp;&amp; cd manifest-model
+pixi add rust
+pixi run cargo init --lib --name manifest_model
+pixi run cargo test</code></pre>
+        <p><code>--lib</code> creates <code>src/lib.rs</code> instead of <code>src/main.rs</code>. Put each group of types
+          in its own module file, as in M01.</p>
+        <p><strong>What to build</strong></p>
+        <ul>
+          <li><code>src/platform.rs</code>: <code>enum Platform { Linux64, LinuxAarch64, Osx64, OsxArm64, Win64 }</code> with
+            <code>fn subdir(&amp;self) -&gt; &amp;'static str</code> (<code>"linux-64"</code>, ...) and
+            <code>fn is_unix(&amp;self) -&gt; bool</code>, both with exhaustive matches and no <code>_</code>.</li>
+          <li><code>src/task.rs</code>: a <code>TaskName</code> newtype with <code>new</code> and <code>as_str</code>, and a
+            <code>Task</code> enum with <code>Plain(String)</code>, <code>Execute { cmd, depends_on: Vec&lt;TaskName&gt; }</code>,
+            and <code>Alias { depends_on: Vec&lt;TaskName&gt; }</code>, plus <code>depends_on(&amp;self)</code>.</li>
+          <li><code>src/workspace.rs</code>: a <code>Workspace</code> struct with <code>name: String</code>,
+            <code>version: Version</code> (your struct from exercise 2), <code>channels: Vec&lt;String&gt;</code>, and
+            <code>platforms: Vec&lt;Platform&gt;</code>, with <code>Workspace::new(name)</code> and builder methods.</li>
+          <li><code>src/lib.rs</code> declares the modules and re-exports the main types with <code>pub use</code>.</li>
+          <li>Derive <code>Debug, Clone, PartialEq</code> on every type (and <code>Copy</code> on <code>Platform</code>), and
+            write tests in each module with <code>assert_eq!</code>.</li>
+        </ul>
+        <ul class="checklist" data-id="m02-mini">
+          <li>Every <code>match</code> on your own enums lists all variants, with no <code>_</code></li>
+          <li>Adding a sixth <code>Platform</code> variant breaks the build in exactly the places that need updating (try it, then remove it)</li>
+          <li><code>TaskName</code>'s field is private; other modules use <code>as_str()</code></li>
+          <li>Method receivers are deliberate: getters take <code>&amp;self</code>, builders take <code>self</code></li>
+          <li><code>pixi run cargo test</code> passes with at least eight tests</li>
+          <li><code>pixi run cargo clippy --all-targets -- -D warnings</code> and <code>pixi run cargo fmt --check</code> pass</li>
+        </ul>
+        <p><strong>Stretch goals:</strong> add a <code>src/main.rs</code> that builds a <code>Workspace</code> and prints it
+          with <code>{:#?}</code>; add <code>enum DependencySpec { Version(String), Path(String), Git { url: String, branch:
+          String } }</code> and a <code>describe</code> method; compare your types with Pixi's <code>Task</code> and
+          <code>SpecType</code> and note what Pixi does differently.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="quiz">
+    <h2>Quiz</h2>
+    <div class="quiz" data-id="m02-quiz">
+      <script type="application/json">
+      {"title": "Types, structs and enums quiz", "passScore": 0.7, "questions": [
+        {"type": "output", "prompt": "What does this print?", "code": "fn main() {\n    let x = \"42\";\n    let x = x.len();\n    let x = x * 10;\n    println!(\"{x}\");\n}", "answer": "20",
+         "explanation": "<p>Each <code>let</code> shadows the previous <code>x</code>. <code>\"42\".len()</code> is 2 (bytes), and 2 * 10 is 20. No binding was mutated.</p>"},
+        {"type": "output", "prompt": "What does this print?", "code": "fn main() {\n    println!(\"{} {}\", 7 / 2, -7 % 3);\n}", "answer": "3 -1",
+         "explanation": "<p>Integer division truncates toward zero, and <code>%</code> keeps the sign of the left operand (Python would print <code>3 2</code>).</p>"},
+        {"type": "output", "prompt": "What does this print?", "code": "fn main() {\n    let big: i32 = 300;\n    let pi = 3.99_f64;\n    println!(\"{} {}\", big as u8, pi as i32);\n}", "answer": "44 3",
+         "explanation": "<p><code>as</code> to a smaller integer keeps the low bits (300 - 256 = 44). Float to integer rounds toward zero.</p>"},
+        {"type": "single", "prompt": "In a debug build, what happens when <code>u8</code> arithmetic computed at run time goes past 255?", "options": ["It wraps to a small number", "It panics with \"attempt to add with overflow\"", "It becomes a <code>u16</code>", "It is clamped at 255"], "answer": 1,
+         "explanation": "<p>Debug builds check for overflow and panic. Release builds wrap. Use <code>checked_add</code>, <code>saturating_add</code>, or <code>wrapping_add</code> to choose.</p>"},
+        {"type": "single", "prompt": "Does this compile?", "code": "fn main() {\n    let count: usize = 4;\n    let total: f64 = 10.0;\n    println!(\"{}\", total / count);\n}", "options": ["Yes, it prints 2.5", "No: E0277, cannot divide <code>f64</code> by <code>usize</code>", "Yes, it prints 2"], "answer": 1,
+         "explanation": "<p>Rust never converts between number types implicitly. Write <code>total / count as f64</code>.</p>"},
+        {"type": "single", "prompt": "A function only needs to read a piece of text. Which parameter type is the usual choice?", "options": ["<code>String</code>", "<code>&amp;str</code>", "<code>&amp;String</code>", "<code>char</code>"], "answer": 1,
+         "explanation": "<p><code>&amp;str</code> accepts literals and borrowed <code>String</code>s alike. Take <code>String</code> only when the function must own the text.</p>"},
+        {"type": "single", "prompt": "Does this compile?", "code": "struct Bytes(u64);\nstruct Count(u64);\n\nfn size(b: Bytes) -> u64 { b.0 }\n\nfn main() {\n    println!(\"{}\", size(Count(3)));\n}", "options": ["Yes: both wrap a <code>u64</code>", "No: E0308, expected <code>Bytes</code>, found <code>Count</code>"], "answer": 1,
+         "explanation": "<p>Newtypes are distinct types even when they wrap the same thing. That is their purpose.</p>"},
+        {"type": "multi", "prompt": "Which statements about this <code>impl</code> are true?", "code": "impl Version {\n    fn new(major: u32) -> Self { Self { major } }\n    fn major(&self) -> u32 { self.major }\n    fn bump(&mut self) { self.major += 1; }\n    fn into_major(self) -> u32 { self.major }\n}", "options": ["<code>new</code> is an associated function, called as <code>Version::new(1)</code>", "<code>bump</code> can be called on a binding declared with plain <code>let</code>", "After <code>v.into_major()</code>, <code>v</code> can no longer be used", "<code>Self</code> means <code>Version</code> here"], "answer": [0, 2, 3],
+         "explanation": "<p><code>bump</code> takes <code>&amp;mut self</code>, so the binding must be <code>let mut</code> (otherwise E0596). <code>into_major</code> takes <code>self</code> by value and consumes it.</p>"},
+        {"type": "single", "prompt": "Does this compile?", "code": "enum Kind { Plain, Execute, Alias }\n\nfn runs(k: Kind) -> bool {\n    match k {\n        Kind::Plain => true,\n        Kind::Execute => true,\n    }\n}", "options": ["Yes", "No: E0004, non-exhaustive patterns: <code>Kind::Alias</code> not covered", "No: E0308, mismatched types"], "answer": 1,
+         "explanation": "<p><code>match</code> must handle every variant. The error names the missing one.</p>"},
+        {"type": "output", "prompt": "What does this print?", "code": "fn classify(n: u32) -> &'static str {\n    match n {\n        0 => \"none\",\n        1 | 2 => \"few\",\n        n if n < 10 => \"some\",\n        _ => \"many\",\n    }\n}\n\nfn main() {\n    println!(\"{} {} {}\", classify(2), classify(9), classify(10));\n}", "answer": "few some many",
+         "explanation": "<p>Arms are tried in order. 2 matches <code>1 | 2</code>; 9 matches the guard; 10 falls through to <code>_</code>.</p>"},
+        {"type": "single", "prompt": "Why do Pixi's <code>match</code> expressions on <code>Task</code> list every variant instead of using <code>_</code>?", "options": ["<code>_</code> is not allowed on enums", "So that adding a new variant causes a compile error at every match that must decide how to handle it", "It runs faster", "rustfmt requires it"], "answer": 1,
+         "explanation": "<p>A wildcard would silently absorb new variants. Explicit arms turn \"forgot to handle the new kind\" into a compile error.</p>"},
+        {"type": "multi", "prompt": "<code>assert_eq!(a, b)</code> fails to compile for a struct type. Which derives might be missing?", "options": ["<code>Debug</code>", "<code>PartialEq</code>", "<code>Copy</code>", "<code>Clone</code>"], "answer": [0, 1],
+         "explanation": "<p><code>assert_eq!</code> compares with <code>==</code> (needs <code>PartialEq</code>) and prints both values on failure (needs <code>Debug</code>).</p>"},
+        {"type": "text", "prompt": "Which error code do you get for <code>println!(\"{x:?}\")</code> when <code>x</code>'s type does not implement <code>Debug</code>?", "answer": ["E0277"],
+         "explanation": "<p><code>E0277</code> means \"a trait is not implemented\". The <code>help:</code> suggests <code>#[derive(Debug)]</code>.</p>"},
+        {"type": "single", "prompt": "Why can Pixi's <code>SpecType</code> derive <code>Copy</code> while <code>Task</code> only derives <code>Clone</code>?", "options": ["<code>SpecType</code> is smaller in source code", "<code>SpecType</code>'s variants carry no heap data; <code>Task</code>'s variants own strings, vectors, and a <code>Box</code>", "<code>Task</code> is not public", "<code>Copy</code> only works on structs"], "answer": 1,
+         "explanation": "<p><code>Copy</code> is for types that can be duplicated by copying their bytes. Anything that owns heap memory must be cloned explicitly.</p>"}
+      ]}
+      </script>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="recap">
+    <h2>Recap</h2>
+    <ul>
+      <li>Bindings are immutable unless <code>let mut</code>. Shadowing with a new <code>let</code> creates a new binding,
+        possibly of a new type.</li>
+      <li>Integers have fixed sizes (<code>i32</code> default, <code>usize</code> for lengths). Integer division truncates.
+        Overflow panics in debug, wraps in release.</li>
+      <li>No implicit numeric conversions. <code>as</code> converts explicitly: it truncates integers, saturates floats, and
+        reinterprets signs.</li>
+      <li>Tuples group mixed types (<code>.0</code>, patterns). Arrays are <code>[T; N]</code> with a fixed length.
+        Out-of-bounds indexing panics.</li>
+      <li><code>String</code> owns text; <code>&amp;str</code> borrows it. Take <code>&amp;str</code> to read; return or
+        store <code>String</code>.</li>
+      <li>Structs have named, typed fields; newtypes make distinct types for free. <code>impl</code> blocks hold associated
+        functions (<code>new</code>) and methods taking <code>&amp;self</code>, <code>&amp;mut self</code>, or
+        <code>self</code>.</li>
+      <li>Enum variants carry their own data. <code>match</code> must be exhaustive (<code>E0004</code>); avoid
+        <code>_</code> on your own enums so new variants are caught.</li>
+      <li><code>#[derive(Debug, Clone, PartialEq)]</code> adds printing, cloning, and comparison;
+        <code>assert_eq!</code> needs <code>Debug</code> and <code>PartialEq</code>.</li>
+    </ul>
+    <div class="flashcards" data-title="Types, structs and enums">
+      <script type="application/json">
+      [{"front": "<code>let</code> vs <code>let mut</code> vs shadowing", "back": "<code>let</code> cannot change; <code>let mut</code> can; a second <code>let x</code> makes a new binding that hides the old one, possibly with a new type."},
+       {"front": "Default integer and float types", "back": "<code>i32</code> and <code>f64</code>. Lengths and indexes are <code>usize</code>."},
+       {"front": "Integer overflow", "back": "Panics in debug builds, wraps in release builds. Choose explicitly with <code>checked_*</code>, <code>saturating_*</code>, <code>wrapping_*</code>."},
+       {"front": "<code>300i32 as u8</code>", "back": "44: casting to a smaller integer keeps the low bits. <code>as</code> never fails."},
+       {"front": "<code>[T; N]</code> vs <code>Vec&lt;T&gt;</code>", "back": "An array has a fixed length that is part of its type; a <code>Vec</code> can grow."},
+       {"front": "<code>String</code> vs <code>&amp;str</code>", "back": "<code>String</code> owns heap text and can grow; <code>&amp;str</code> is a borrowed view. Read with <code>&amp;str</code>, own with <code>String</code>."},
+       {"front": "Newtype", "back": "A one-field tuple struct, such as <code>struct TaskName(String);</code>: a distinct type with no run-time cost."},
+       {"front": "Associated function vs method", "back": "No <code>self</code> parameter: associated function, <code>Type::f()</code>. With <code>&amp;self</code>/<code>&amp;mut self</code>/<code>self</code>: method, <code>value.f()</code>."},
+       {"front": "<code>self</code> vs <code>Self</code>", "back": "<code>self</code> is the value the method was called on; <code>Self</code> is the type being implemented."},
+       {"front": "<code>E0004</code>", "back": "Non-exhaustive patterns: a <code>match</code> does not cover every possible value. The error names the missing pattern."},
+       {"front": "Why avoid <code>_</code> on your own enums?", "back": "A wildcard absorbs new variants silently; explicit arms make the compiler point at every place that must handle a new variant."},
+       {"front": "<code>assert_eq!</code> on your type needs...", "back": "<code>PartialEq</code> (to compare) and <code>Debug</code> (to print on failure). Missing <code>Debug</code> is <code>E0277</code>; missing <code>==</code> is <code>E0369</code>."}]
+      </script>
+    </div>
+    <h3>Going further</h3>
+    <ul>
+      <li>The Rust Book: <a href="https://doc.rust-lang.org/book/ch03-00-common-programming-concepts.html">chapter 3, Common Programming Concepts</a>, <a href="https://doc.rust-lang.org/book/ch05-00-structs.html">chapter 5, Structs</a>, and <a href="https://doc.rust-lang.org/book/ch06-00-enums.html">chapter 6, Enums and Pattern Matching</a></li>
+      <li>Rust by Example: <a href="https://doc.rust-lang.org/rust-by-example/primitives.html">Primitives</a>, <a href="https://doc.rust-lang.org/rust-by-example/types/cast.html">Casting</a>, <a href="https://doc.rust-lang.org/rust-by-example/custom_types.html">Custom types</a>, and <a href="https://doc.rust-lang.org/rust-by-example/flow_control/match.html">match</a></li>
+      <li>The std docs for <a href="https://doc.rust-lang.org/std/primitive.u32.html"><code>u32</code></a> (every integer method, including <code>checked_add</code>) and <a href="https://doc.rust-lang.org/std/string/struct.String.html"><code>String</code></a></li>
+      <li>The Rust Reference: <a href="https://doc.rust-lang.org/reference/expressions/operator-expr.html#type-cast-expressions">type cast expressions</a> (every rule for <code>as</code>) and <a href="https://doc.rust-lang.org/reference/patterns.html">patterns</a></li>
+      <li>Pixi: <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/task.rs"><code>pixi_manifest/src/task.rs</code></a> (the whole <code>Task</code> model) and <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/spec_type.rs"><code>spec_type.rs</code></a></li>
+      <li>Next: <a href="m03-ownership-borrowing.html">M03 Ownership &amp; Borrowing</a>, where <code>String</code> vs <code>&amp;str</code>, <code>self</code> vs <code>&amp;self</code>, and <code>Copy</code> vs <code>Clone</code> all get explained</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

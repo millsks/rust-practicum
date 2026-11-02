@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pixi Codebase Map · Rust Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-rust.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-page="ref-pixi-map">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Reference · The Pixi source</p>
+    <h1>Pixi Codebase Map</h1>
+    <p class="lede">Pixi is one Cargo workspace with sixty crates under <code>crates/</code>. This page groups them by
+      job, shows how the main ones depend on each other, and tells you where to start reading when you have a
+      question. Every link points at the frozen snapshot the course reads, so line numbers never drift.</p>
+    <div class="lesson-meta"><span>⏱ Keep it open while you read Pixi</span><span>Snapshot <a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5"><code>451aa959</code></a></span></div>
+    <ul class="objectives">
+      <li>Know what each crate in <code>crates/</code> is for, grouped by layer</li>
+      <li>Follow the main dependency flow from the <code>pixi</code> binary down to the manifest and rattler</li>
+      <li>Find the starting file for common questions such as "how is <code>pixi.toml</code> parsed?"</li>
+      <li>Know the toolchain and house tooling: <code>rust-toolchain</code>, <code>clippy.toml</code>, <code>deny.toml</code>, <code>lefthook.yaml</code>, <code>typos.toml</code></li>
+      <li>See which course module prepares you for each area</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="snapshot">
+    <h2>The snapshot and the workspace</h2>
+    <p>The course pins Pixi at commit
+      <a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5"><code>451aa9596402530f1a4d8a50b5fe137570ad42a5</code></a>
+      (pixi 0.81.0 development, 2026-09-18). All permalinks have the form
+      <code>https://github.com/prefix-dev/pixi/blob/451aa959.../&lt;path&gt;#L&lt;start&gt;-L&lt;end&gt;</code>.</p>
+    <p>A <dfn>workspace</dfn> is a set of Cargo packages built together with one <code>Cargo.lock</code> and one
+      <code>target/</code> directory. Pixi's root
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/Cargo.toml#L1-L16"><code>Cargo.toml</code></a>
+      declares <code>members = ["crates/*"]</code> and excludes <code>crates/pixi_allocator</code> (it is only pulled in
+      by a feature), so 59 of the 60 directories are workspace members. The
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/Cargo.toml#L18-L25"><code>[workspace.package]</code></a>
+      table sets <code>edition = "2024"</code>, <code>rust-version = "1.90"</code>, and the BSD-3-Clause license for
+      every crate, and
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/Cargo.toml#L27"><code>[workspace.dependencies]</code></a>
+      pins every third-party version once, which each crate then uses with <code>{ workspace = true }</code>.
+      <a href="../modules/m01-cargo-crates-modules.html">M01</a> teaches workspaces and
+      <a href="../modules/m10-crate-design.html">M10</a> teaches why a project is split this way.</p>
+    <aside class="callout note"><p>Directory names use underscores; seven backend packages use hyphens in their
+      package name (for example the <code>crates/pixi_build_python</code> directory builds the package
+      <code>pixi-build-python</code>). Cargo turns hyphens into underscores for the crate name in code, so
+      <code>use pixi_build_backend::...</code> and the package <code>pixi_build_backend</code> match exactly.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="flow">
+    <h2>The main dependency flow</h2>
+    <p>An arrow means "depends on" in that crate's <code>[dependencies]</code>. Only the main crates are shown; every
+      crate also uses small utility crates such as <code>pixi_consts</code> and <code>pixi_utils</code>. Read it top to
+      bottom: the binary is a thin shell, the CLI turns arguments into calls, <code>pixi_core</code> orchestrates, and
+      the manifest, the command dispatcher, and rattler do the work.</p>
+    <pre class="mermaid">
+flowchart TD
+  pixi[pixi binary] --> cli[pixi_cli]
+  cli --> api[pixi_api]
+  cli --> task[pixi_task]
+  cli --> global[pixi_global]
+  cli --> core[pixi_core]
+  api --> core
+  task --> core
+  global --> core
+  core --> manifest[pixi_manifest]
+  core --> dispatcher[pixi_command_dispatcher]
+  core --> pypi[pixi_install_pypi]
+  core --> rlock[(rattler_lock)]
+  dispatcher --> engine[pixi_compute_engine]
+  dispatcher --> sources[pixi_compute_sources]
+  dispatcher --> frontend[pixi_build_frontend]
+  dispatcher --> rsolve[(rattler_solve and repodata gateway)]
+  sources --> engine
+  frontend --> btypes[pixi_build_types]
+  manifest --> spec[pixi_spec]
+  manifest --> ptoml[pixi_toml]
+  manifest --> ptedit[pixi_toml_edit]
+  spec --> ptoml
+  backend[pixi_build_backend] --> btypes
+  backends[pixi-build-python, -rust, -cmake, ...] --> backend
+</pre>
+    <p>Rounded boxes are rattler crates from crates.io, not workspace members. The edges were read from each crate's
+      <code>Cargo.toml</code>: for example
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_core/Cargo.toml#L59-L67"><code>pixi_core/Cargo.toml</code></a>
+      pulls in <code>rattler_lock</code>, <code>rattler_solve</code>, and <code>rattler_repodata_gateway</code>, and
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_command_dispatcher/Cargo.toml#L42-L51"><code>pixi_command_dispatcher/Cargo.toml</code></a>
+      enables the <code>resolvo</code> feature of <code>rattler_solve</code>.</p>
+    <aside class="callout think"><p>Notice that <code>pixi_manifest</code> depends on nothing above it. That is a
+      deliberate layering rule: the manifest crate can be tested, and reused, without the solver, the network, or the
+      CLI. When you add code, put it in the lowest crate that has everything it needs.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="crates">
+    <h2>Every crate, by group</h2>
+    <p>Descriptions come from each crate's <code>Cargo.toml</code> <code>description</code> and its <code>lib.rs</code>
+      or <code>main.rs</code> doc comments. Crate names link to the crate's directory at the snapshot.</p>
+
+    <h3 id="group-cli">CLI and entry points</h3>
+    <table>
+      <thead><tr><th>Crate</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi"><code>pixi</code></a></td><td>The binary ("A package management and workflow tool"). Its <code>main</code> builds a tokio runtime on a thread with a larger stack and runs <code>pixi_cli::execute()</code>.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_cli"><code>pixi_cli</code></a></td><td>The command-line interface: the clap <code>Command</code> enum, one module per subcommand (<code>add</code>, <code>run</code>, <code>install</code>, ...), and <code>execute_command</code>, which dispatches to them.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_api"><code>pixi_api</code></a></td><td>A programmatic API over workspaces (add, remove, tasks, environments, platforms). It is generic over an <code>Interface</code> trait for prompts and messages, so the same logic serves the CLI and other front ends.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_docs"><code>pixi_docs</code></a></td><td>"Documentation binary that is used to generate documentation for pixi", mainly the CLI reference pages.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/xtask"><code>xtask</code></a></td><td>Development tasks for the workspace; at the snapshot, generating the JSON Schema for <code>pixi_build_types</code>.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_allocator"><code>pixi_allocator</code></a></td><td>"The best memory allocator for different platforms", linked into the binary only when its feature is on. Excluded from workspace-wide commands.</td></tr>
+      </tbody>
+    </table>
+
+    <h3 id="group-core">Core orchestration</h3>
+    <table>
+      <thead><tr><th>Crate</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_core"><code>pixi_core</code></a></td><td>The heart of Pixi: <code>Workspace</code> and <code>WorkspaceLocator</code> (finding and loading a workspace), <code>WorkspaceMut</code> (changing it), environments, activation, and <code>lock_file</code> (checking whether <code>pixi.lock</code> is up to date and updating it).</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_task"><code>pixi_task</code></a></td><td>"Task execution with dependency graphs and caching": the <code>TaskGraph</code> built from <code>depends-on</code>, <code>ExecutableTask</code>, and input/output hashing to skip up-to-date tasks.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_diff"><code>pixi_diff</code></a></td><td>The differences between two lock files (<code>LockFileDiff</code>), printed after updates.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_config"><code>pixi_config</code></a></td><td>"The global configuration for use in a pixi project": <code>config.toml</code> at system, user, and workspace level.</td></tr>
+      </tbody>
+    </table>
+
+    <h3 id="group-manifest">Manifest, specs, and TOML</h3>
+    <table>
+      <thead><tr><th>Crate</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest"><code>pixi_manifest</code></a></td><td>Parses <code>pixi.toml</code> and <code>pyproject.toml</code> into typed structs (features, environments, targets, tasks, solve groups) and edits the TOML document in place. Discovery of the manifest file lives here too.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_spec"><code>pixi_spec</code></a></td><td>"A Rust representation of a Pixi spec": a dependency that is a version from a channel, or a source (git, path, url) to build.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_spec_containers"><code>pixi_spec_containers</code></a></td><td>Dependency maps where one package name can carry several requirements, used when the dependencies of several features are combined.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_pypi_spec"><code>pixi_pypi_spec</code></a></td><td>PyPI requirements in the manifest: registry, git, path, or URL sources, and package names.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_record"><code>pixi_record</code></a></td><td>"A superset of conda repodata records which can also represent dependencies from source."</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_toml"><code>pixi_toml</code></a></td><td>Helpers for parsing TOML with <code>toml-span</code>, which keeps the source span of every value so errors can point at it.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_toml_edit"><code>pixi_toml_edit</code></a></td><td>"Formatting-preserving edit helpers for <code>toml_edit</code>": inserting or replacing an entry while keeping the document's existing style.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_variant"><code>pixi_variant</code></a></td><td>Variant values for conda-build variant configurations (build matrices such as several Python versions).</td></tr>
+      </tbody>
+    </table>
+
+    <h3 id="group-dispatcher">Command dispatcher and compute engine</h3>
+    <table>
+      <thead><tr><th>Crate</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_command_dispatcher"><code>pixi_command_dispatcher</code></a></td><td>The <code>CommandDispatcher</code>: a handle for running a graph of interdependent operations (solve, check out source, build, install) concurrently without doing the same work twice.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_compute_engine"><code>pixi_compute_engine</code></a></td><td>"Generic incremental computation engine": you define a <code>Key</code> (a unit of work with an associated <code>Value</code>); the <code>ComputeEngine</code> deduplicates concurrent requests, caches results, and detects cycles.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_compute_sources"><code>pixi_compute_sources</code></a></td><td>"Source-spec resolution and checkout Keys for the pixi compute engine."</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_compute_cache_dirs"><code>pixi_compute_cache_dirs</code></a></td><td>"Engine-tracked cache-directory lookup."</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_compute_env_vars"><code>pixi_compute_env_vars</code></a></td><td>"Engine-tracked environment-variable lookup."</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_compute_network"><code>pixi_compute_network</code></a></td><td>"Engine-side accessors for shared network infrastructure" (at the snapshot, mainly the shared HTTP client).</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_compute_reporters"><code>pixi_compute_reporters</code></a></td><td>"Operation-id reporting context shared by pixi reporter implementations."</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/barrier_cell"><code>barrier_cell</code></a></td><td>"An async synchronization primitive that enables waiting for a result to become available."</td></tr>
+      </tbody>
+    </table>
+
+    <h3 id="group-build">Build system (pixi build)</h3>
+    <table>
+      <thead><tr><th>Crate</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_build_frontend"><code>pixi_build_frontend</code></a></td><td>"Sets up environments to use for building of pixi.toml files" and talks to a build backend process.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_build_discovery"><code>pixi_build_discovery</code></a></td><td>"Discover the build backend from a source tree."</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_build_types"><code>pixi_build_types</code></a></td><td>"The types for communicating between the pixi build frontend and backend": the protocol both sides compile against.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_build_type_conversions"><code>pixi_build_type_conversions</code></a></td><td>"Conversions from pixi manifest types into build protocol types."</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_build_backend"><code>pixi_build_backend</code></a></td><td>The shared library every backend is built on: the backend server and protocol, recipe generation, and the rattler-build integration.</td></tr>
+        <tr><td>Backends: <a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_build_python"><code>pixi-build-python</code></a>, <a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_build_rust"><code>pixi-build-rust</code></a>, <a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_build_cmake"><code>pixi-build-cmake</code></a>, <a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_build_r"><code>pixi-build-r</code></a>, <a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_build_ros"><code>pixi-build-ros</code></a>, <a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_build_mojo"><code>pixi-build-mojo</code></a>, <a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_build_rattler_build"><code>pixi-build-rattler-build</code></a></td><td>One binary per language or recipe format. Each generates a recipe for its kind of project and builds it into a conda package.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_build_backend_passthrough"><code>pixi_build_backend_passthrough</code></a></td><td>"A passthrough build backend for testing purposes."</td></tr>
+      </tbody>
+    </table>
+
+    <h3 id="group-install">Environment install, PyPI, and uv</h3>
+    <table>
+      <thead><tr><th>Crate</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_install_pypi"><code>pixi_install_pypi</code></a></td><td>Installs the locked PyPI packages into an environment's prefix, using uv's installer, and cleans up when the Python interpreter changes.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_uv_context"><code>pixi_uv_context</code></a></td><td>Shared uv objects (caches, clients, concurrency settings from config and <code>UV_*</code> variables) reused across resolutions.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_uv_conversions"><code>pixi_uv_conversions</code></a></td><td>"Conversion between pixi and uv types."</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_python_status"><code>pixi_python_status</code></a></td><td>How the Python interpreter in a prefix changed between two transactions, which decides whether site-packages must be rebuilt.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pypi_mapping"><code>pypi_mapping</code></a></td><td>Maps PyPI packages to the conda packages that provide them, using the parselmouth project.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pypi_modifiers"><code>pypi_modifiers</code></a></td><td>An interpretation of PyPI environment markers and wheel tags for Pixi's platforms.</td></tr>
+      </tbody>
+    </table>
+
+    <h3 id="group-global">pixi global</h3>
+    <table>
+      <thead><tr><th>Crate</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_global"><code>pixi_global</code></a></td><td>Everything behind <code>pixi global</code>: the global manifest, one environment per tool, exposed executables via trampolines, shell completions, and the listing and reporting of installs.</td></tr>
+      </tbody>
+    </table>
+
+    <h3 id="group-utils">Utilities</h3>
+    <table>
+      <thead><tr><th>Crate</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_consts"><code>pixi_consts</code></a></td><td>Shared constants: manifest file names, the default environment name, styles, version strings.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_utils"><code>pixi_utils</code></a></td><td>"Misc features that could not be placed in other crates": the reqwest client setup, conda prefixes, caching, and atomic writes.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_path"><code>pixi_path</code></a></td><td>"Type-safe path wrappers with guarantees about absolute paths and directories."</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_glob"><code>pixi_glob</code></a></td><td>Glob patterns and their caching (task inputs and outputs, build sources).</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_git"><code>pixi_git</code></a></td><td>"The code to interact with git": fetching and checking out git sources.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_url"><code>pixi_url</code></a></td><td>Downloading and unpacking archives from URLs, mirroring the structure of <code>pixi_git</code>.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_auth"><code>pixi_auth</code></a></td><td>"Authentication utilities": one place that configures credentials for HTTP clients.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_stable_hash"><code>pixi_stable_hash</code></a></td><td>"Utilities for building stable hash implementations": hashes that do not change between runs or versions, for cache keys.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_progress"><code>pixi_progress</code></a></td><td>The global <code>indicatif</code> multi-progress bar and a macro that prints without breaking it.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_reporters"><code>pixi_reporters</code></a></td><td>"Progress reporting infrastructure for pixi": the progress-bar reporters for repodata fetching, downloads, git checkouts, uv, and environment syncs.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/fancy_display"><code>fancy_display</code></a></td><td>"Easy conversion into a styled object": a trait for printing names with console colors.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_script_shell"><code>pixi_script_shell</code></a></td><td>The mini-shell that runs <code>conda-script</code> entrypoints: quoting, <code>${VAR}</code>, <code>$(...)</code>, and <code>&amp;&amp;</code>, nothing more.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_pty"><code>pixi_pty</code></a></td><td>A Unix pseudo-terminal session, used by <code>pixi shell</code>.</td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_test_utils"><code>pixi_test_utils</code></a></td><td>Test helpers: git repository fixtures, mock repodata, and formatting errors and diagnostics for snapshot tests.</td></tr>
+      </tbody>
+    </table>
+    <aside class="callout note"><p>Outside <code>crates/</code>, the snapshot also has <code>pixi-build-backends/</code>
+      (recipes and scripts for releasing the backends), <code>trampoline/</code> (the small launcher binary used by
+      <code>pixi global</code>), <code>tests/</code> (Python integration tests that drive the built binary), and
+      <code>docs/</code>. All are excluded from the Cargo workspace.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="where-to-start">
+    <h2>Where to start reading</h2>
+    <p>Each answer gives the first file to open and the item to look for. Read the function signature and doc comment
+      first, then follow the calls one level down.</p>
+
+    <h3 id="parse-manifest">How is <code>pixi.toml</code> parsed?</h3>
+    <ol>
+      <li>Discovery: <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_core/src/workspace/discovery.rs#L79"><code>WorkspaceLocator</code></a>
+        in <code>pixi_core</code> and its
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_core/src/workspace/discovery.rs#L264"><code>locate</code></a>
+        method, which uses
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/discovery.rs#L1-L32"><code>WorkspaceDiscoverer</code></a>
+        in <code>pixi_manifest</code> to walk up the directory tree.</li>
+      <li>Parsing: the
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/toml/mod.rs#L47-L60"><code>FromTomlStr</code></a>
+        trait has a blanket implementation for every type that implements <code>toml_span::Deserialize</code>. It parses
+        the text into a spanned value tree, then deserializes it.</li>
+      <li>The raw shape:
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/toml/manifest.rs#L47"><code>TomlManifest</code></a>
+        and its hand-written
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/toml/manifest.rs#L869"><code>toml_span::Deserialize</code> impl</a>,
+        with the other <code>Toml*</code> types in
+        <a href="https://github.com/prefix-dev/pixi/tree/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/toml"><code>pixi_manifest/src/toml/</code></a>.
+        Helpers for maps, sets, and "one or many" values are in
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_toml/src/lib.rs#L1-L8"><code>pixi_toml</code></a>.</li>
+      <li>The typed result:
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/manifests/workspace.rs#L60-L75"><code>WorkspaceManifest::from_toml_str_with_base_dir</code></a>
+        calls <code>TomlManifest::from_toml_str</code>, then <code>into_workspace_manifest</code>, which validates
+        features, environments, and targets and produces the struct the rest of Pixi uses.</li>
+    </ol>
+    <p>Prepares you: <a href="../modules/m02-types-structs-enums.html">M02</a> (structs and enums),
+      <a href="../modules/m04-option-result.html">M04</a> (errors and <code>?</code>),
+      <a href="../modules/m06-traits-generics.html">M06</a> (blanket impls, <code>FromStr</code>), and
+      <a href="../projects/c1-manifest-reader.html">Capstone 1</a>, which builds a small version of exactly this.</p>
+
+    <h3 id="pixi-add">How does <code>pixi add</code> work?</h3>
+    <ol>
+      <li><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi/src/main.rs#L7-L51"><code>pixi/src/main.rs</code></a>
+        starts a tokio runtime on a thread named <code>main2</code> and awaits <code>pixi_cli::execute()</code>.</li>
+      <li>clap parses arguments into the
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_cli/src/lib.rs#L168-L173"><code>Command</code></a>
+        enum, and
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_cli/src/lib.rs#L366-L375"><code>execute_command</code></a>
+        matches <code>Command::Add(cmd)</code> to <code>add::execute(cmd)</code>.</li>
+      <li><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_cli/src/add.rs#L408-L416"><code>add::execute</code></a>
+        locates the workspace with <code>WorkspaceLocator::for_cli()</code>, then for conda packages
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_cli/src/add.rs#L490-L502">calls <code>add_conda_deps</code></a>
+        on a <code>pixi_api</code> context.</li>
+      <li><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_api/src/context.rs#L475-L490"><code>WorkspaceContext::add_conda_deps</code></a>
+        forwards to
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_api/src/workspace/add/mod.rs#L19-L126"><code>add_conda_dep</code></a>,
+        which calls <code>WorkspaceMut::update_dependencies</code>, then saves the manifest on success or reverts it on
+        error.</li>
+      <li><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_core/src/workspace/workspace_mut.rs#L366-L375"><code>update_dependencies</code></a>
+        in <code>pixi_core</code> does three things, as its doc comment says: edit the manifest, update the lock file,
+        and pin packages that were added without a version. The edit is
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_core/src/workspace/workspace_mut.rs#L399-L406"><code>self.manifest().add_dependency(...)</code></a>.</li>
+      <li>In <code>pixi_manifest</code>,
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/manifests/workspace.rs#L1451-L1460"><code>WorkspaceManifest::add_dependency</code></a>
+        changes the typed manifest and the TOML document together; the document side,
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/manifests/document.rs#L530-L533"><code>ManifestDocument::add_dependency</code></a>,
+        uses the format-preserving helpers in
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_toml_edit/src/lib.rs#L1-L12"><code>pixi_toml_edit</code></a>.</li>
+      <li>The lock file:
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_core/src/workspace/workspace_mut.rs#L548-L556"><code>UpdateContext::builder</code></a>
+        receives a <code>CommandDispatcher</code>, the
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_core/src/lock_file/update.rs#L1614"><code>UpdateContext</code></a>
+        in <code>pixi_core::lock_file</code> re-solves the affected environments and platforms, and
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_core/src/workspace/workspace_mut.rs#L620-L627"><code>write_to_disk</code></a>
+        writes <code>pixi.lock</code>.</li>
+      <li>The solve itself runs through the
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_command_dispatcher/src/lib.rs#L1-L40">command dispatcher</a>
+        and the
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_compute_engine/src/lib.rs#L1-L6">compute engine</a>,
+        which call rattler's repodata gateway and solver.</li>
+    </ol>
+    <p>Prepares you: <a href="../modules/m08-smart-pointers.html">M08</a> (<code>Arc</code> and shared state),
+      <a href="../modules/m06-traits-generics.html">M06</a> (the <code>Interface</code> and <code>Key</code> traits), and
+      Level 2 Stages 3-5 (clap, miette, toml_edit, async). Stage 7 of the <a href="roadmap.html#stage-7">roadmap</a>
+      walks this path in detail.</p>
+
+    <h3 id="run-tasks">Where are tasks run?</h3>
+    <ol>
+      <li><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_cli/src/run.rs#L169"><code>run::execute</code></a>
+        in <code>pixi_cli</code> is the entry point for <code>pixi run</code>. It builds the graph with
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_cli/src/run.rs#L432"><code>TaskGraph::from_cmd_args</code></a>.</li>
+      <li><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_task/src/task_graph.rs#L180"><code>TaskGraph</code></a>
+        in <code>pixi_task</code> resolves names and <code>depends-on</code> edges into an ordered graph
+        (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_task/src/task_graph.rs#L226"><code>from_cmd_args</code></a>).</li>
+      <li><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_task/src/executable_task.rs#L94"><code>ExecutableTask</code></a>
+        runs one task in its environment
+        (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_task/src/executable_task.rs#L278"><code>execute_with_pipes</code></a>);
+        caching of up-to-date tasks lives in
+        <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_task/src/task_hash.rs"><code>task_hash.rs</code></a>.</li>
+    </ol>
+    <p>Prepares you: <a href="../modules/m05-collections-iterators.html">M05</a> and
+      <a href="../modules/m09-closures-iterators.html">M09</a> (graph building is iterator-heavy),
+      <a href="../modules/m07-lifetimes.html">M07</a> (<code>TaskGraph&lt;'p&gt;</code> borrows the workspace), and
+      the task-ordering part of <a href="../projects/c1-manifest-reader.html">Capstone 1</a>.</p>
+
+    <h3 id="more-questions">Other common questions</h3>
+    <table>
+      <thead><tr><th>Question</th><th>Start here</th></tr></thead>
+      <tbody>
+        <tr><td>What are all the subcommands?</td><td><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_cli/src/lib.rs#L1-L9"><code>pixi_cli/src/lib.rs</code></a>: the module list and the <code>Command</code> enum</td></tr>
+        <tr><td>Why does Pixi run on a second thread?</td><td>The stack-size comment in <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi/src/main.rs#L8-L32"><code>pixi/src/main.rs</code></a></td></tr>
+        <tr><td>How is the lock file diffed after an update?</td><td><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_diff/src/lib.rs#L32-L38"><code>LockFileDiff::from_lock_files</code></a></td></tr>
+        <tr><td>How does a front end ask the user a question?</td><td>The <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_api/src/interface.rs#L4-L11"><code>Interface</code></a> trait in <code>pixi_api</code></td></tr>
+        <tr><td>How do I format an error for a snapshot test?</td><td><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_test_utils/src/lib.rs"><code>format_parse_error</code> and <code>format_diagnostic</code></a> in <code>pixi_test_utils</code></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="lesson-section" id="tooling">
+    <h2>Toolchain and house tooling</h2>
+    <table>
+      <thead><tr><th>File</th><th>What it sets</th><th>Taught in</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/rust-toolchain#L1"><code>rust-toolchain</code></a></td><td>The exact compiler, <code>1.95.0</code>. The course pins the same version.</td><td><a href="../modules/m00-orientation.html">M00</a></td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/Cargo.toml#L18-L25"><code>Cargo.toml</code> <code>[workspace.package]</code></a></td><td><code>edition = "2024"</code> and <code>rust-version = "1.90"</code>, the MSRV (the oldest compiler the code promises to build with).</td><td><a href="../modules/m01-cargo-crates-modules.html">M01</a></td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/clippy.toml#L1-L30"><code>clippy.toml</code></a></td><td>Clippy configuration. <code>disallowed-methods</code> bans the <code>std::fs</code> functions (use the <code>fs-err</code> crate, whose errors include the path); <code>allow-unwrap-in-tests</code> permits <code>unwrap</code> in tests; <code>ignore-interior-mutability</code> silences <code>mutable_key_type</code> for two types used as keys.</td><td><a href="../modules/m11-testing.html">M11</a></td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/deny.toml#L1-L49"><code>deny.toml</code></a></td><td>Configuration for <code>cargo deny</code>: the licenses a dependency may have, and clarifications for crates whose license files are not detected.</td><td><a href="../modules/m10-crate-design.html">M10</a></td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/lefthook.yaml#L20-L80"><code>lefthook.yaml</code></a></td><td>Git hooks. <code>pre-commit</code> runs fast checks in parallel (cargo-fmt, cargo-shear, ruff, tombi, dprint, typos, and more); <code>pre-push</code> runs cargo-clippy, cargo-deny, and an OpenSSL check.</td><td><a href="../modules/m11-testing.html">M11</a></td></tr>
+        <tr><td><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/typos.toml#L1-L24"><code>typos.toml</code></a></td><td>The <code>typos</code> spell checker: excluded paths (including <code>*.snap</code> files) and identifiers that look like typos but are not.</td><td>Level 3, Stage 8</td></tr>
+      </tbody>
+    </table>
+
+    <h3 id="pixi-tasks">Building and testing Pixi with Pixi</h3>
+    <p>Pixi is developed with Pixi. Its
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/pixi.toml#L56-L66"><code>rust</code> feature</a>
+      adds <code>rust-src</code> 1.95 and points <code>CARGO_TARGET_DIR</code> at <code>target/pixi</code>, and the
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/pixi.toml#L537-L596"><code>rust-test</code> environment</a>
+      defines the tasks you use day to day:</p>
+    <table>
+      <thead><tr><th>Task</th><th>Runs</th></tr></thead>
+      <tbody>
+        <tr><td><code>pixi run build-debug</code></td><td><code>cargo build --workspace --bin pixi</code></td></tr>
+        <tr><td><code>pixi run build-release</code></td><td><code>cargo build --workspace --bin pixi --release</code></td></tr>
+        <tr><td><code>pixi run test-fast</code></td><td><code>cargo nextest run --workspace --all-targets</code> with <code>RUST_LOG="debug,resolvo=info"</code></td></tr>
+        <tr><td><code>pixi run test-slow</code></td><td>The same, plus the <code>slow_integration_tests</code> and <code>online_tests</code> features</td></tr>
+        <tr><td><code>pixi run insta</code></td><td><code>cargo insta</code> (pass a subcommand, for example <code>pixi run insta review</code>)</td></tr>
+      </tbody>
+    </table>
+    <p>The <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/pixi.toml#L83-L92"><code>dev</code> feature</a>
+      adds <code>cargo-nextest</code> and the <code>insta-review</code> task (<code>cargo insta review --workspace</code>).
+      The <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/pixi.toml#L251-L270"><code>default</code> environment's tasks</a>
+      include <code>cargo-clippy</code> (<code>cargo clippy --all-targets --workspace -- -D warnings</code>) and
+      <code>cargo-fmt</code>, and the
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/pixi.toml#L381-L400"><code>lefthook</code> environment</a>
+      defines <code>pixi run lint</code>, which runs every lefthook job on all files.</p>
+    <aside class="callout pro"><p>Before you open a pull request against Pixi, run <code>pixi run lint</code> and
+      <code>pixi run test-fast</code>, and review any changed snapshots with <code>pixi run insta-review</code>. Those
+      three commands are what CI and reviewers will check first.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="by-module">
+    <h2>Which module prepares you for which area</h2>
+    <table>
+      <thead><tr><th>Area of the codebase</th><th>Prepares you</th></tr></thead>
+      <tbody>
+        <tr><td>The workspace layout, <code>Cargo.toml</code> files, <code>[workspace.dependencies]</code></td><td><a href="../modules/m01-cargo-crates-modules.html">M01</a>, <a href="../modules/m10-crate-design.html">M10</a></td></tr>
+        <tr><td><code>pixi_manifest</code> types: features, environments, targets, tasks</td><td><a href="../modules/m02-types-structs-enums.html">M02</a>, <a href="../modules/m05-collections-iterators.html">M05</a>, <a href="../projects/c1-manifest-reader.html">Capstone 1</a></td></tr>
+        <tr><td>Error types everywhere (<code>TomlError</code>, <code>WorkspaceLocatorError</code>, <code>miette::Result</code>)</td><td><a href="../modules/m04-option-result.html">M04</a>, then Level 2 Stage 3</td></tr>
+        <tr><td><code>pixi_spec</code>, <code>pixi_spec_containers</code>, <code>pixi_record</code></td><td><a href="../modules/m02-types-structs-enums.html">M02</a>, <a href="../modules/m06-traits-generics.html">M06</a> (conversion traits)</td></tr>
+        <tr><td><code>pixi_core::Workspace</code> and environments that borrow it</td><td><a href="../modules/m03-ownership-borrowing.html">M03</a>, <a href="../modules/m07-lifetimes.html">M07</a></td></tr>
+        <tr><td><code>pixi_command_dispatcher</code>, <code>pixi_compute_engine</code>, <code>barrier_cell</code></td><td><a href="../modules/m06-traits-generics.html">M06</a>, <a href="../modules/m08-smart-pointers.html">M08</a>, then Level 2 Stage 5</td></tr>
+        <tr><td><code>pixi_task</code> graphs and long iterator chains anywhere</td><td><a href="../modules/m05-collections-iterators.html">M05</a>, <a href="../modules/m09-closures-iterators.html">M09</a></td></tr>
+        <tr><td>Cargo features such as <code>slow_integration_tests</code> and <code>default-features = false</code> on rattler</td><td><a href="../modules/m10-crate-design.html">M10</a></td></tr>
+        <tr><td>Tests, snapshots, nextest, clippy</td><td><a href="../modules/m11-testing.html">M11</a></td></tr>
+        <tr><td><code>pixi_cli</code> (clap), <code>pixi_toml</code>/<code>pixi_toml_edit</code>, async code</td><td>Level 2, Stages 3-5 (see the <a href="roadmap.html">roadmap</a>)</td></tr>
+        <tr><td>rattler crates, the <code>pixi add</code> path, contributing</td><td>Level 3, Stages 6-8</td></tr>
+      </tbody>
+    </table>
+  </section>
+</main>
+</body>
+</html>

@@ -1,0 +1,1442 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M09 · Closures &amp; Iterator Chains · Rust Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-rust.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-module="m09">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Stage 2 · Idiomatic Rust · Module 09</p>
+    <h1>Closures &amp; Iterator Chains</h1>
+    <p class="lede">Open almost any function in Pixi and you will find a closure passed to <code>map</code>, a
+      chain of six iterator adapters ending in <code>collect</code>, or a helper that takes <code>impl Fn</code>.
+      This module explains what a closure captures and why that decides which of the three closure traits it
+      implements, how to write your own iterator, and how to read the long chains that fill the codebase without
+      losing track of the types.</p>
+    <div class="lesson-meta"><span>⏱ ~2 hours</span><span>Prerequisites: <a href="m05-collections-iterators.html">M05 Collections &amp; Iterators</a>, <a href="m06-traits-generics.html">M06 Traits &amp; Generics</a>, <a href="m08-smart-pointers.html">M08 Smart Pointers</a></span></div>
+    <ul class="objectives">
+      <li>Write closures with and without type annotations, and explain why each closure has its own unique type</li>
+      <li>Predict whether a closure captures by shared reference, mutable reference, or by value, and what <code>move</code> changes</li>
+      <li>Choose between <code>Fn</code>, <code>FnMut</code>, and <code>FnOnce</code> bounds, and read the errors you get when you choose wrong</li>
+      <li>Accept closures as parameters (<code>impl Fn</code>, generics, <code>&amp;dyn Fn</code>) and return them (<code>impl Fn</code>, <code>Box&lt;dyn Fn&gt;</code>)</li>
+      <li>Implement <code>Iterator</code> for your own type and get every adapter for free</li>
+      <li>Explain laziness, and use <code>peekable</code>, <code>windows</code>, <code>chunks</code>, <code>rev</code>, and the <code>itertools</code> methods Pixi relies on</li>
+      <li>Read a long Pixi iterator chain by tracking the item type at each step</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="closure-syntax">
+    <h2>Closures: functions that remember</h2>
+    <p>In Python you write small throwaway functions with <code>lambda</code>, and functions defined inside other
+      functions can read the outer function's variables:</p>
+    <pre data-label="Python"><code class="language-python">threshold = 10
+big = [n for n in sizes if n &gt; threshold]          # or:
+big = list(filter(lambda n: n &gt; threshold, sizes))</code></pre>
+    <p>The <code>lambda</code> "remembers" <code>threshold</code> even though it is not a parameter. A function value
+      plus the variables it remembers is called a <strong>closure</strong>, and Rust has the same idea with a
+      shorter syntax: parameters go between vertical bars, and the body follows.</p>
+    <pre><code class="language-rust">let threshold = 10;
+let is_big = |n: u64| n &gt; threshold;     // one expression: no braces needed
+let describe = |name: &amp;str, size: u64| {   // a block body for several statements
+    let unit = if size &gt; 1024 { "KiB" } else { "B" };
+    format!("{name}: {size} {unit}")
+};
+let always = || 42;                          // no parameters: empty bars</code></pre>
+    <p>Unlike a <code>fn</code> item, a closure's parameter and return types can usually be left out. The compiler
+      infers them from how the closure is used, just as it infers the type of a <code>let</code>. That is why you
+      can write <code>.map(|p| p.name())</code> without naming the type of <code>p</code>.</p>
+    <div class="runnable" data-title="Closures that read their surroundings">
+<textarea>
+fn main() {
+    let threshold = 100;
+    let sizes = vec![12, 250, 99, 1024];
+
+    // `is_big` captures `threshold` from the enclosing scope.
+    let is_big = |n: &u64| *n > threshold;
+    let big: Vec<u64> = sizes.iter().copied().filter(|n| is_big(n)).collect();
+    println!("big packages: {big:?}");
+
+    // Types inferred from use: `x` becomes u64 because of `sizes`.
+    let total: u64 = sizes.iter().map(|x| x * 2).sum();
+    println!("doubled total: {total}");
+}
+</textarea>
+    </div>
+    <h3>Every closure has its own type</h3>
+    <p>Inference happens once. The first time you call a closure without annotations, its parameter types are
+      fixed. Calling it later with a different type is an error, not a second "overload":</p>
+    <div class="runnable" data-title="A closure's types are fixed by its first use" data-compile-fail>
+<textarea>
+fn main() {
+    let echo = |x| x;
+    let a = echo(String::from("pixi"));
+    let b = echo(5);
+    println!("{a} {b}");
+}
+</textarea>
+    </div>
+    <p>The compiler reports <code>E0308</code> (mismatched types): "expected <code>String</code>, found integer",
+      with a note pointing at the first call, where the parameter type was decided. Python's <code>lambda x: x</code>
+      accepts anything because Python checks types at run time; Rust decides every type at compile time, so a
+      closure gets exactly one signature.</p>
+    <p>More surprising: the compiler creates a brand-new, anonymous struct type for every closure you write. The
+      struct's fields are the captured variables, and calling the closure calls a method on that struct. Two
+      closures with identical code still have two different types. You cannot write the name of a closure's type,
+      which is why functions that take or return closures use generics, <code>impl Fn</code>, or
+      <code>dyn Fn</code>, all covered below.</p>
+    <aside class="callout note" data-title="A plain function is fine too"><p>Anywhere a closure is expected, you can
+      pass a named function or method instead: <code>names.iter().map(String::len)</code>,
+      <code>lines.map(str::trim)</code>, <code>results.into_iter().map(Some)</code>. Pixi does this constantly
+      (<code>.map(Into::into)</code> appears all over the manifest crate). It reads well when the function already
+      exists and you would only be forwarding the argument.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>|args| body</code> makes a closure. Its types are
+      inferred once from its first use, and each closure is its own anonymous type that holds whatever it
+      captured.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="capture">
+    <h2>How closures capture</h2>
+    <p>A Python closure keeps a reference to the outer variable, and nothing stops you from mutating that variable
+      anywhere. Rust has to fit closures into the ownership rules from <a href="m03-ownership-borrowing.html">M03</a>,
+      so each captured variable is captured in one of three ways, and the compiler picks the <em>weakest</em> one
+      that makes the body work:</p>
+    <table>
+      <thead><tr><th>The body...</th><th>Capture mode</th><th>Like holding</th></tr></thead>
+      <tbody>
+        <tr><td>only reads the variable</td><td>shared borrow</td><td><code>&amp;T</code></td></tr>
+        <tr><td>modifies the variable</td><td>mutable borrow</td><td><code>&amp;mut T</code></td></tr>
+        <tr><td>moves the variable out (returns it, drops it, passes it by value)</td><td>by value</td><td><code>T</code></td></tr>
+      </tbody>
+    </table>
+    <p>Because a capture is a borrow, all the borrowing rules apply for as long as the closure is alive. A closure
+      that mutably borrows a counter is a live <code>&amp;mut</code>; you cannot read the counter until the
+      closure's last use:</p>
+    <div class="runnable" data-title="A mutable capture is a live &amp;mut borrow" data-compile-fail>
+<textarea>
+fn main() {
+    let mut installed = 0;
+    let mut install = || installed += 1;
+    println!("installed so far: {installed}");
+    install();
+}
+</textarea>
+    </div>
+    <p>Read the error the way M03 taught: <code>E0502</code>, "cannot borrow <code>installed</code> as immutable
+      because it is also borrowed as mutable". The first label points at the closure (the mutable borrow happens
+      where the closure is <em>created</em>, not where it is called), the second at the <code>println!</code>, and the
+      third at <code>install()</code>, the later use that keeps the borrow alive. Notice also that the closure itself
+      must be declared <code>let mut install</code>: calling it changes its captured state. Fix it by finishing with
+      the closure before reading:</p>
+    <div class="runnable" data-title="Use the closure, then read the counter" data-predict>
+<textarea>
+fn main() {
+    let mut installed = 0;
+    let mut install = |name: &str| {
+        installed += 1;
+        println!("installing {name}");
+    };
+    install("python");
+    install("numpy");
+    // The closure is not used after this line, so its borrow has ended.
+    println!("installed {installed} packages");
+}
+</textarea>
+    </div>
+    <h3>Precise captures</h3>
+    <p>Since edition 2021, a closure captures the exact <em>place</em> it uses, not the whole variable. If the body
+      only touches <code>manifest.name</code>, only that field is borrowed, and you can still mutate
+      <code>manifest.version</code> while the closure is alive. This removed a whole class of borrow errors that older
+      Rust code worked around with temporary variables; you will still see those workarounds in older crates.</p>
+    <aside class="callout think"><p>A closure reads <code>config.channels</code> and pushes onto
+      <code>log</code>. Which capture mode does it use for each? Can you call <code>config.channels.len()</code>
+      between creating and calling it? Can you call <code>log.len()</code>?</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> a capture is a borrow (or a move) that lasts as long as
+      the closure is used. Mutating captures makes a live <code>&amp;mut</code> and requires <code>let mut</code> on
+      the closure.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="fn-traits">
+    <h2>Fn, FnMut, and FnOnce</h2>
+    <p>Because every closure has its own type, a function that accepts "any closure" needs a trait to describe what
+      it will do with it. Rust has three, nested like Russian dolls:</p>
+    <table>
+      <thead><tr><th>Trait</th><th>Can be called</th><th>What the body may do with captures</th><th>Called via</th></tr></thead>
+      <tbody>
+        <tr><td><code>FnOnce</code></td><td>at least once</td><td>anything, including moving them out</td><td><code>self</code></td></tr>
+        <tr><td><code>FnMut</code></td><td>many times, not at the same time</td><td>read and modify</td><td><code>&amp;mut self</code></td></tr>
+        <tr><td><code>Fn</code></td><td>many times, even concurrently</td><td>only read</td><td><code>&amp;self</code></td></tr>
+      </tbody>
+    </table>
+    <p>Every <code>Fn</code> closure is also <code>FnMut</code>, and every <code>FnMut</code> closure is also
+      <code>FnOnce</code>. So the bound you choose as a <em>caller of closures</em> is a promise about how you will
+      call them:</p>
+    <ul>
+      <li><code>FnOnce</code> is the most permissive bound: "I will call it once." Any closure qualifies. Use it for
+        callbacks run exactly once, like <code>Option::map</code>, <code>unwrap_or_else</code>, or
+        <code>thread::spawn</code>.</li>
+      <li><code>FnMut</code>: "I may call it many times, one after another." Iterator adapters like
+        <code>map</code> and <code>filter</code> take <code>FnMut</code>, so your closure can count or collect as it
+        goes.</li>
+      <li><code>Fn</code> is the most restrictive bound: "I may call it many times, possibly from several places at
+        once." Use it when you store a callback and share it.</li>
+    </ul>
+    <p>The trait a closure implements depends on what its body <em>does</em> with the captures, not on how it
+      captures them. A closure that returns a captured <code>String</code> by value can be called only once,
+      because after the first call the string is gone:</p>
+    <div class="runnable" data-title="An FnOnce closure called twice" data-compile-fail>
+<textarea>
+fn main() {
+    let name = String::from("numpy");
+    let take_name = || name;
+    let first = take_name();
+    let second = take_name();
+    println!("{first} {second}");
+}
+</textarea>
+    </div>
+    <p>The error is <code>E0382</code>, "use of moved value: <code>take_name</code>", and the note explains why:
+      "closure cannot be invoked more than once because it moves the variable <code>name</code> out of its
+      environment". Calling an <code>FnOnce</code> closure consumes the closure itself, just as passing a
+      <code>String</code> by value consumes the string.</p>
+    <p>The opposite mistake is passing a closure that mutates where the bound only allows reading:</p>
+    <div class="runnable" data-title="A mutating closure where Fn is required" data-compile-fail>
+<textarea>
+fn run_twice<F: Fn()>(f: F) {
+    f();
+    f();
+}
+
+fn main() {
+    let mut calls = 0;
+    run_twice(|| calls += 1);
+    println!("{calls}");
+}
+</textarea>
+    </div>
+    <p><code>E0594</code>: "cannot assign to <code>calls</code>, as it is a captured variable in a <code>Fn</code>
+      closure", with a label on the <code>F: Fn()</code> bound that forced it. The fix belongs to whoever owns the
+      signature: if <code>run_twice</code> calls <code>f</code> sequentially, it should ask for <code>FnMut</code> and
+      take <code>mut f: F</code>. Choosing the loosest bound that your code actually needs makes your function
+      accept the most closures.</p>
+    <div class="runnable" data-title="The same function with the right bound" data-predict>
+<textarea>
+fn run_twice<F: FnMut()>(mut f: F) {
+    f();
+    f();
+}
+
+fn main() {
+    let mut calls = 0;
+    run_twice(|| calls += 1);
+    run_twice(|| calls += 10);
+    println!("{calls}");
+}
+</textarea>
+    </div>
+    <aside class="callout pixi"><p>Pixi's spinner helper takes <code>FnOnce</code> because it runs the work exactly
+      once (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_progress/src/lib.rs#L76-L86">crates/pixi_progress/src/lib.rs</a>):</p>
+      <pre><code class="language-rust">pub fn wrap_in_progress&lt;T, F: FnOnce() -&gt; T&gt;(msg: impl Into&lt;Cow&lt;'static, str&gt;&gt;, func: F) -&gt; T {
+    let pb = global_multi_progress().add(ProgressBar::new_spinner());
+    // ...
+    let result = func();
+    pb.finish_and_clear();
+    result
+}</code></pre>
+      <p>Because the bound is <code>FnOnce</code>, callers may pass a closure that moves a value into the work and
+      consumes it, which <code>Fn</code> would forbid. The generic <code>T</code> lets the closure return anything,
+      and the helper hands it straight back.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>FnOnce</code> &#8835; <code>FnMut</code> &#8835;
+      <code>Fn</code> in what they accept. Ask for <code>FnOnce</code> if you call once, <code>FnMut</code> if you call
+      repeatedly, <code>Fn</code> only if you must share or call through <code>&amp;</code>.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="move-closures">
+    <h2>move closures</h2>
+    <p>Writing <code>move</code> before the bars forces every capture to be <strong>by value</strong>: the closure
+      takes ownership of what it uses. This is about <em>how it captures</em>, which is a separate question from which
+      <code>Fn</code> trait it implements. A <code>move</code> closure that only reads its owned data is still
+      <code>Fn</code>.</p>
+    <p>You need <code>move</code> whenever the closure may outlive the scope that created it: a closure sent to
+      another thread, returned from a function, or stored in a struct. A borrow of a local would dangle once the
+      function returns, and the compiler refuses:</p>
+    <div class="runnable" data-title="A thread closure that borrows a local" data-compile-fail>
+<textarea>
+use std::thread;
+
+fn main() {
+    let channel = String::from("conda-forge");
+    let handle = thread::spawn(|| {
+        println!("fetching repodata from {channel}");
+    });
+    handle.join().unwrap();
+}
+</textarea>
+    </div>
+    <p><code>E0373</code>: "closure may outlive the current function, but it borrows <code>channel</code>, which is
+      owned by the current function". The <code>help:</code> line gives the fix verbatim: "to force the closure to
+      take ownership of <code>channel</code> ..., use the <code>move</code> keyword". <code>thread::spawn</code>
+      requires <code>'static</code> (M07), because the new thread can run longer than <code>main</code>'s stack
+      frame.</p>
+    <p>A common pattern: clone first, then move the clone, so the original stays usable. This is exactly how
+      Pixi hands an <code>Arc</code> to a spawned task (M08):</p>
+    <div class="runnable" data-title="Clone, then move the clone">
+<textarea>
+use std::sync::Arc;
+use std::thread;
+
+fn main() {
+    let channels = Arc::new(vec!["conda-forge".to_string(), "bioconda".to_string()]);
+
+    let handles: Vec<_> = (0..2)
+        .map(|i| {
+            let channels = Arc::clone(&channels); // a new handle for this thread
+            thread::spawn(move || channels[i].len())
+        })
+        .collect();
+
+    let lengths: Vec<usize> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    println!("{lengths:?}, still usable here: {}", channels.len());
+}
+</textarea>
+    </div>
+    <p>One subtlety: moving a <code>Copy</code> value (an integer, a <code>bool</code>) copies it. The closure then
+      owns its own copy, and changes inside the closure do not affect the original. Predict this output:</p>
+    <div class="runnable" data-title="move copies Copy types" data-predict>
+<textarea>
+fn main() {
+    let mut retries = 1;
+    let mut bump = move || {
+        retries += 10;
+        retries
+    };
+    println!("{}", bump());
+    println!("{}", bump());
+    println!("{retries}");
+}
+</textarea>
+    </div>
+    <p>The closure owns a copy of <code>retries</code> that starts at 1 and lives inside the closure between calls,
+      so it returns 11, then 21. The outer <code>retries</code> was never touched and is still 1. This is a classic
+      source of "my counter never changes" bugs: if you want the caller to see the updates, drop the
+      <code>move</code> so the closure borrows the variable instead.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>move</code> changes capture to by-value. Use it
+      when the closure outlives the current scope (threads, returned closures, stored callbacks). Clone what you
+      still need before the move.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="closures-as-values">
+    <h2>Passing and returning closures</h2>
+    <p>Since you cannot name a closure's type, there are four ways to accept one. They mirror the generics versus
+      trait objects choice from <a href="m06-traits-generics.html">M06</a>:</p>
+    <pre><code class="language-rust">// 1. Generic parameter with a bound: one compiled copy per closure type (static dispatch).
+fn apply&lt;F: Fn(u32) -&gt; u32&gt;(f: F, x: u32) -&gt; u32 { f(x) }
+
+// 2. impl Trait in argument position: the same thing, shorter to write.
+fn apply2(f: impl Fn(u32) -&gt; u32, x: u32) -&gt; u32 { f(x) }
+
+// 3. A trait object behind a reference: one compiled copy, a vtable call at run time.
+fn apply3(f: &amp;dyn Fn(u32) -&gt; u32, x: u32) -&gt; u32 { f(x) }
+
+// 4. A where clause, for longer bounds.
+fn apply4&lt;F&gt;(f: F, x: u32) -&gt; u32
+where
+    F: Fn(u32) -&gt; u32 + Send + 'static,
+{ f(x) }</code></pre>
+    <p>The <code>Fn(u32) -&gt; u32</code> syntax is special sugar for the closure traits: the arguments go in
+      parentheses and the return type after the arrow. Options 1 and 2 are the default choice: the compiler
+      generates specialized code for each closure, so a call costs nothing extra and can be inlined. Option 3 is
+      useful when you want to avoid that code duplication or store many different closures together.</p>
+    <h3>Returning closures</h3>
+    <p>To return a single closure type, use <code>impl Fn</code> in return position. To return one of several
+      closures, or to store closures of different types in a collection, box them as <code>Box&lt;dyn Fn&gt;</code>.
+      The compiler shows you why with one of its best-known errors:</p>
+    <div class="runnable" data-title="Two closures are two different types" data-compile-fail>
+<textarea>
+fn make_check(max_len: usize, strict: bool) -> impl Fn(&str) -> bool {
+    if strict {
+        move |name: &str| name.len() <= max_len && name.chars().all(|c| c.is_ascii_lowercase())
+    } else {
+        move |name: &str| name.len() <= max_len
+    }
+}
+
+fn main() {
+    println!("{}", make_check(10, true)("numpy"));
+}
+</textarea>
+    </div>
+    <p><code>E0308</code> again, this time worded "<code>if</code> and <code>else</code> have incompatible types",
+      with an unusually helpful note: "no two closures, even if identical, have the same type", and
+      <code>help:</code> lines that rewrite the return type to <code>Box&lt;dyn Fn(&amp;str) -&gt; bool&gt;</code> and
+      wrap each branch in <code>Box::new</code>. <code>impl Fn</code> means "one specific type that I am not
+      naming", so both branches must produce that same type. <code>Box&lt;dyn Fn&gt;</code> erases the type: the
+      closure moves to the heap, and the box holds a pointer plus a vtable.</p>
+    <p>One exception you may notice: a closure that captures <em>nothing</em> can be converted to a plain function
+      pointer type, <code>fn(&amp;str) -&gt; bool</code>. If both branches above captured nothing, the compiler would
+      quietly convert both to that one pointer type and the code would compile. As soon as a closure captures
+      something (here <code>max_len</code>), it carries data, and that escape hatch closes.</p>
+    <div class="runnable" data-title="Box&lt;dyn Fn&gt; for a table of rules">
+<textarea>
+type Rule = Box<dyn Fn(&str) -> Option<String>>;
+
+fn make_rules(max_len: usize) -> Vec<Rule> {
+    vec![
+        Box::new(|name: &str| {
+            name.chars()
+                .any(|c| c.is_ascii_uppercase())
+                .then(|| format!("'{name}' must be lowercase"))
+        }),
+        // `move` is required: the closure outlives this function and needs its own max_len.
+        Box::new(move |name: &str| {
+            (name.len() > max_len).then(|| format!("'{name}' is longer than {max_len}"))
+        }),
+    ]
+}
+
+fn main() {
+    let rules = make_rules(8);
+    for name in ["numpy", "PyTorch", "scikit-learn"] {
+        let problems: Vec<String> = rules.iter().filter_map(|rule| rule(name)).collect();
+        println!("{name}: {problems:?}");
+    }
+}
+</textarea>
+    </div>
+    <p>Three things to notice. The type alias <code>Rule</code> keeps signatures readable. The second closure needs
+      <code>move</code> because it outlives <code>make_rules</code>, which owns <code>max_len</code>. And
+      <code>bool::then</code> takes a closure that runs only when the bool is true, which turns "if this, make an
+      error message" into one expression.</p>
+    <aside class="callout warn" data-title="Edition 2024: returned closures and borrowed arguments"><p>A function
+      like <code>fn make(prefix: &amp;str) -&gt; impl Fn(&amp;str) -&gt; String</code> is assumed, in edition 2024, to
+      return something that may borrow from <code>prefix</code>, even if your closure owns a copy. Callers then get
+      <code>E0505</code> or <code>E0597</code> when they drop the argument, plus a note that "Rust 2024 has adjusted
+      the <code>impl Trait</code> lifetime capture rules". Write <code>-&gt; impl Fn(&amp;str) -&gt; String +
+      use&lt;&gt;</code> to promise that the result captures no lifetimes. You will do this in exercise 2.</p></aside>
+    <aside class="callout pixi"><p>Pixi uses <code>impl Fn</code> parameters to make code testable. The cache
+      directory resolver does not read environment variables itself; it takes a lookup function
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_compute_cache_dirs/src/cache_dirs.rs#L99-L102">cache_dirs.rs</a>),
+      so production code passes the real environment and tests pass a closure over a map. You will read this
+      function in full in <a href="#pixi-reading">Reading Pixi</a>.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> accept closures with <code>impl Fn(..)</code> or a
+      generic bound by default. Return one with <code>impl Fn</code>. Use <code>Box&lt;dyn Fn&gt;</code> when the
+      concrete closure varies at run time or you store several in one collection.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="own-iterator">
+    <h2>Writing your own iterator</h2>
+    <p>In Python you make an object iterable by writing <code>__iter__</code> and <code>__next__</code>, or more often
+      a generator with <code>yield</code>. In Rust you implement one trait with one required method:</p>
+    <pre><code class="language-rust">pub trait Iterator {
+    type Item;                                  // the associated type from M06
+    fn next(&amp;mut self) -&gt; Option&lt;Self::Item&gt;;  // Some(item), or None when finished
+    // ...about 75 provided methods: map, filter, sum, collect, ...
+}</code></pre>
+    <p>Implement <code>next</code> and you get every adapter and consumer from M05 for free, because they are
+      default methods built on top of <code>next</code>. The iterator keeps its progress in its own fields, which is
+      why <code>next</code> takes <code>&amp;mut self</code>. There are no generators in stable Rust (the
+      <code>gen</code> keyword is reserved in edition 2024 for that future), so the state that a Python generator
+      keeps in local variables lives in the struct instead.</p>
+    <div class="tabs">
+      <div class="tab" data-label="Python">
+        <pre><code class="language-python">def ancestors(parents, start):
+    current = parents[start]
+    while current is not None:
+        yield current
+        current = parents[current]</code></pre>
+      </div>
+      <div class="tab" data-label="Rust">
+        <pre><code class="language-rust">struct Ancestors&lt;'a&gt; {
+    parents: &amp;'a [Option&lt;usize&gt;],
+    next: Option&lt;usize&gt;,
+}
+
+impl Iterator for Ancestors&lt;'_&gt; {
+    type Item = usize;
+    fn next(&amp;mut self) -&gt; Option&lt;usize&gt; {
+        let current = self.next?;
+        self.next = self.parents[current];
+        Some(current)
+    }
+}</code></pre>
+      </div>
+    </div>
+    <p>The <code>?</code> on an <code>Option</code> (M04) does the work of the <code>while</code> condition: when
+      <code>self.next</code> is <code>None</code>, <code>next</code> returns <code>None</code> and the iteration is
+      over. Run it and see the free adapters at work:</p>
+    <div class="runnable" data-title="A custom iterator gets every adapter" data-predict>
+<textarea>
+struct Ancestors<'a> {
+    parents: &'a [Option<usize>],
+    next: Option<usize>,
+}
+
+impl Iterator for Ancestors<'_> {
+    type Item = usize;
+    fn next(&mut self) -> Option<usize> {
+        let current = self.next?;
+        self.next = self.parents[current];
+        Some(current)
+    }
+}
+
+fn main() {
+    // Operation 0 is the root; 1's parent is 0; 2's parent is 1; 3's parent is 2.
+    let parents = [None, Some(0), Some(1), Some(2)];
+    let chain: Vec<usize> = Ancestors { parents: &parents, next: parents[3] }.collect();
+    println!("{chain:?}");
+    let depth = Ancestors { parents: &parents, next: parents[3] }.count();
+    println!("{depth}");
+}
+</textarea>
+    </div>
+    <h3>Iterators without a struct</h3>
+    <p>For one-off iterators, the standard library builds the struct for you from a closure:</p>
+    <ul>
+      <li><code>std::iter::successors(first, |prev| next)</code>: each item is computed from the previous one; stops
+        at the first <code>None</code>. The ancestor walk is
+        <code>successors(parents[3], |&amp;i| parents[i])</code>.</li>
+      <li><code>std::iter::from_fn(move || ...)</code>: any closure returning <code>Option&lt;T&gt;</code>; the closure
+        is <code>FnMut</code> and keeps its state in its captures.</li>
+      <li><code>std::iter::once(x)</code> and <code>std::iter::repeat(x)</code>: one item, or the same item forever
+        (pair it with <code>take</code>).</li>
+    </ul>
+    <div class="runnable" data-title="successors and from_fn">
+<textarea>
+use std::iter;
+
+fn main() {
+    let parents = [None, Some(0), Some(1), Some(2)];
+    let chain: Vec<usize> = iter::successors(parents[3], |&i| parents[i]).collect();
+    println!("successors: {chain:?}");
+
+    // Exponential backoff delays: 100, 200, 400, ... capped at 1000.
+    let mut delay = 50;
+    let backoff = iter::from_fn(move || {
+        delay = (delay * 2).min(1000);
+        Some(delay)
+    });
+    let first: Vec<u32> = backoff.take(6).collect();
+    println!("backoff: {first:?}");
+}
+</textarea>
+    </div>
+    <aside class="callout pro"><p>When your type is a collection, also implement <code>IntoIterator</code> for
+      <code>&amp;YourType</code> so that <code>for x in &amp;thing</code> works, and give it an <code>iter()</code>
+      method returning <code>impl Iterator&lt;Item = &amp;T&gt; + '_</code>. Returning <code>impl Iterator</code>
+      hides the concrete adapter type (which can be enormous) and lets you change the implementation later
+      without breaking callers.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> implement <code>next(&amp;mut self) -&gt;
+      Option&lt;Item&gt;</code>, store the progress in fields, and every adapter comes free. Reach for
+      <code>successors</code> or <code>from_fn</code> for quick one-off iterators.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="laziness">
+    <h2>Laziness: nothing happens until you consume</h2>
+    <p>Python generators are lazy, and so are Rust iterators: calling <code>map</code> or <code>filter</code> builds a
+      new iterator struct that wraps the old one, and does no work at all. Work happens only when a
+      <strong>consumer</strong> (<code>collect</code>, <code>sum</code>, <code>for</code>, <code>count</code>,
+      <code>find</code>, ...) starts calling <code>next</code>. Each item then travels through the whole chain before
+      the next item starts. Predict the order of these lines:</p>
+    <div class="runnable" data-title="Items flow through the chain one at a time" data-predict>
+<textarea>
+fn main() {
+    let kept: Vec<i32> = [1, 2, 3]
+        .iter()
+        .map(|x| {
+            println!("map {x}");
+            x * 10
+        })
+        .filter(|x| {
+            println!("filter {x}");
+            *x > 10
+        })
+        .collect();
+    println!("{kept:?}");
+}
+</textarea>
+    </div>
+    <p>The output alternates <code>map</code> and <code>filter</code> for each item; there is no stage where all
+      three items are mapped first. That is why chains are cheap: no intermediate <code>Vec</code> is built between
+      adapters, and the compiler usually fuses the whole chain into one loop as fast as a hand-written one.</p>
+    <p>Laziness has two consequences you will meet in review:</p>
+    <ul>
+      <li><strong>A chain without a consumer does nothing.</strong> The compiler warns: "unused <code>Map</code> that
+        must be used ... iterators are lazy and do nothing unless consumed". If you wanted side effects, use a
+        <code>for</code> loop (or <code>for_each</code>), not <code>map</code>.</li>
+      <li><strong>Short-circuiting consumers stop early.</strong> <code>any</code>, <code>all</code>,
+        <code>find</code>, <code>position</code>, and collecting into <code>Result</code> or <code>Option</code> stop
+        pulling items as soon as the answer is known. Expensive work later in the input never runs.</li>
+    </ul>
+    <div class="runnable" data-title="find stops pulling as soon as it has an answer" data-predict>
+<textarea>
+fn main() {
+    let names = ["numpy", "python", "pandas", "scipy"];
+    let mut checked = 0;
+    let found = names.iter().find(|n| {
+        checked += 1;
+        n.starts_with('p')
+    });
+    println!("{found:?} after {checked} checks");
+    let second = names.iter().filter(|n| n.starts_with('p')).nth(1);
+    println!("{second:?}");
+}
+</textarea>
+    </div>
+    <aside class="callout warn"><p>Do not put side effects you rely on (pushing to a list, logging that must happen,
+      incrementing counters) inside <code>map</code> and then consume with a short-circuiting method. Some items may
+      never reach your closure. Keep <code>map</code> closures pure and use a <code>for</code> loop when the side
+      effect is the point.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> adapters build a pipeline; consumers run it. Each item
+      flows through every stage before the next item starts, and short-circuiting consumers stop early.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="more-adapters">
+    <h2>peekable, windows, chunks, rev, and friends</h2>
+    <p>M05 covered the everyday adapters. These are the ones you will need for parsing, pairing, and reporting,
+      which is a large part of what Pixi's code does.</p>
+    <table>
+      <thead><tr><th>Method</th><th>On</th><th>Gives you</th></tr></thead>
+      <tbody>
+        <tr><td><code>peekable()</code> then <code>peek()</code>, <code>next_if(..)</code></td><td>any iterator</td><td>a look at the next item without consuming it; the basis of hand-written parsers</td></tr>
+        <tr><td><code>windows(n)</code></td><td>slices</td><td>every overlapping run of <code>n</code> items: <code>[a,b],[b,c],[c,d]</code></td></tr>
+        <tr><td><code>chunks(n)</code></td><td>slices</td><td>non-overlapping runs of up to <code>n</code>; the last may be shorter</td></tr>
+        <tr><td><code>chunk_by(|a, b| ..)</code></td><td>slices</td><td>runs of consecutive items for which the predicate holds between neighbours</td></tr>
+        <tr><td><code>rev()</code></td><td>double-ended iterators</td><td>the same items from the back (works on <code>Vec</code>, ranges, <code>chars</code>, not on <code>from_fn</code>)</td></tr>
+        <tr><td><code>step_by(n)</code>, <code>take_while</code>, <code>skip_while</code></td><td>any iterator</td><td>every n-th item; a prefix or suffix chosen by a predicate</td></tr>
+        <tr><td><code>scan(state, |s, x| ..)</code></td><td>any iterator</td><td>a running value, like a fold that emits each step</td></tr>
+      </tbody>
+    </table>
+    <div class="runnable" data-title="windows, chunks, chunk_by, rev">
+<textarea>
+fn main() {
+    let versions = [1, 2, 4, 5, 6, 9];
+    // windows: compare each item with the next one.
+    let gaps: Vec<i32> = versions.windows(2).map(|w| w[1] - w[0]).collect();
+    println!("gaps: {gaps:?}");
+
+    // chunks: batches, e.g. for parallel downloads.
+    for batch in versions.chunks(4) {
+        println!("batch {batch:?}");
+    }
+
+    // chunk_by: runs of consecutive numbers.
+    let runs: Vec<&[i32]> = versions.chunk_by(|a, b| b - a == 1).collect();
+    println!("runs: {runs:?}");
+
+    // rev on a double-ended iterator.
+    let newest_first: Vec<&i32> = versions.iter().rev().take(2).collect();
+    println!("newest first: {newest_first:?}");
+}
+</textarea>
+    </div>
+    <h3>peekable for parsing</h3>
+    <p>A <code>Peekable</code> wraps an iterator and buffers one item so you can look before you take. This is how
+      you write small tokenizers, and Pixi uses it in exactly that way, for example in its shell-script parser
+      (<code>input.char_indices().peekable()</code> in
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_script_shell/src/parse.rs#L78">pixi_script_shell/src/parse.rs</a>).</p>
+    <div class="runnable" data-title="Split a spec into name and constraint with peekable" data-predict>
+<textarea>
+fn split_spec(spec: &str) -> (String, String) {
+    let mut chars = spec.chars().peekable();
+    let mut name = String::new();
+    // Take characters while they belong to a package name.
+    while let Some(c) = chars.next_if(|c| c.is_alphanumeric() || *c == '-' || *c == '_') {
+        name.push(c);
+    }
+    // Skip spaces, then the rest is the constraint.
+    while chars.next_if_eq(&' ').is_some() {}
+    (name, chars.collect())
+}
+
+fn main() {
+    println!("{:?}", split_spec("numpy >=1.26,<2"));
+    println!("{:?}", split_spec("python"));
+}
+</textarea>
+    </div>
+    <aside class="callout pixi"><p><code>windows</code> shows up in Pixi wherever bytes are scanned for a marker. To
+      decide whether a script uses Windows line endings, Pixi looks for any two-byte window equal to
+      <code>\r\n</code>
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/script/block.rs#L18-L24">pixi_manifest/src/script/block.rs</a>):</p>
+      <pre><code class="language-rust">pub(crate) fn detect(contents: &amp;[u8]) -&gt; Self {
+    if contents.windows(2).any(|window| window == b"\r\n") {
+        Self::CrLf
+    } else {
+        Self::Lf
+    }
+}</code></pre>
+      <p><code>b"\r\n"</code> is a byte-string literal of type <code>&amp;[u8; 2]</code>, and <code>any</code> stops at
+        the first match.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>windows</code> overlaps, <code>chunks</code> does
+      not, <code>chunk_by</code> groups neighbours. <code>peekable</code> plus <code>next_if</code> is the standard
+      way to tokenize.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="itertools">
+    <h2>itertools: Pixi's favourite extension</h2>
+    <p>The <a href="https://docs.rs/itertools">itertools</a> crate adds dozens of methods to every iterator. Pixi pins
+      it once in the workspace (<code>itertools = "0.15.0"</code> in the root <code>Cargo.toml</code>) and imports it
+      in a large share of its files. It works through the extension-trait pattern from M06: the crate defines a trait
+      <code>Itertools</code> with default methods and implements it for every <code>Iterator</code>. The methods are
+      only callable once the trait is in scope, which is why you see this line at the top of so many Pixi files:</p>
+    <pre><code class="language-rust">use itertools::Itertools;</code></pre>
+    <p>The methods you will read most often:</p>
+    <table>
+      <thead><tr><th>itertools</th><th>Does</th><th>std-only equivalent</th></tr></thead>
+      <tbody>
+        <tr><td><code>.sorted()</code></td><td>collects, sorts, and returns an iterator again</td><td><code>let mut v: Vec&lt;_&gt; = it.collect(); v.sort();</code></td></tr>
+        <tr><td><code>.unique()</code></td><td>drops repeats, keeping the first occurrence and the order</td><td>a <code>HashSet</code> and <code>filter(|x| seen.insert(x.clone()))</code></td></tr>
+        <tr><td><code>.join(", ")</code></td><td>formats each item with <code>Display</code> and joins into a <code>String</code></td><td><code>.collect::&lt;Vec&lt;String&gt;&gt;().join(", ")</code></td></tr>
+        <tr><td><code>.format(", ")</code></td><td>like <code>join</code>, but lazy: a value you put straight into <code>format!</code>, no intermediate <code>String</code></td><td>(none)</td></tr>
+        <tr><td><code>.format_with(", ", |x, f| f(&amp;..))</code></td><td>lazy join with a custom per-item format</td><td>(none)</td></tr>
+        <tr><td><code>.chunk_by(key)</code>, <code>.into_group_map()</code></td><td>group consecutive items by key; group all items into a <code>HashMap&lt;K, Vec&lt;V&gt;&gt;</code></td><td><code>BTreeMap</code> with the entry API (M05)</td></tr>
+      </tbody>
+    </table>
+    <p>This cell uses the real crate. The Playground has <code>itertools</code> installed, so it runs there:</p>
+    <div class="runnable" data-title="sorted, unique, join, format_with (needs itertools)">
+<textarea>
+use itertools::Itertools;
+
+fn main() {
+    let deps = ["pandas", "numpy", "python", "numpy"];
+    println!("{}", deps.iter().unique().sorted().join(", "));
+
+    let tasks = ["test", "build", "lint"];
+    println!(
+        "Available tasks:\n{}",
+        tasks.iter().sorted().format_with("\n", |t, f| f(&format_args!("\t{t}")))
+    );
+}
+</textarea>
+    </div>
+    <p>The <code>format_with</code> closure gets each item and a callback <code>f</code>; you call <code>f</code> with
+      something displayable, usually built with <code>format_args!</code> (a <code>format!</code> that does not
+      allocate). The result implements <code>Display</code>, so the joined text is written straight into the outer
+      <code>println!</code>.</p>
+    <p>Because exercises in this course are <code>std</code>-only, learn the std equivalents too. This version has the
+      same output as the first line above:</p>
+    <div class="runnable" data-title="The same with std only" data-predict>
+<textarea>
+use std::collections::BTreeSet;
+
+fn main() {
+    let deps = ["pandas", "numpy", "python", "numpy"];
+    // A BTreeSet is unique and sorted at once.
+    let unique_sorted: BTreeSet<&str> = deps.iter().copied().collect();
+    let joined = unique_sorted.into_iter().collect::<Vec<_>>().join(", ");
+    println!("{joined}");
+}
+</textarea>
+    </div>
+    <aside class="callout pixi"><p>When <code>pixi run</code> cannot find your task, it prints the available ones with
+      exactly this pattern
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_cli/src/run.rs#L705-L715">pixi_cli/src/run.rs</a>):</p>
+      <pre><code class="language-rust">pixi_progress::println!(
+    "\nAvailable tasks:\n{}",
+    available_tasks
+        .into_iter()
+        .sorted()
+        .format_with("\n", |name, f| {
+            f(&amp;format_args!("\t{}", name.fancy_display().bold()))
+        })
+);</code></pre>
+      <p>Sorting makes the output stable across runs (task names come out of hash maps in no fixed order), which
+        also matters for snapshot tests in <a href="m11-testing.html">M11</a>.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>use itertools::Itertools;</code> unlocks
+      <code>sorted</code>, <code>unique</code>, <code>join</code>, <code>format</code>, and <code>format_with</code>.
+      <code>unique().sorted()</code> is Pixi's idiom for "deterministic output".</p></aside>
+  </section>
+
+  <section class="lesson-section" id="reading-chains">
+    <h2>Reading long chains</h2>
+    <p>A twelve-line chain looks intimidating until you read it the way the compiler does: one step at a time,
+      tracking the <strong>item type</strong>. Write the type next to each line, on paper or in your head. Your
+      editor's inlay hints (rust-analyzer) do exactly this, and turning them on is the single best aid for reading
+      Pixi.</p>
+    <p>Here is a real one, from the conversion of Pixi's PyPI options into the lock-file type
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/pypi/pypi_options.rs#L355-L373">pixi_manifest/src/pypi/pypi_options.rs</a>).
+      The fields are <code>index_url: Option&lt;Url&gt;</code>, <code>extra_index_urls: Option&lt;Vec&lt;Url&gt;&gt;</code>,
+      and <code>find_links: Option&lt;Vec&lt;FindLinksUrlOrPath&gt;&gt;</code>:</p>
+    <pre><code class="language-rust">#[cfg(feature = "rattler_lock")]
+impl From&lt;PypiOptions&gt; for rattler_lock::PypiIndexes {
+    fn from(value: PypiOptions) -&gt; Self {
+        let primary_index = value
+            .index_url
+            .unwrap_or(pixi_consts::consts::DEFAULT_PYPI_INDEX_URL.clone());
+        Self {
+            indexes: std::iter::once(primary_index)
+                .chain(value.extra_index_urls.into_iter().flatten())
+                .collect(),
+            find_links: value
+                .find_links
+                .into_iter()
+                .flatten()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}</code></pre>
+    <p>Annotated, the <code>indexes</code> chain reads:</p>
+    <pre><code class="language-rust">std::iter::once(primary_index)        // Iterator&lt;Item = Url&gt;, exactly one item
+    .chain(                           // then, after it:
+        value.extra_index_urls        //   Option&lt;Vec&lt;Url&gt;&gt;
+            .into_iter()              //   Iterator over 0 or 1 Vec&lt;Url&gt;
+            .flatten())               //   Iterator&lt;Item = Url&gt;: the Vec's items, or nothing
+    .collect()                        // into the field's type, Vec&lt;Url&gt;</code></pre>
+    <p>Two idioms to recognize. <code>option.into_iter().flatten()</code> turns "maybe a list" into "the list's items,
+      or none", without a <code>match</code>. And <code>.collect()</code> with no turbofish works because the target
+      type is already known from the struct field. When you <em>write</em> chains, the same trick helps: annotate the
+      <code>let</code> (<code>let v: Vec&lt;String&gt; = ...</code>) instead of guessing, and if a chain gets hard to
+      read, split it into named <code>let</code> bindings. Laziness means splitting costs nothing.</p>
+    <div class="runnable" data-title="once + chain + flatten, std only" data-predict>
+<textarea>
+fn index_urls(primary: Option<&str>, extra: Option<Vec<&str>>) -> Vec<String> {
+    let primary = primary.unwrap_or("https://pypi.org/simple");
+    std::iter::once(primary)
+        .chain(extra.into_iter().flatten())
+        .map(String::from)
+        .collect()
+}
+
+fn main() {
+    println!("{:?}", index_urls(None, None));
+    println!("{:?}", index_urls(Some("https://mirror/simple"), Some(vec!["https://extra/simple"])));
+}
+</textarea>
+    </div>
+    <aside class="callout pro"><p>A habit from Pixi review: when a chain ends in <code>for_each</code> with a big
+      closure, or uses <code>map</code> only for side effects, reviewers ask for a <code>for</code> loop. Chains are
+      for transforming data; loops are for doing things. Clippy enforces part of this
+      (<code>clippy::needless_collect</code>, <code>clippy::map_unwrap_or</code>,
+      <code>clippy::unnecessary_fold</code>).</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> read a chain top to bottom, writing down the item type
+      after each step. <code>once(x).chain(opt.into_iter().flatten())</code> and <code>.map(Into::into)</code> are
+      everywhere in Pixi.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="pixi-reading">
+    <h2>Reading Pixi</h2>
+    <h3>Excerpt 1: a hand-written iterator over operation parents</h3>
+    <p>Pixi's compute engine tracks which operation started which, so progress reporting can show nested work. Each
+      operation id records its parent, and walking up to the root is a custom iterator
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_compute_reporters/src/operation_id.rs#L65-L95">crates/pixi_compute_reporters/src/operation_id.rs, lines 65-95</a>).
+      <code>parents</code> is a <code>DashMap&lt;OperationId, Option&lt;OperationId&gt;&gt;</code>, a concurrent hash
+      map that can be read and written from many threads through <code>&amp;self</code>.</p>
+    <pre><code class="language-rust">    /// Direct parent of `id`, or `None` for a root operation or an
+    /// unknown id.
+    pub fn parent_of(&amp;self, id: OperationId) -&gt; Option&lt;OperationId&gt; {
+        self.parents.get(&amp;id).and_then(|v| *v)
+    }
+
+    /// Iterator over `id`'s ancestors, from immediate parent up to the
+    /// root.
+    pub fn ancestors(&amp;self, id: OperationId) -&gt; Ancestors&lt;'_&gt; {
+        Ancestors {
+            registry: self,
+            next: self.parent_of(id),
+        }
+    }
+}
+
+/// Iterator returned by [`OperationRegistry::ancestors`].
+pub struct Ancestors&lt;'r&gt; {
+    registry: &amp;'r OperationRegistry,
+    next: Option&lt;OperationId&gt;,
+}
+
+impl Iterator for Ancestors&lt;'_&gt; {
+    type Item = OperationId;
+
+    fn next(&amp;mut self) -&gt; Option&lt;Self::Item&gt; {
+        let cur = self.next?;
+        self.next = self.registry.parent_of(cur);
+        Some(cur)
+    }
+}</code></pre>
+    <ul>
+      <li><code>parent_of</code>: <code>get</code> returns <code>Option&lt;Ref&lt;..&gt;&gt;</code> (a guard to the value,
+        if the key exists). <code>and_then(|v| *v)</code> flattens "maybe a stored value, which is itself maybe a
+        parent" into one <code>Option</code>. <code>*v</code> copies the inner <code>Option&lt;OperationId&gt;</code>
+        out, which works because <code>OperationId</code> is <code>Copy</code>.</li>
+      <li><code>ancestors</code> returns <code>Ancestors&lt;'_&gt;</code>: the iterator borrows the registry (M07), so
+        it cannot outlive it. The first item is computed eagerly here, so <code>next</code> has the "what to yield
+        now" value ready.</li>
+      <li><code>struct Ancestors&lt;'r&gt;</code> holds exactly the state the walk needs: where to look, and what comes
+        next. Its fields are private; callers only see that it is an <code>Iterator</code>.</li>
+      <li><code>next</code> is the same three lines you wrote earlier: <code>?</code> ends the iteration, the parent
+        becomes the new state, and the current id is yielded. Callers get <code>.collect()</code>,
+        <code>.any(..)</code>, <code>.count()</code> and everything else for free.</li>
+    </ul>
+    <h3>Excerpt 2: a closure as a seam for testing</h3>
+    <p>From <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_compute_cache_dirs/src/cache_dirs.rs#L99-L124">crates/pixi_compute_cache_dirs/src/cache_dirs.rs, lines 99-124</a>
+      (doc comments trimmed):</p>
+    <pre><code class="language-rust">    pub fn resolve&lt;L: CacheLocation&gt;(
+        &amp;self,
+        env_get: impl Fn(&amp;str) -&gt; Option&lt;String&gt;,
+    ) -&gt; AbsPresumedDirPathBuf {
+        if let Some(p) = self.override_for::&lt;L&gt;() {
+            return p.clone();
+        }
+        if let Some(name) = L::env_override()
+            &amp;&amp; let Some(raw) = env_get(name)
+            &amp;&amp; let Ok(p) = AbsPathBuf::new(raw)
+        {
+            return p.into_assume_dir();
+        }
+        self.anchor(L::base()).join(L::name()).into_assume_dir()
+    }
+
+    // ...
+    pub fn resolve_with_env&lt;L: CacheLocation&gt;(
+        &amp;self,
+        env: &amp;HashMap&lt;String, String&gt;,
+    ) -&gt; AbsPresumedDirPathBuf {
+        self.resolve::&lt;L&gt;(|n| env.get(n).cloned())
+    }</code></pre>
+    <ul>
+      <li><code>env_get: impl Fn(&amp;str) -&gt; Option&lt;String&gt;</code>: any closure or function that maps a variable
+        name to a value. <code>resolve</code> does not know or care whether that is the process environment, a
+        snapshot, or a test's fixed map.</li>
+      <li>The <code>if let ... &amp;&amp; let ...</code> chain is an edition 2024 let chain: three fallible steps (the
+        location has an env var name, the variable is set, its value is an absolute path) and the block runs only if
+        all three succeed.</li>
+      <li><code>resolve_with_env</code> adapts a <code>HashMap</code> to that interface with a one-line closure.
+        <code>|n| env.get(n).cloned()</code> captures <code>env</code> by shared reference and only reads it, so it
+        implements <code>Fn</code>, which is what the bound requires. <code>.cloned()</code> turns
+        <code>Option&lt;&amp;String&gt;</code> into <code>Option&lt;String&gt;</code>.</li>
+      <li><code>self.resolve::&lt;L&gt;(..)</code> uses the turbofish because <code>L</code> appears only in the
+        return path, not in any argument, so the compiler cannot infer it.</li>
+    </ul>
+    <details class="reveal"><summary>Question 1: why does <code>parent_of</code> use <code>and_then</code> and not <code>map</code>?</summary>
+      <p><code>self.parents.get(&amp;id)</code> is an <code>Option</code> of a stored <code>Option&lt;OperationId&gt;</code>.
+        <code>map(|v| *v)</code> would produce <code>Option&lt;Option&lt;OperationId&gt;&gt;</code>; <code>and_then</code>
+        expects the closure to return an <code>Option</code> and flattens the two layers. "Unknown id" and "root
+        operation" both become <code>None</code>, which is what the doc comment promises.</p></details>
+    <details class="reveal"><summary>Question 2: could <code>resolve</code> take <code>env_get: impl FnMut(&amp;str) -&gt; Option&lt;String&gt;</code> instead? Would callers notice?</summary>
+      <p>Yes. It calls <code>env_get</code> at most once, so even <code>FnOnce</code> would compile (it would then need
+        no <code>mut</code>). A looser bound accepts strictly more closures, so no existing caller would break. Pixi's
+        authors chose <code>Fn</code>, which documents that the lookup is a pure read; both choices are defensible,
+        and this is the kind of question that comes up in review.</p></details>
+    <details class="reveal"><summary>Question 3: write the ancestors walk with <code>std::iter::successors</code>. What would you lose?</summary>
+      <p><code>std::iter::successors(self.parent_of(id), move |&amp;cur| self.parent_of(cur))</code> returns
+        <code>impl Iterator&lt;Item = OperationId&gt; + '_</code> and behaves the same. You lose a nameable type:
+        <code>Ancestors</code> can be stored in a struct field, mentioned in other signatures, and documented, while
+        a <code>successors</code> closure type cannot be written down.</p></details>
+  </section>
+
+  <section class="lesson-section" id="practice">
+    <h2>Practice</h2>
+    <p>Each exercise is checked by <code>cargo test</code>. All of them use only the standard library.</p>
+
+    <div class="exercise" data-id="m09-e1" data-title="Apply a closure n times">
+      <div class="exercise-prompt">
+        <p>Write <code>apply_n(f, n, start)</code> that applies <code>f</code> to <code>start</code>, then to the
+          result, <code>n</code> times in total, and returns the final value. <code>apply_n(|x| x * 2, 3, 1)</code> is
+          <code>8</code>. With <code>n == 0</code> it returns <code>start</code>. Choose the loosest closure bound that
+          works: one test passes a closure that counts its own calls. With the starter's <code>Fn</code> bound, that test
+          does not compile (<code>E0594</code>), and the error is your first clue.</p>
+      </div>
+<textarea class="starter">
+fn apply_n(f: impl Fn(i64) -> i64, n: usize, start: i64) -> i64 {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn doubles() {
+    assert_eq!(apply_n(|x| x * 2, 3, 1), 8, "1 doubled three times is 8");
+}
+
+#[test]
+fn zero_times_is_identity() {
+    assert_eq!(apply_n(|x| x + 100, 0, 7), 7, "applying zero times returns start unchanged");
+}
+
+#[test]
+fn accepts_fnmut() {
+    let mut calls = 0;
+    let result = apply_n(|x| { calls += 1; x + 1 }, 5, 0);
+    assert_eq!(result, 5, "adding 1 five times to 0 is 5");
+    assert_eq!(calls, 5, "the closure should be called exactly n times");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>The third test mutates <code>calls</code>, so the closure is only
+        <code>FnMut</code>. Change the bound to <code>impl FnMut(i64) -&gt; i64</code>; to call an <code>FnMut</code>
+        parameter you must declare it <code>mut f</code>. A <code>for _ in 0..n</code> loop is simplest.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn apply_n(mut f: impl FnMut(i64) -&gt; i64, n: usize, start: i64) -&gt; i64 {
+    let mut value = start;
+    for _ in 0..n {
+        value = f(value);
+    }
+    value
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m09-e2" data-title="A counter factory">
+      <div class="exercise-prompt">
+        <p>Write <code>make_counter(start: u32, step: u32)</code> that returns a closure. Each call returns the next
+          value: first <code>start</code>, then <code>start + step</code>, and so on. Two counters must be
+          independent. Also write <code>make_labeler(prefix: &amp;str)</code> that returns a closure turning
+          <code>"numpy"</code> into <code>"&lt;prefix&gt;numpy"</code>; the closure must not borrow the argument
+          (tests drop the original string before calling it).</p>
+        <p>The starter's return type ends in <code>+ use&lt;&gt;</code>. In edition 2024 an <code>impl Trait</code>
+          return type is assumed to capture every lifetime in scope, including the one on <code>prefix:
+          &amp;str</code>, so the caller would have to keep the argument alive. <code>use&lt;&gt;</code> (precise
+          capturing) says "this closure borrows nothing from the arguments", and the compiler will hold your body to
+          that promise.</p>
+      </div>
+<textarea class="starter">
+fn make_counter(start: u32, step: u32) -> impl FnMut() -> u32 {
+    || todo!()
+}
+
+fn make_labeler(prefix: &str) -> impl Fn(&str) -> String + use<> {
+    |name: &str| todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn counts_from_start() {
+    let mut next = make_counter(10, 5);
+    assert_eq!(next(), 10, "the first call returns start");
+    assert_eq!(next(), 15, "the second call returns start + step");
+    assert_eq!(next(), 20, "the third call returns start + 2 * step");
+}
+
+#[test]
+fn counters_are_independent() {
+    let mut a = make_counter(0, 1);
+    let mut b = make_counter(100, 1);
+    a();
+    a();
+    assert_eq!(a(), 2, "counter a advanced three times");
+    assert_eq!(b(), 100, "counter b has its own state");
+}
+
+#[test]
+fn labeler_owns_its_prefix() {
+    let prefix = String::from("conda-forge::");
+    let label = make_labeler(&prefix);
+    drop(prefix);
+    assert_eq!(label("numpy"), "conda-forge::numpy", "the closure should own a copy of the prefix");
+    assert_eq!(label("python"), "conda-forge::python", "and be callable more than once");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Both closures outlive the function, so both need
+        <code>move</code>. For the counter, keep a <code>let mut current = start;</code> before the closure, return
+        the current value and advance it. For the labeler, turn the <code>&amp;str</code> into an owned
+        <code>String</code> before the closure and move that in.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn make_counter(start: u32, step: u32) -&gt; impl FnMut() -&gt; u32 {
+    let mut current = start;
+    move || {
+        let value = current;
+        current += step;
+        value
+    }
+}
+
+fn make_labeler(prefix: &amp;str) -&gt; impl Fn(&amp;str) -&gt; String + use&lt;&gt; {
+    let prefix = prefix.to_string();
+    move |name: &amp;str| format!("{prefix}{name}")
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m09-e3" data-title="Implement Iterator: version steps">
+      <div class="exercise-prompt">
+        <p>Implement <code>Iterator</code> for <code>MinorVersions</code>, which yields <code>(major, minor)</code>
+          pairs from <code>start</code> up to and including <code>end</code>, increasing the minor number. When the
+          minor number reaches <code>per_major</code>, roll over to the next major at minor 0. For example, from
+          <code>(1, 8)</code> to <code>(2, 1)</code> with <code>per_major = 10</code> yields
+          <code>(1, 8), (1, 9), (2, 0), (2, 1)</code>. If <code>start</code> is after <code>end</code>, yield nothing.
+          Then write <code>count_between</code> using your iterator.</p>
+      </div>
+<textarea class="starter">
+struct MinorVersions {
+    next: Option<(u32, u32)>,
+    end: (u32, u32),
+    per_major: u32,
+}
+
+impl MinorVersions {
+    fn new(start: (u32, u32), end: (u32, u32), per_major: u32) -> Self {
+        MinorVersions { next: Some(start), end, per_major }
+    }
+}
+
+impl Iterator for MinorVersions {
+    type Item = (u32, u32);
+
+    fn next(&mut self) -> Option<(u32, u32)> {
+        todo!()
+    }
+}
+
+fn count_between(start: (u32, u32), end: (u32, u32)) -> usize {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn rolls_over() {
+    let got: Vec<(u32, u32)> = MinorVersions::new((1, 8), (2, 1), 10).collect();
+    assert_eq!(got, vec![(1, 8), (1, 9), (2, 0), (2, 1)], "should roll from 1.9 to 2.0");
+}
+
+#[test]
+fn single_item() {
+    let got: Vec<(u32, u32)> = MinorVersions::new((3, 4), (3, 4), 10).collect();
+    assert_eq!(got, vec![(3, 4)], "start == end yields exactly one item");
+}
+
+#[test]
+fn empty_when_reversed() {
+    assert_eq!(MinorVersions::new((2, 0), (1, 9), 10).count(), 0, "start after end yields nothing");
+}
+
+#[test]
+fn adapters_work() {
+    let evens: Vec<(u32, u32)> = MinorVersions::new((0, 0), (0, 5), 10).filter(|(_, m)| m % 2 == 0).collect();
+    assert_eq!(evens, vec![(0, 0), (0, 2), (0, 4)], "filter should work on your iterator for free");
+}
+
+#[test]
+fn counts() {
+    assert_eq!(count_between((1, 0), (2, 9)), 20, "with 10 minors per major, 1.0..=2.9 is 20 versions");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>In <code>next</code>: <code>let current = self.next?;</code>, return
+        <code>None</code> if <code>current &gt; self.end</code> (tuples compare element by element). Compute the
+        following version, and set <code>self.next</code> to it, or to <code>None</code> once <code>current ==
+        self.end</code>. <code>count_between</code> is <code>MinorVersions::new(start, end, 10).count()</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">struct MinorVersions {
+    next: Option&lt;(u32, u32)&gt;,
+    end: (u32, u32),
+    per_major: u32,
+}
+
+impl MinorVersions {
+    fn new(start: (u32, u32), end: (u32, u32), per_major: u32) -&gt; Self {
+        MinorVersions { next: Some(start), end, per_major }
+    }
+}
+
+impl Iterator for MinorVersions {
+    type Item = (u32, u32);
+
+    fn next(&amp;mut self) -&gt; Option&lt;(u32, u32)&gt; {
+        let current = self.next?;
+        if current &gt; self.end {
+            self.next = None;
+            return None;
+        }
+        let (major, minor) = current;
+        let following = if minor + 1 &gt;= self.per_major { (major + 1, 0) } else { (major, minor + 1) };
+        self.next = if current == self.end { None } else { Some(following) };
+        Some(current)
+    }
+}
+
+fn count_between(start: (u32, u32), end: (u32, u32)) -&gt; usize {
+    MinorVersions::new(start, end, 10).count()
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m09-e4" data-title="A pipeline of boxed closures">
+      <div class="exercise-prompt">
+        <p>A <code>Pipeline</code> holds a list of string transformations and applies them in order. Implement
+          <code>new</code>, <code>then</code> (which adds a step and returns the pipeline, so calls can be chained),
+          and <code>run</code>. Each step is a <code>Box&lt;dyn Fn(String) -&gt; String&gt;</code>, so different
+          closures can live in the same <code>Vec</code>. Then write <code>normalizer(prefix)</code> that builds a
+          pipeline which trims whitespace, lowercases, and replaces <code>_</code> with <code>-</code>, and finally
+          adds <code>prefix</code> in front.</p>
+      </div>
+<textarea class="starter">
+struct Pipeline {
+    steps: Vec<Box<dyn Fn(String) -> String>>,
+}
+
+impl Pipeline {
+    fn new() -> Self {
+        todo!()
+    }
+
+    fn then(mut self, step: impl Fn(String) -> String + 'static) -> Self {
+        todo!()
+    }
+
+    fn run(&self, input: &str) -> String {
+        todo!()
+    }
+}
+
+fn normalizer(prefix: &str) -> Pipeline {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn empty_pipeline_is_identity() {
+    assert_eq!(Pipeline::new().run("Numpy"), "Numpy", "a pipeline with no steps returns the input");
+}
+
+#[test]
+fn steps_run_in_order() {
+    let p = Pipeline::new().then(|s| s + "a").then(|s| s + "b");
+    assert_eq!(p.run("x"), "xab", "steps should run in the order they were added");
+}
+
+#[test]
+fn run_twice() {
+    let p = Pipeline::new().then(|s| s.to_uppercase());
+    assert_eq!(p.run("pixi"), "PIXI", "first run");
+    assert_eq!(p.run("rattler"), "RATTLER", "the pipeline can be run again");
+}
+
+#[test]
+fn normalizes_names() {
+    let prefix = String::from("pypi:");
+    let p = normalizer(&prefix);
+    drop(prefix);
+    assert_eq!(p.run("  Scikit_Learn "), "pypi:scikit-learn", "trim, lowercase, _ to -, then prefix");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>then</code> pushes <code>Box::new(step)</code>; the
+        <code>'static</code> bound is what lets a generic closure become a <code>Box&lt;dyn Fn&gt;</code> (which is
+        <code>'static</code> by default). <code>run</code> can be a <code>fold</code>:
+        <code>self.steps.iter().fold(input.to_string(), |acc, step| step(acc))</code>. In <code>normalizer</code>,
+        own the prefix and use a <code>move</code> closure for the last step.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">struct Pipeline {
+    steps: Vec&lt;Box&lt;dyn Fn(String) -&gt; String&gt;&gt;,
+}
+
+impl Pipeline {
+    fn new() -&gt; Self {
+        Pipeline { steps: Vec::new() }
+    }
+
+    fn then(mut self, step: impl Fn(String) -&gt; String + 'static) -&gt; Self {
+        self.steps.push(Box::new(step));
+        self
+    }
+
+    fn run(&amp;self, input: &amp;str) -&gt; String {
+        self.steps.iter().fold(input.to_string(), |acc, step| step(acc))
+    }
+}
+
+fn normalizer(prefix: &amp;str) -&gt; Pipeline {
+    let prefix = prefix.to_string();
+    Pipeline::new()
+        .then(|s| s.trim().to_string())
+        .then(|s| s.to_lowercase())
+        .then(|s| s.replace('_', "-"))
+        .then(move |s| format!("{prefix}{s}"))
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m09-e5" data-title="One chain: a dependency report">
+      <div class="exercise-prompt">
+        <p>Lock-file lines look like <code>"conda-forge::numpy==1.26.4"</code> (channel, <code>::</code>, name,
+          <code>==</code>, version). Write <code>report(lines)</code> returning one line per channel, channels in
+          alphabetical order, formatted <code>"channel: name1, name2"</code> with package names unique and sorted.
+          Skip blank lines and lines starting with <code>#</code>; ignore lines that do not contain both separators.
+          Return the lines joined with <code>"\n"</code> (no trailing newline). This is the kind of grouping Pixi does
+          with <code>itertools</code>; here use a <code>BTreeMap&lt;&amp;str, BTreeSet&lt;&amp;str&gt;&gt;</code>.</p>
+      </div>
+<textarea class="starter">
+use std::collections::{BTreeMap, BTreeSet};
+
+fn report(lines: &[&str]) -> String {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn groups_and_sorts() {
+    let lines = [
+        "conda-forge::python==3.14.0",
+        "bioconda::samtools==1.21",
+        "conda-forge::numpy==2.3.1",
+        "conda-forge::numpy==2.3.1",
+    ];
+    assert_eq!(
+        report(&lines),
+        "bioconda: samtools\nconda-forge: numpy, python",
+        "channels sorted, names unique and sorted"
+    );
+}
+
+#[test]
+fn skips_noise() {
+    let lines = ["# generated", "", "   ", "not-a-record", "conda-forge::pip==25.0", "x::y"];
+    assert_eq!(report(&lines), "conda-forge: pip", "comments, blanks and malformed lines are skipped");
+}
+
+#[test]
+fn empty_input() {
+    assert_eq!(report(&[]), "", "no records gives an empty report");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Parse each line with <code>filter_map</code>: trim it, skip
+        comments, then <code>let (channel, rest) = line.split_once("::")?;</code> and <code>let (name, _version) =
+        rest.split_once("==")?;</code> inside a closure that returns <code>Option&lt;(&amp;str, &amp;str)&gt;</code>.
+        Fold the pairs into the map with <code>entry(channel).or_default().insert(name)</code>, then map each entry to
+        a formatted line and join.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">use std::collections::{BTreeMap, BTreeSet};
+
+fn report(lines: &amp;[&amp;str]) -&gt; String {
+    let mut by_channel: BTreeMap&lt;&amp;str, BTreeSet&lt;&amp;str&gt;&gt; = BTreeMap::new();
+    let records = lines.iter().filter_map(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let (channel, rest) = line.split_once("::")?;
+        let (name, _version) = rest.split_once("==")?;
+        Some((channel, name))
+    });
+    for (channel, name) in records {
+        by_channel.entry(channel).or_default().insert(name);
+    }
+    by_channel
+        .iter()
+        .map(|(channel, names)| {
+            let names: Vec&lt;&amp;str&gt; = names.iter().copied().collect();
+            format!("{channel}: {}", names.join(", "))
+        })
+        .collect::&lt;Vec&lt;_&gt;&gt;()
+        .join("\n")
+}</code></pre>
+      </details>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="mini-project">
+    <h2>Mini-project: a filterable lock report</h2>
+    <div class="project-box">
+      <div class="widget-head"><span class="w-kind">Mini-project</span><span class="w-title">lockreport: closures as filters, iterators as the pipeline</span></div>
+      <div class="widget-body">
+        <p>Build a small command-line tool that reads lock-file-like lines from a text file and prints a report. The
+          filters are chosen at run time from command-line flags, so they are a <code>Vec&lt;Box&lt;dyn Fn(&amp;Record)
+          -&gt; bool&gt;&gt;</code>, and the whole report is one pipeline of iterator adapters.</p>
+        <pre data-label="Terminal"><code class="language-bash">pixi init lockreport &amp;&amp; cd lockreport
+pixi add rust
+pixi run cargo init --name lockreport
+# optional, to compare with Pixi's style:
+pixi run cargo add itertools
+pixi run cargo run -- packages.txt --channel conda-forge --name-contains py</code></pre>
+        <p><strong>What to build</strong></p>
+        <ul>
+          <li>A <code>Record { channel, name, version }</code> struct and a <code>parse_line(&amp;str) -&gt;
+            Option&lt;Record&gt;</code> for lines like <code>conda-forge::numpy==2.3.1</code>.</li>
+          <li>A custom iterator <code>Records</code> that wraps <code>std::str::Lines</code> and yields only the lines that
+            parse, skipping comments and blanks. Implement <code>Iterator</code> yourself rather than using
+            <code>filter_map</code>, for practice.</li>
+          <li>Filter constructors that return <code>Box&lt;dyn Fn(&amp;Record) -&gt; bool&gt;</code>:
+            <code>by_channel(String)</code>, <code>name_contains(String)</code>, and <code>newer_than(String)</code>
+            comparing versions as <code>Vec&lt;u32&gt;</code> from <code>split('.')</code>. Build the list from
+            <code>std::env::args()</code>.</li>
+          <li>A report: records that pass <em>all</em> filters (<code>filters.iter().all(|f| f(r))</code>), grouped by
+            channel, names sorted and unique, plus a total count line.</li>
+        </ul>
+        <ul class="checklist" data-id="m09-mini">
+          <li><code>Records</code> implements <code>Iterator&lt;Item = Record&gt;</code> and skips bad lines</li>
+          <li>Every filter is a <code>move</code> closure in a <code>Box&lt;dyn Fn&gt;</code>; no filter borrows from <code>main</code>'s locals</li>
+          <li>With no flags, every record is reported</li>
+          <li>The output order is identical across runs (no <code>HashMap</code> iteration in the output)</li>
+          <li>At least three <code>#[test]</code> functions cover parsing and one filter each</li>
+          <li><code>pixi run cargo clippy --all-targets -- -D warnings</code> passes</li>
+        </ul>
+        <p><strong>Stretch goals:</strong> rewrite the grouping with <code>itertools</code> (<code>sorted_by_key</code>,
+          <code>chunk_by</code>, <code>format_with</code>) and compare readability; add <code>--exclude</code> that
+          wraps another filter in a negating closure (<code>move |r| !inner(r)</code>); make <code>Records</code>
+          generic over any <code>Iterator&lt;Item = S&gt;</code> where <code>S: AsRef&lt;str&gt;</code>.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="quiz">
+    <h2>Quiz</h2>
+    <div class="quiz" data-id="m09-quiz">
+<script type="application/json">
+{"title": "Closures and iterator chains", "passScore": 0.7, "questions": [
+  {"type": "single", "prompt": "Which trait does this closure implement, at most?", "code": "let mut seen = Vec::new();\nlet mut record = |name: &str| seen.push(name.to_string());", "options": ["<code>Fn</code>", "<code>FnMut</code>", "only <code>FnOnce</code>"], "answer": 1, "explanation": "<p>The body modifies a capture (it pushes onto <code>seen</code>) but does not move it out, so the closure is <code>FnMut</code> (and therefore also <code>FnOnce</code>), but not <code>Fn</code>.</p>"},
+  {"type": "output", "prompt": "What does this print?", "code": "fn main() {\n    let mut n = 1;\n    let mut add = move || { n += 1; n };\n    add();\n    println!(\"{} {}\", add(), n);\n}", "answer": "3 1", "explanation": "<p><code>move</code> copies the <code>i32</code> into the closure. The closure's copy goes 2, then 3; the outer <code>n</code> is untouched and stays 1.</p>"},
+  {"type": "single", "prompt": "Does this compile?", "code": "fn main() {\n    let names = vec![String::from(\"a\")];\n    let consume = move || drop(names);\n    consume();\n    consume();\n}", "options": ["Yes", "No: E0382, the closure is <code>FnOnce</code> and the first call moved it", "No: E0373, the closure outlives <code>main</code>"], "answer": 1, "explanation": "<p><code>drop(names)</code> moves the captured vector out, so the closure is only <code>FnOnce</code>. Calling it consumes it; the second call is a use of a moved value (E0382).</p>"},
+  {"type": "single", "prompt": "You are writing <code>fn retry&lt;F&gt;(attempts: u32, f: F)</code> that calls <code>f</code> up to <code>attempts</code> times, one after another. Which bound accepts the most closures while still compiling?", "options": ["<code>F: Fn() -&gt; bool</code>", "<code>F: FnMut() -&gt; bool</code>", "<code>F: FnOnce() -&gt; bool</code>"], "answer": 1, "explanation": "<p>You call it more than once, so <code>FnOnce</code> is not enough. <code>FnMut</code> allows repeated sequential calls and also accepts closures that update state, which <code>Fn</code> would reject.</p>"},
+  {"type": "text", "prompt": "Which error code says a closure \"may outlive the current function, but it borrows\" a local, with a help line suggesting <code>move</code>?", "answer": ["E0373"], "explanation": "<p>E0373 appears for closures passed to <code>thread::spawn</code>, returned, or stored with a <code>'static</code> requirement. Add <code>move</code> so the closure owns what it uses.</p>"},
+  {"type": "single", "prompt": "Why does a function returning <code>impl Fn(i32) -&gt; i32</code> fail to compile when an <code>if</code> returns one capturing closure and the <code>else</code> another?", "options": ["Closures cannot be returned from functions", "Every closure has its own anonymous type, and <code>impl Fn</code> stands for exactly one type", "<code>impl Fn</code> requires the closures to be <code>FnOnce</code>"], "answer": 1, "explanation": "<p>\"No two closures, even if identical, have the same type.\" Return <code>Box&lt;dyn Fn(i32) -&gt; i32&gt;</code> to erase the types, or restructure so both paths use one closure.</p>"},
+  {"type": "output", "prompt": "What does this print?", "code": "fn main() {\n    let v: Vec<i32> = [3, 1, 2]\n        .iter()\n        .map(|x| { print!(\"m{x} \"); x * 2 })\n        .take(2)\n        .collect();\n    println!(\"{v:?}\");\n}", "answer": "m3 m1 [6, 2]", "explanation": "<p>Iterators are lazy and pull one item at a time. <code>take(2)</code> stops after two items, so <code>map</code> never sees the <code>2</code>.</p>"},
+  {"type": "multi", "prompt": "Which of these are true of a type that implements <code>Iterator</code> by writing only <code>next</code>?", "options": ["It can use <code>map</code>, <code>filter</code> and <code>collect</code> without further code", "It can always use <code>rev()</code>", "<code>next</code> takes <code>&amp;mut self</code> because the iterator advances its own state", "<code>Item</code> is an associated type chosen by the implementation"], "answer": [0, 2, 3], "explanation": "<p>The adapters are default methods built on <code>next</code>. <code>rev</code> additionally needs <code>DoubleEndedIterator</code> (a <code>next_back</code> method), which you do not get for free.</p>"},
+  {"type": "output", "prompt": "What does this print?", "code": "fn main() {\n    let v = [1, 2, 3, 4, 5];\n    println!(\"{} {}\", v.windows(2).count(), v.chunks(2).count());\n}", "answer": "4 3", "explanation": "<p><code>windows(2)</code> overlaps: [1,2],[2,3],[3,4],[4,5]. <code>chunks(2)</code> does not: [1,2],[3,4],[5].</p>"},
+  {"type": "single", "prompt": "Pixi code calls <code>names.iter().sorted()</code>, and the compiler says there is no method <code>sorted</code>. What is missing?", "options": ["A <code>#[derive(Ord)]</code>", "<code>use itertools::Itertools;</code> to bring the extension trait into scope", "A turbofish on <code>sorted</code>"], "answer": 1, "explanation": "<p>Extension-trait methods are only callable when the trait is in scope. The compiler's <code>help:</code> usually suggests the exact <code>use</code> line.</p>"},
+  {"type": "single", "prompt": "What is the item type of <code>extra.into_iter().flatten()</code> when <code>extra: Option&lt;Vec&lt;Url&gt;&gt;</code>?", "options": ["<code>Vec&lt;Url&gt;</code>", "<code>Url</code>", "<code>Option&lt;Url&gt;</code>"], "answer": 1, "explanation": "<p><code>into_iter</code> on the <code>Option</code> yields zero or one <code>Vec&lt;Url&gt;</code>; <code>flatten</code> then yields the vector's items, so <code>Url</code>.</p>"},
+  {"type": "single", "prompt": "Which compiles?", "code": "fn main() {\n    let mut count = 0;\n    let mut inc = || count += 1;\n    inc();\n    println!(\"{count}\");   // (A)\n    inc();                 // (B)\n}", "options": ["As written", "Only after deleting line (B)", "Only after deleting line (A)"], "answer": 1, "explanation": "<p>The closure holds a mutable borrow of <code>count</code> until its last use. With (B) present, (A) reads <code>count</code> while that borrow is alive (E0502). Delete (B) and the borrow ends before the <code>println!</code>.</p>"}
+]}
+</script>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="recap">
+    <h2>Recap</h2>
+    <ul>
+      <li>A closure is <code>|args| body</code>. Its types are inferred once, and each closure has its own anonymous
+        type holding its captures.</li>
+      <li>Captures use the weakest mode that works: <code>&amp;T</code> to read, <code>&amp;mut T</code> to modify,
+        by value to move out. The borrow lasts as long as the closure is used.</li>
+      <li><code>Fn</code> (read, call many times), <code>FnMut</code> (modify, call sequentially), <code>FnOnce</code>
+        (may consume, call once). Ask for the loosest bound your code needs.</li>
+      <li><code>move</code> makes every capture by value; needed when a closure outlives its scope. Clone what you
+        still need first.</li>
+      <li>Take closures with <code>impl Fn(..)</code> or generics; return with <code>impl Fn</code>; use
+        <code>Box&lt;dyn Fn&gt;</code> when closures vary at run time.</li>
+      <li>Implement <code>Iterator::next</code> and every adapter is free. Iterators are lazy; consumers drive them
+        one item at a time.</li>
+      <li>Pixi leans on <code>itertools</code> (<code>sorted</code>, <code>unique</code>, <code>join</code>,
+        <code>format_with</code>) for deterministic, readable output. Read chains by tracking the item type.</li>
+    </ul>
+    <div class="flashcards" data-title="Closures and iterators">
+<script type="application/json">
+[{"front": "Closure syntax with a block body", "back": "<code>|name: &amp;str, n: u32| { ...; value }</code>. Types are optional when inference can decide them."},
+ {"front": "What decides <code>Fn</code> vs <code>FnMut</code> vs <code>FnOnce</code>?", "back": "What the body does with captures: read only (<code>Fn</code>), modify (<code>FnMut</code>), move out (<code>FnOnce</code>)."},
+ {"front": "What does <code>move</code> change?", "back": "How variables are captured (by value). Not which <code>Fn</code> trait the closure implements."},
+ {"front": "E0373", "back": "Closure may outlive the current function but borrows a local. Add <code>move</code>."},
+ {"front": "E0594 in a closure", "back": "Assigning to a capture inside an <code>Fn</code> closure. The bound should be <code>FnMut</code>."},
+ {"front": "Why can two closures not share an <code>impl Fn</code> return?", "back": "Each closure is a distinct anonymous type; <code>impl Fn</code> is one type. Use <code>Box&lt;dyn Fn&gt;</code>."},
+ {"front": "The one required method of <code>Iterator</code>", "back": "<code>fn next(&amp;mut self) -&gt; Option&lt;Self::Item&gt;</code>"},
+ {"front": "Are iterator adapters eager or lazy?", "back": "Lazy. Nothing runs until a consumer (<code>collect</code>, <code>sum</code>, <code>for</code>, <code>find</code>...) pulls items."},
+ {"front": "<code>windows(2)</code> vs <code>chunks(2)</code>", "back": "<code>windows</code> overlaps ([a,b],[b,c]); <code>chunks</code> does not ([a,b],[c,d])."},
+ {"front": "What does <code>use itertools::Itertools;</code> do?", "back": "Brings the extension trait into scope so <code>sorted</code>, <code>unique</code>, <code>join</code>, <code>format_with</code> are callable on any iterator."},
+ {"front": "<code>opt.into_iter().flatten()</code>", "back": "Turns <code>Option&lt;Vec&lt;T&gt;&gt;</code> into an iterator over the <code>T</code>s, or nothing."}]
+</script>
+    </div>
+    <h3>Going further</h3>
+    <ul>
+      <li><a href="https://doc.rust-lang.org/book/ch13-00-functional-features.html">The Rust Book, chapter 13: Closures and Iterators</a></li>
+      <li><a href="https://doc.rust-lang.org/rust-by-example/fn/closures.html">Rust by Example: Closures</a></li>
+      <li><a href="https://doc.rust-lang.org/std/iter/trait.Iterator.html">std docs: the <code>Iterator</code> trait</a> (every adapter, with examples) and <a href="https://doc.rust-lang.org/std/ops/trait.FnMut.html"><code>FnMut</code></a></li>
+      <li><a href="https://doc.rust-lang.org/reference/types/closure.html">The Rust Reference: closure types and capture modes</a></li>
+      <li><a href="https://docs.rs/itertools/0.15.0/itertools/trait.Itertools.html">itertools 0.15 docs</a>, the version Pixi pins</li>
+      <li>Pixi source: <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_compute_reporters/src/operation_id.rs">operation_id.rs</a> and <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_cli/src/run.rs">pixi_cli/src/run.rs</a></li>
+      <li>Next: <a href="m10-crate-design.html">M10 Visibility, Features &amp; Crate Design</a></li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>
