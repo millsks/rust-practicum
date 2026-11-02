@@ -1,0 +1,1440 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M04 · Option, Result &amp; ? · Rust Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-rust.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-module="m04">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Stage 1 · The Core Language · Module 04</p>
+    <h1>Option, Result &amp; ?</h1>
+    <p class="lede">Rust has no <code>None</code> that can sneak into any variable, and no exceptions that can fly out
+      of any call. Absence is a value of type <code>Option&lt;T&gt;</code> and failure is a value of type
+      <code>Result&lt;T, E&gt;</code>, and the type checker makes you deal with both. This module teaches you to
+      handle them fluently, to propagate errors with <code>?</code>, and to design the error types you will see on
+      every function in Pixi.</p>
+    <div class="lesson-meta"><span>⏱ ~2.5 hours</span><span>Prerequisites: <a href="m02-types-structs-enums.html">M02 Types, Structs &amp; Enums</a>, <a href="m03-ownership-borrowing.html">M03 Ownership &amp; Borrowing</a></span></div>
+    <ul class="objectives">
+      <li>Explain how <code>Option&lt;T&gt;</code> and <code>Result&lt;T, E&gt;</code> replace Python's <code>None</code> and exceptions, and what that buys</li>
+      <li>Handle them with <code>match</code>, <code>if let</code>, <code>let</code>-<code>else</code>, and <code>while let</code></li>
+      <li>Decide when <code>unwrap</code> and <code>expect</code> are acceptable, and write a useful <code>expect</code> message</li>
+      <li>Transform values with <code>map</code>, <code>and_then</code>, <code>ok_or</code>, <code>map_err</code>, and <code>unwrap_or_else</code></li>
+      <li>Propagate errors with <code>?</code>, and explain what it expands to, including the <code>From</code> conversion</li>
+      <li>Write a custom error enum that implements <code>Display</code>, <code>std::error::Error</code>, and <code>From</code></li>
+      <li>Read a Pixi function's error type and say what <code>thiserror</code> generated for it</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="absence-as-value">
+    <h2>None and exceptions, as values</h2>
+    <p>In Python, two things can happen to any call that the signature does not tell you about. It can return
+      <code>None</code>, and it can raise.</p>
+    <pre data-label="Python"><code class="language-python">config = {"channels": ["conda-forge"]}
+platform = config.get("platform")      # None: the key is missing
+print(platform.upper())                # AttributeError: 'NoneType' object has no attribute 'upper'
+
+port = int("80a")                      # ValueError: invalid literal for int() with base 10: '80a'</code></pre>
+    <p>A type hint like <code>Optional[str]</code> documents the first case, but nothing forces the caller to check,
+      and a type checker is optional. The second case is not in the signature at all: you learn which exceptions
+      <code>int()</code> raises by reading the docs or by watching it fail in production.</p>
+    <p>Rust uses two ordinary enums from the standard library instead. You already know enums with data from
+      <a href="m02-types-structs-enums.html">M02</a>; these are the same thing.</p>
+    <pre><code class="language-rust">enum Option&lt;T&gt; {
+    None,      // there is no value
+    Some(T),   // there is a value, of type T
+}
+
+enum Result&lt;T, E&gt; {
+    Ok(T),     // it worked, and here is the value
+    Err(E),    // it failed, and here is why
+}</code></pre>
+    <p>The <code>&lt;T&gt;</code> makes them <strong>generic</strong>: <code>Option&lt;u16&gt;</code> is "maybe a
+      <code>u16</code>", <code>Result&lt;u16, ParseIntError&gt;</code> is "a <code>u16</code>, or a parse error"
+      (<a href="m06-traits-generics.html">M06</a> covers generics properly). They are so common that
+      <code>Some</code>, <code>None</code>, <code>Ok</code>, and <code>Err</code> are in scope everywhere without a
+      <code>use</code>.</p>
+    <p>The difference from Python is that the possibility of absence or failure is part of the <em>type</em>. A
+      function that returns <code>Option&lt;&amp;String&gt;</code> cannot be used as if it returned a
+      <code>&amp;String</code>. Try it.</p>
+    <div class="runnable" data-title="A maybe is not a value" data-compile-fail>
+<textarea>
+fn main() {
+    let channels = vec![String::from("conda-forge")];
+    let first: &String = channels.first();
+    println!("{}", first.to_uppercase());
+}
+</textarea>
+    </div>
+    <p>This is E0308, "mismatched types": "expected <code>&amp;String</code>, found
+      <code>Option&lt;&amp;String&gt;</code>". <code>first()</code> returns <code>None</code> for an empty vector, so
+      its result is an <code>Option</code>. The compiler will not let you forget that, which is exactly the
+      Python <code>AttributeError</code> above, caught at compile time. The <code>help:</code> line suggests one fix,
+      <code>.expect(...)</code>; this module teaches you all of them and when each is right.</p>
+    <p>Run this to see what these values look like when printed with <code>{:?}</code>.</p>
+    <div class="runnable" data-title="Looking at Option and Result" data-predict>
+<textarea>
+fn main() {
+    let channels = vec!["conda-forge", "bioconda"];
+    println!("{:?}", channels.get(1));
+    println!("{:?}", channels.get(5));
+    println!("{:?}", "8080".parse::<u16>());
+    println!("{:?}", "80a".parse::<u16>());
+}
+</textarea>
+    </div>
+    <p>Note the last line: the error is a value, <code>ParseIntError { kind: InvalidDigit }</code>, that you can store,
+      return, inspect, and print. Nothing was raised; nothing unwound the stack.</p>
+    <aside class="callout note"><p>Why not just have <code>null</code>? Its inventor, Tony Hoare, called it his
+      "billion-dollar mistake": when every reference might be null, every use is a possible crash. In Rust, a
+      <code>&amp;String</code> is always a valid string. Only an <code>Option&lt;&amp;String&gt;</code> might be
+      absent, and you can see which is which. (It costs nothing at run time: <code>Option&lt;&amp;T&gt;</code> is
+      the same size as <code>&amp;T</code>, with <code>None</code> stored as the null pointer.)</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>Option&lt;T&gt;</code> is <code>Some(T)</code> or
+      <code>None</code>; <code>Result&lt;T, E&gt;</code> is <code>Ok(T)</code> or <code>Err(E)</code>. They are plain
+      enums, and the type system makes you handle both variants before you get at the <code>T</code>.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="matching">
+    <h2>Getting the value out: match, if let, let-else, while let</h2>
+    <p>Because <code>Option</code> and <code>Result</code> are enums, the basic tool is <code>match</code>, and it must
+      be exhaustive (<a href="m02-types-structs-enums.html">M02</a>): you cannot forget the <code>None</code> or
+      <code>Err</code> arm.</p>
+    <div class="runnable" data-title="match on Option and Result" data-predict>
+<textarea>
+fn describe(platform: Option<&str>) -> String {
+    match platform {
+        Some("linux-64") => String::from("Linux on x86-64"),
+        Some(other) => format!("some other platform: {other}"),
+        None => String::from("current platform"),
+    }
+}
+
+fn main() {
+    println!("{}", describe(Some("linux-64")));
+    println!("{}", describe(Some("osx-arm64")));
+    println!("{}", describe(None));
+
+    match "3.13".parse::<f64>() {
+        Ok(v) => println!("parsed {v}"),
+        Err(e) => println!("bad number: {e}"),
+    }
+}
+</textarea>
+    </div>
+    <p>Patterns can match a literal inside <code>Some</code> (<code>Some("linux-64")</code>) as well as bind whatever
+      is there (<code>Some(other)</code>). Arms are tried top to bottom.</p>
+    <h3><code>if let</code>: when only one case matters</h3>
+    <p>When you only care about one variant, a full <code>match</code> is noise. <code>if let</code> runs a block only
+      when the pattern matches, with an optional <code>else</code>.</p>
+    <pre><code class="language-rust">if let Some(platform) = config.platform {
+    println!("solving for {platform}");
+} else {
+    println!("solving for the current platform");
+}</code></pre>
+    <p>Edition 2024 adds <strong><code>let</code> chains</strong>: you can combine <code>if let</code> with other
+      conditions using <code>&amp;&amp;</code>. You will see this more and more in Pixi.</p>
+    <pre><code class="language-rust">if let Some(version) = python_version &amp;&amp; version.starts_with("3.") {
+    println!("Python 3: {version}");
+}</code></pre>
+    <h3><code>let</code>-<code>else</code>: bind or bail out</h3>
+    <p>The most common shape in real code is "get the value, or return early". <code>let</code>-<code>else</code>
+      writes that directly: the pattern either matches and binds a variable for the rest of the function, or the
+      <code>else</code> block runs, and that block must leave the function (with <code>return</code>,
+      <code>break</code>, <code>continue</code>, or a panic).</p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">def channel_name(spec: str) -&gt; str:
+    if "::" not in spec:
+        return "default"
+    channel, _ = spec.split("::", 1)
+    return channel</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">fn channel_name(spec: &amp;str) -&gt; &amp;str {
+    let Some((channel, _)) = spec.split_once("::") else {
+        return "default";
+    };
+    channel
+}</code></pre></div>
+    </div>
+    <p>The happy path stays at the left margin, with no nesting. Pixi uses this everywhere; you will see two examples
+      in the Reading Pixi section. If the <code>else</code> block does not diverge, the compiler stops you.</p>
+    <div class="runnable" data-title="An else that falls through" data-compile-fail>
+<textarea>
+fn major(version: &str) -> u32 {
+    let Some((major, _)) = version.split_once('.') else {
+        println!("no dot in {version}");
+    };
+    major.parse().unwrap_or(0)
+}
+
+fn main() {
+    println!("{}", major("3.13"));
+}
+</textarea>
+    </div>
+    <p>E0308 again, with the note "<code>else</code> clause of <code>let...else</code> does not diverge" and
+      <code>help: try adding a diverging expression, such as return or panic!(..)</code>. If the pattern did not
+      match, there is no <code>major</code> to use on the next line, so the <code>else</code> block must not continue
+      into it. Adding <code>return 0;</code> after the <code>println!</code> fixes it.</p>
+    <h3><code>while let</code>: loop while something is there</h3>
+    <p><code>while let</code> repeats as long as the pattern matches. The classic use is draining a stack, where
+      <code>pop()</code> returns <code>Option&lt;T&gt;</code>.</p>
+    <div class="runnable" data-title="while let with pop" data-predict>
+<textarea>
+fn main() {
+    let mut todo = vec!["build", "test", "lint"];
+    while let Some(task) = todo.pop() {
+        println!("running {task}");
+    }
+    println!("left: {}", todo.len());
+}
+</textarea>
+    </div>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>match</code> when several cases matter;
+      <code>if let</code> for one case; <code>let</code>-<code>else</code> to bind or return early (its
+      <code>else</code> must diverge); <code>while let</code> to loop until <code>None</code>.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="result">
+    <h2>Result instead of exceptions</h2>
+    <p>Here is the same parse in both languages. Read them side by side.</p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">def parse_port(text: str) -&gt; int:
+    try:
+        port = int(text)
+    except ValueError as e:
+        raise ValueError(f"bad port {text!r}: {e}")
+    if not 0 &lt; port &lt; 65536:
+        raise ValueError(f"port {port} out of range")
+    return port</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">fn parse_port(text: &amp;str) -&gt; Result&lt;u16, String&gt; {
+    let port: u16 = match text.parse() {
+        Ok(p) =&gt; p,
+        Err(e) =&gt; return Err(format!("bad port {text:?}: {e}")),
+    };
+    if port == 0 {
+        return Err(String::from("port 0 is reserved"));
+    }
+    Ok(port)
+}</code></pre></div>
+    </div>
+    <p>The Rust signature, <code>-&gt; Result&lt;u16, String&gt;</code>, tells every caller "this can fail, and the
+      failure is described by a <code>String</code>". Parsing into <code>u16</code> rejects anything above 65535 for
+      free, because the type itself has that range. And the error is <em>returned</em>: there is no hidden second
+      exit from the function.</p>
+    <p>What does that buy you? In Python, any line might raise, so reasoning about what state an object is in after a
+      failure is hard. In Rust, a function can only fail at the places that return an <code>Err</code>, and you can
+      see them. When you read Pixi, every fallible step is marked, usually with the <code>?</code> you will learn
+      shortly.</p>
+    <p>A <code>Result</code> is not the number inside it. You must decide what to do with the error before you can do
+      arithmetic.</p>
+    <div class="runnable" data-title="Arithmetic on a Result" data-compile-fail>
+<textarea>
+fn main() {
+    let port = "8080".parse::<u16>();
+    let next = port + 1;
+    println!("{next}");
+}
+</textarea>
+    </div>
+    <p>E0369, "cannot add <code>{integer}</code> to <code>Result&lt;u16, ParseIntError&gt;</code>". The left side's
+      type names the problem: <code>port</code> is a <code>Result</code>. Handle it first (with <code>match</code>,
+      <code>?</code>, or a combinator) to get the <code>u16</code> out.</p>
+    <p>Ignoring a <code>Result</code> entirely is allowed, but the compiler warns, because <code>Result</code> is
+      marked <code>#[must_use]</code>. Run this and look at the compiler output.</p>
+    <div class="runnable" data-title="An ignored Result">
+<textarea>
+fn save(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err(String::from("empty path"));
+    }
+    Ok(())
+}
+
+fn main() {
+    save("");
+    println!("did it save? nobody checked");
+}
+</textarea>
+    </div>
+    <p>The warning is "unused <code>Result</code> that must be used" with "this <code>Result</code> may be an
+      <code>Err</code> variant, which should be handled". Pixi builds with <code>-D warnings</code> in CI, so in Pixi
+      this would be an error. If you really mean to ignore a failure, say so with <code>let _ = save("");</code>, and
+      leave a comment explaining why.</p>
+    <aside class="callout note"><p><code>Ok(())</code> is how a function that returns nothing useful says "it worked".
+      <code>()</code> is the <em>unit</em> type, Rust's equivalent of a function returning <code>None</code> in
+      Python.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> a fallible function returns <code>Result&lt;T, E&gt;</code>,
+      and the error is an ordinary return value. You cannot use the <code>T</code> until you have handled the
+      <code>E</code>, and you cannot silently ignore the whole thing.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="unwrap">
+    <h2>unwrap, expect, and the defaults</h2>
+    <p><code>unwrap()</code> gives you the value inside <code>Some</code> or <code>Ok</code>, and
+      <strong>panics</strong> on <code>None</code> or <code>Err</code>. A panic stops the current thread with an error
+      message and a non-zero exit. It is closer to Python's <code>assert</code> than to an exception: it means "this is a
+      bug", not "this can happen". <code>expect("message")</code> is the same with a message you choose.</p>
+    <div class="runnable" data-title="A panic, on purpose">
+<textarea>
+fn main() {
+    let ports = ["8080", "80a"];
+    for text in ports {
+        let port: u16 = text.parse().expect("ports in this list are hard-coded and valid");
+        println!("port {port}");
+    }
+}
+</textarea>
+    </div>
+    <p>The first port prints. The second panics, and the message on stderr reads
+      a line that starts <code>thread 'main'</code> and names the location, <code>src/main.rs:4:38</code>, then <code>ports in this list are hard-coded and valid:
+      ParseIntError { kind: InvalidDigit }</code>. You get the file and line, your message, and the error's debug
+      form. That is why <code>expect</code> beats <code>unwrap</code>: the message records <em>why you believed this
+      could not fail</em>, which is what the person reading the crash report needs.</p>
+    <h3>When unwrap and expect are acceptable</h3>
+    <ul>
+      <li><strong>In tests.</strong> A panic fails the test with a clear message, which is what you want.</li>
+      <li><strong>When an invariant guarantees success</strong> and you can say why in the <code>expect</code> message.
+        Pixi does this: adding one day to a valid date cannot overflow, so
+        (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_spec/src/exclude_newer.rs#L184-L188">crates/pixi_spec/src/exclude_newer.rs</a>):</li>
+    </ul>
+    <pre><code class="language-rust">let next_midnight = date
+    .checked_add_days(Days::new(1))
+    .expect("valid exclude-newer date should have a following day")
+    .and_time(NaiveTime::MIN)
+    .and_utc();</code></pre>
+    <ul>
+      <li><strong>In examples and throwaway prototypes</strong>, where error handling would hide the point.</li>
+    </ul>
+    <p>Not acceptable: anything that depends on user input, files, the network, environment variables, or the
+      contents of a <code>pixi.toml</code>. Those fail for reasons outside your program, and a panic gives the user a
+      crash instead of an error message. In Pixi review, an <code>unwrap()</code> on user data is a change request.</p>
+    <h3>Defaults instead of panics</h3>
+    <p>Often the right answer to "what if it is missing?" is a default value. These methods never panic:</p>
+    <table>
+      <thead><tr><th>Method</th><th>Gives you</th><th>Use when</th></tr></thead>
+      <tbody>
+        <tr><td><code>unwrap_or(v)</code></td><td>the value, or <code>v</code></td><td>the default is a cheap constant</td></tr>
+        <tr><td><code>unwrap_or_else(|| f())</code></td><td>the value, or the result of calling <code>f</code></td><td>the default is expensive (allocates, does I/O); <code>f</code> runs only when needed</td></tr>
+        <tr><td><code>unwrap_or_default()</code></td><td>the value, or the type's <code>Default</code> (0, <code>""</code>, empty <code>Vec</code>)</td><td>"empty" is the natural default</td></tr>
+      </tbody>
+    </table>
+    <div class="runnable" data-title="Defaults" data-predict>
+<textarea>
+fn main() {
+    let jobs: Option<u32> = None;
+    let name: Option<String> = None;
+    let channel: Option<&str> = Some("bioconda");
+
+    println!("{}", jobs.unwrap_or(4));
+    println!("[{}]", name.unwrap_or_default());
+    println!("{}", channel.unwrap_or("conda-forge"));
+    let level = "x".parse::<u8>().unwrap_or_else(|e| {
+        println!("bad level ({e}), using 1");
+        1
+    });
+    println!("{level}");
+}
+</textarea>
+    </div>
+    <p>The <code>|e| { ... }</code> is a <strong>closure</strong>, an inline anonymous function, like Python's
+      <code>lambda</code> but allowed to contain statements. For <code>Result::unwrap_or_else</code>, the closure
+      receives the error. Closures get a full module in <a href="m09-closures-iterators.html">M09</a>; for now,
+      read <code>|x| expr</code> as <code>lambda x: expr</code>.</p>
+    <aside class="callout warn"><p><code>unwrap_or(expensive())</code> calls <code>expensive()</code> every time, even
+      when the value is present, because arguments are evaluated before the call. Clippy's
+      <code>or_fun_call</code> lint catches this; switch to <code>unwrap_or_else(|| expensive())</code>.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>unwrap</code>/<code>expect</code> mean "a failure
+      here is a bug". Use them in tests and for real invariants, with an <code>expect</code> message that says why it
+      cannot fail. For defaults, use <code>unwrap_or</code>, <code>unwrap_or_else</code>, or
+      <code>unwrap_or_default</code>.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="combinators">
+    <h2>Combinators: transform without unpacking</h2>
+    <p>A lot of code has the shape "if there is a value, do something to it; otherwise pass the absence along".
+      Writing a <code>match</code> for each step gets long. <strong>Combinators</strong> are methods on
+      <code>Option</code> and <code>Result</code> that do one such step each, so you can chain them.</p>
+    <table>
+      <thead><tr><th>Method</th><th>On</th><th>Does</th></tr></thead>
+      <tbody>
+        <tr><td><code>map(f)</code></td><td>both</td><td>transform the inside value: <code>Some(x)</code> → <code>Some(f(x))</code>, <code>Ok(x)</code> → <code>Ok(f(x))</code>; absence or error passes through</td></tr>
+        <tr><td><code>and_then(f)</code></td><td>both</td><td>like <code>map</code>, but <code>f</code> itself returns an <code>Option</code>/<code>Result</code>, so the step can fail too</td></tr>
+        <tr><td><code>filter(p)</code></td><td><code>Option</code></td><td>keep <code>Some(x)</code> only if <code>p(&amp;x)</code> is true</td></tr>
+        <tr><td><code>ok_or(e)</code> / <code>ok_or_else(f)</code></td><td><code>Option</code></td><td>turn <code>Option</code> into <code>Result</code>: <code>None</code> becomes <code>Err(e)</code></td></tr>
+        <tr><td><code>ok()</code></td><td><code>Result</code></td><td>turn <code>Result</code> into <code>Option</code>, discarding the error</td></tr>
+        <tr><td><code>map_err(f)</code></td><td><code>Result</code></td><td>transform the error, leave <code>Ok</code> alone</td></tr>
+        <tr><td><code>is_some()</code>, <code>is_none()</code>, <code>is_ok()</code>, <code>is_err()</code></td><td>both</td><td>test which variant, as a <code>bool</code></td></tr>
+        <tr><td><code>as_deref()</code></td><td><code>Option</code></td><td><code>&amp;Option&lt;String&gt;</code> → <code>Option&lt;&amp;str&gt;</code>, for borrowing what is inside</td></tr>
+      </tbody>
+    </table>
+    <p>The difference between <code>map</code> and <code>and_then</code> is the one people trip on. If the step
+      cannot fail, use <code>map</code>. If it can (it returns <code>Option</code> or <code>Result</code>), use
+      <code>and_then</code>, otherwise you end up with <code>Some(Some(x))</code>.</p>
+    <div class="runnable" data-title="Chaining combinators" data-predict>
+<textarea>
+fn major_of(spec: &str) -> Option<u32> {
+    spec.split_once("==")
+        .map(|(_, version)| version)
+        .and_then(|version| version.split('.').next())
+        .and_then(|major| major.parse().ok())
+}
+
+fn main() {
+    println!("{:?}", major_of("python==3.13.1"));
+    println!("{:?}", major_of("numpy>=2"));
+    println!("{:?}", major_of("pandas==x.1"));
+
+    let threads: Result<u32, String> = "8"
+        .parse::<u32>()
+        .map_err(|e| format!("bad thread count: {e}"))
+        .map(|n| n * 2);
+    println!("{threads:?}");
+
+    let platform: Option<&str> = None;
+    let r: Result<&str, String> = platform.ok_or(String::from("no platform set"));
+    println!("{r:?}");
+}
+</textarea>
+    </div>
+    <p>Read <code>major_of</code> top to bottom as a pipeline: split at <code>==</code> (maybe), keep the version part,
+      take the text before the first dot (maybe), parse it (maybe). Any <code>None</code> short-circuits the rest.
+      Note <code>.parse().ok()</code>: <code>parse</code> returns a <code>Result</code>, and <code>.ok()</code> turns it
+      into an <code>Option</code> so it fits the chain.</p>
+    <aside class="callout pixi"><p>Pixi strips the internal <code>direct+</code> prefix from a URL with exactly this
+      style
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_install_pypi/src/utils.rs#L32-L39">crates/pixi_install_pypi/src/utils.rs</a>):</p>
+    <pre><code class="language-rust">/// Strip of the `direct` scheme from the url if it is there
+pub fn strip_direct_scheme(url: &amp;Url) -&gt; Cow&lt;'_, Url&gt; {
+    url.as_ref()
+        .strip_prefix("direct+")
+        .and_then(|str| Url::from_str(str).ok())
+        .map(Cow::Owned)
+        .unwrap_or(Cow::Borrowed(url))
+}</code></pre>
+    <p><code>strip_prefix</code> returns <code>Option&lt;&amp;str&gt;</code> (<code>None</code> if there is no
+      prefix). <code>and_then</code> parses what remains, and <code>.ok()</code> turns a parse failure into
+      <code>None</code>. <code>map(Cow::Owned)</code> wraps a newly parsed URL; <code>unwrap_or</code> falls back to
+      borrowing the original. <code>Cow</code> ("clone on write") is either borrowed or owned data; it is covered in
+      <a href="m08-smart-pointers.html">M08</a>. Passing a variant name like <code>Cow::Owned</code> as the function is
+      a common shorthand for <code>|u| Cow::Owned(u)</code>.</p></aside>
+    <aside class="callout pro"><p>Combinator chains are idiomatic, but not mandatory. If a chain needs a comment to be
+      understood, a <code>match</code> or a <code>let</code>-<code>else</code> is often clearer. Pixi mixes both. Clippy
+      will suggest the combinator form for simple cases (<code>manual_map</code>, <code>option_map_unit_fn</code>), so
+      you will see those transformations in review.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>map</code> for steps that cannot fail,
+      <code>and_then</code> for steps that can, <code>ok_or</code> to turn absence into an error, <code>ok()</code> to
+      turn an error into absence, <code>map_err</code> to change the error.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="question-mark">
+    <h2>The ? operator</h2>
+    <p>Most of the time, a function that hits an error cannot fix it and should hand it to its caller. Writing that
+      with <code>match</code> is repetitive:</p>
+    <pre><code class="language-rust">let text = match std::fs::read_to_string(path) {
+    Ok(t) =&gt; t,
+    Err(e) =&gt; return Err(e.into()),
+};</code></pre>
+    <p>The <strong><code>?</code> operator</strong> is that whole <code>match</code> in one character:</p>
+    <pre><code class="language-rust">let text = std::fs::read_to_string(path)?;</code></pre>
+    <p>Precisely, <code>expr?</code> on a <code>Result</code> means: if <code>expr</code> is <code>Ok(v)</code>, the
+      expression's value is <code>v</code>; if it is <code>Err(e)</code>, return <code>Err(From::from(e))</code> from
+      the current function right now. That <code>From::from</code> step converts the error into the function's own
+      error type, if a conversion exists; you will use it in the next section.</p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">def read_threads(text: str) -&gt; int:
+    # int() may raise; the exception just
+    # propagates, invisibly, to our caller.
+    n = int(text.strip())
+    return n * 2</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">use std::num::ParseIntError;
+
+fn read_threads(text: &amp;str) -&gt; Result&lt;u32, ParseIntError&gt; {
+    // `?` propagates, visibly, to our caller.
+    let n: u32 = text.trim().parse()?;
+    Ok(n * 2)
+}</code></pre></div>
+    </div>
+    <p>This is the closest Rust gets to Python's exception propagation, with one big difference: the
+      <code>?</code> marks every place where the function can return early. When you read Pixi, scan for
+      <code>?</code> to see every failure point.</p>
+    <div class="runnable" data-title="? in a chain of steps" data-predict>
+<textarea>
+use std::num::ParseIntError;
+
+fn parse_pair(text: &str) -> Result<(u32, u32), ParseIntError> {
+    let (a, b) = text.split_once(',').unwrap_or((text, "0"));
+    let a: u32 = a.trim().parse()?;
+    let b: u32 = b.trim().parse()?;
+    Ok((a, b))
+}
+
+fn main() {
+    println!("{:?}", parse_pair("3, 13"));
+    println!("{:?}", parse_pair("7"));
+    match parse_pair("3, x") {
+        Ok(p) => println!("got {p:?}"),
+        Err(e) => println!("error: {e}"),
+    }
+}
+</textarea>
+    </div>
+    <h3><code>?</code> on Option</h3>
+    <p><code>?</code> also works on an <code>Option</code> inside a function that returns <code>Option</code>:
+      <code>None</code> returns <code>None</code> early. This often reads better than a long <code>and_then</code>
+      chain.</p>
+    <div class="runnable" data-title="? on Option" data-predict>
+<textarea>
+fn channel_and_name(spec: &str) -> Option<(&str, &str)> {
+    let (channel, rest) = spec.split_once("::")?;
+    let name = rest.split_whitespace().next()?;
+    Some((channel, name))
+}
+
+fn main() {
+    println!("{:?}", channel_and_name("conda-forge::numpy >=2"));
+    println!("{:?}", channel_and_name("numpy >=2"));
+    println!("{:?}", channel_and_name("bioconda::"));
+}
+</textarea>
+    </div>
+    <h3>Where ? is not allowed</h3>
+    <p><code>?</code> needs somewhere to return the error to, so the enclosing function must return a compatible type.
+      Using it in a <code>main</code> that returns <code>()</code> is the classic mistake.</p>
+    <div class="runnable" data-title="? in a function that returns ()" data-compile-fail>
+<textarea>
+fn main() {
+    let jobs: u32 = "4".parse()?;
+    println!("{jobs}");
+}
+</textarea>
+    </div>
+    <p>E0277: "the <code>?</code> operator can only be used in a function that returns <code>Result</code> or
+      <code>Option</code> (or another type that implements <code>FromResidual</code>)". The label sits on the
+      <code>?</code>, and a second span marks the function: "this function should return <code>Result</code> or
+      <code>Option</code> to accept <code>?</code>". The fix is to change the return type; for <code>main</code>, see
+      <code>Box&lt;dyn Error&gt;</code> below. Mixing the two also fails: <code>?</code> on an <code>Option</code> inside
+      a function returning <code>Result</code> is E0277 too. Convert first with <code>.ok_or(...)?</code>.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>x?</code> = "unwrap <code>Ok</code>/<code>Some</code>,
+      or return the <code>Err</code> (converted with <code>From</code>) or <code>None</code> from this function now".
+      The function's return type must be a <code>Result</code> or <code>Option</code> to match.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="custom-errors">
+    <h2>Custom error types</h2>
+    <p><code>Result&lt;T, String&gt;</code> is fine for a quick script, but a <code>String</code> error has a
+      problem: callers cannot react differently to different failures without parsing text. In Python you would
+      define exception classes. In Rust you define an <strong>error enum</strong>, one variant per kind of failure,
+      each carrying the data needed to explain it.</p>
+    <p>A proper error type does three things:</p>
+    <ol>
+      <li>Implements <strong><code>Display</code></strong>, so <code>{}</code> prints a message for humans.</li>
+      <li>Implements <strong><code>std::error::Error</code></strong>, the standard trait every error type shares. Its
+        <code>source()</code> method can return the lower-level error that caused this one, giving a chain like Python's
+        <code>raise ... from e</code>.</li>
+      <li>Implements <strong><code>From&lt;LowerLevelError&gt;</code></strong> for each error it wraps, so <code>?</code>
+        converts automatically.</li>
+    </ol>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">class PinError(Exception):
+    pass
+
+class EmptySpec(PinError):
+    pass
+
+class BadVersion(PinError):
+    def __init__(self, text, cause):
+        super().__init__(f"bad version {text!r}")
+        self.__cause__ = cause</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">#[derive(Debug)]
+enum PinError {
+    EmptySpec,
+    MissingVersion(String),
+    BadVersion(ParseIntError),
+}
+// plus: impl Display, impl Error, impl From</code></pre></div>
+    </div>
+    <p>Here is a complete one. Read it in order, then run it.</p>
+    <div class="runnable" data-title="A complete error enum" data-predict>
+<textarea>
+use std::error::Error;
+use std::fmt;
+use std::num::ParseIntError;
+
+#[derive(Debug)]
+enum PinError {
+    EmptySpec,
+    MissingVersion(String),
+    BadVersion(ParseIntError),
+}
+
+impl fmt::Display for PinError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PinError::EmptySpec => write!(f, "the spec is empty"),
+            PinError::MissingVersion(name) => write!(f, "`{name}` has no `==` version"),
+            PinError::BadVersion(_) => write!(f, "the version is not a number"),
+        }
+    }
+}
+
+impl Error for PinError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            PinError::BadVersion(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<ParseIntError> for PinError {
+    fn from(e: ParseIntError) -> Self {
+        PinError::BadVersion(e)
+    }
+}
+
+fn parse_pin(spec: &str) -> Result<(&str, u32), PinError> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err(PinError::EmptySpec);
+    }
+    let (name, version) = spec
+        .split_once("==")
+        .ok_or_else(|| PinError::MissingVersion(spec.to_string()))?;
+    let major: u32 = version.parse()?;
+    Ok((name, major))
+}
+
+fn main() {
+    for spec in ["python==3", "", "numpy", "pandas==two"] {
+        match parse_pin(spec) {
+            Ok((name, major)) => println!("ok: {name} {major}"),
+            Err(e) => match e.source() {
+                Some(cause) => println!("error: {e} (caused by: {cause})"),
+                None => println!("error: {e}"),
+            },
+        }
+    }
+}
+</textarea>
+    </div>
+    <p>The pieces, one at a time:</p>
+    <ul>
+      <li><code>#[derive(Debug)]</code> is required: the <code>Error</code> trait needs both <code>Debug</code> and
+        <code>Display</code>.</li>
+      <li><code>impl fmt::Display</code> writes one message per variant. Messages are lowercase with no trailing
+        period, by Rust convention, because they are often embedded in longer messages.</li>
+      <li><code>impl Error</code> needs no methods at all; <code>source</code> has a default that returns
+        <code>None</code>. Override it when a variant wraps a cause, as <code>BadVersion</code> does.</li>
+      <li><code>impl From&lt;ParseIntError&gt;</code> is what makes <code>version.parse()?</code> compile in a function
+        returning <code>Result&lt;_, PinError&gt;</code>: the <code>?</code> calls <code>PinError::from(e)</code>.</li>
+      <li><code>ok_or_else(|| ...)?</code> converts the <code>Option</code> from <code>split_once</code> into a
+        <code>Result</code> with a specific error, then propagates it.</li>
+    </ul>
+    <p>Delete the <code>From</code> impl and see what <code>?</code> says without it.</p>
+    <div class="runnable" data-title="? without a From conversion" data-compile-fail>
+<textarea>
+use std::num::ParseIntError;
+
+#[derive(Debug)]
+enum PinError {
+    BadVersion(ParseIntError),
+}
+
+fn parse_major(version: &str) -> Result<u32, PinError> {
+    let major = version.parse::<u32>()?;
+    Ok(major)
+}
+
+fn main() {
+    println!("{:?}", parse_major("3"));
+}
+</textarea>
+    </div>
+    <p>E0277: "<code>?</code> couldn't convert the error to <code>PinError</code>", with "the trait
+      <code>From&lt;ParseIntError&gt;</code> is not implemented for <code>PinError</code>". The note explains the
+      rule: "the question mark operation (<code>?</code>) implicitly performs a conversion on the error value using
+      the <code>From</code> trait". Two fixes: add the <code>From</code> impl, or convert explicitly at that call with
+      <code>.map_err(PinError::BadVersion)?</code>. The explicit form is useful when the same lower-level error should
+      become different variants in different places. (The cell names the target type with <code>parse::&lt;u32&gt;()</code> on purpose. With <code>let major: u32 = version.parse()?;</code> the compiler tries to make <code>parse</code> produce a <code>PinError</code> directly and reports the less helpful E0271, "type mismatch resolving". When an error around <code>?</code> is confusing, pinning down the types with <code>::&lt;T&gt;</code> (the "turbofish") or a type annotation often makes it clearer.)</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> a library-quality error is an enum with
+      <code>Debug</code>, <code>Display</code>, <code>Error</code> (with <code>source</code> for wrapped causes), and a
+      <code>From</code> impl per wrapped error so that <code>?</code> converts automatically.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="box-dyn-error">
+    <h2><code>Box&lt;dyn Error&gt;</code> and errors in main</h2>
+    <p>Sometimes you do not want a precise error type. In <code>main</code>, in a small tool, or in a test helper, you
+      just want "any error, with a message". Rust's answer is <code>Box&lt;dyn Error&gt;</code>: a heap-allocated
+      value of <em>some</em> type that implements <code>Error</code>. <code>dyn Error</code> is a trait object, a value
+      known only by the trait it implements (<a href="m06-traits-generics.html">M06</a> explains it; <code>Box</code> is
+      <a href="m08-smart-pointers.html">M08</a>). For now, the useful fact is that <code>?</code> converts
+      <em>any</em> error type into <code>Box&lt;dyn Error&gt;</code>, and so do <code>String</code> and
+      <code>&amp;str</code> via <code>.into()</code>.</p>
+    <p><code>main</code> itself may return <code>Result&lt;(), E&gt;</code> for any <code>E</code> that implements
+      <code>Debug</code>. If it returns <code>Err</code>, Rust prints <code>Error: </code> followed by the error's
+      <code>Debug</code> form, and the process exits with code 1.</p>
+    <div class="runnable" data-title="main returning Result">
+<textarea>
+use std::error::Error;
+
+fn jobs_from(text: &str) -> Result<u32, Box<dyn Error>> {
+    let jobs: u32 = text.trim().parse()?;
+    if jobs == 0 {
+        return Err("jobs must be at least 1".into());
+    }
+    Ok(jobs)
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    println!("{}", jobs_from(" 8 ")?);
+    println!("{}", jobs_from("0")?);
+    println!("never printed");
+    Ok(())
+}
+</textarea>
+    </div>
+    <p>The first call prints <code>8</code>. The second returns an error, <code>?</code> in <code>main</code> passes it
+      up, and the runtime prints <code>Error: "jobs must be at least 1"</code> (the quotes are because it uses
+      <code>Debug</code>) and exits with status 1. Two different error types, <code>ParseIntError</code> and a string
+      message, flowed through one <code>Box&lt;dyn Error&gt;</code> return type with no conversion code.</p>
+    <h3>Which one should I use?</h3>
+    <table>
+      <thead><tr><th>Situation</th><th>Error type</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>A library function others will call</td><td>A custom enum</td><td>Callers can <code>match</code> on the variant and react</td></tr>
+        <tr><td><code>main</code>, a CLI command, a script, a test helper</td><td><code>Box&lt;dyn Error&gt;</code> (or <code>miette::Result</code> in Pixi)</td><td>You only report the error; precise types add nothing</td></tr>
+        <tr><td>A quick private helper</td><td><code>String</code></td><td>Acceptable while prototyping; upgrade when callers need to branch</td></tr>
+      </tbody>
+    </table>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>Box&lt;dyn Error&gt;</code> is "any error". <code>?</code>
+      converts every error into it, and <code>"text".into()</code> makes one from a message. Use it at the top of a
+      program; use custom enums in library code.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="thiserror-miette">
+    <h2>What Pixi uses: thiserror and miette</h2>
+    <p>Writing <code>Display</code>, <code>Error</code>, and <code>From</code> by hand for every error enum is
+      mechanical. Pixi, like most of the Rust ecosystem, uses two crates to do it. You will learn them properly in
+      Level 2; here you only need to read them.</p>
+    <ul>
+      <li><strong><code>thiserror</code></strong> is a derive macro: you annotate an enum and it writes the
+        <code>Display</code>, <code>Error</code>, and <code>From</code> impls for you. The generated code is the same
+        code you wrote in the previous section.</li>
+      <li><strong><code>miette</code></strong> adds a <code>Diagnostic</code> trait for rich, user-facing error reports
+        (help text, error codes, source snippets with underlined spans, like the Rust compiler's own messages). Pixi's
+        CLI commands return <code>miette::Result&lt;T&gt;</code>, the application-level "any error" type, playing the
+        role <code>Box&lt;dyn Error&gt;</code> played above.</li>
+    </ul>
+    <p>Here is part of a real Pixi error enum
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pypi_modifiers/src/pypi_tags.rs#L13-L45">crates/pypi_modifiers/src/pypi_tags.rs</a>,
+      trimmed):</p>
+    <pre><code class="language-rust">#[derive(Debug, thiserror::Error, Diagnostic)]
+#[error("failed to determine pypi tags")]
+pub enum PyPITagError {
+    #[error("failed to determine the python wheel tags for the target platform")]
+    FailedToDetermineWheelTags(#[from] uv_platform_tags::TagsError),
+
+    #[error("failed to determine pypi tag for platform: {0}")]
+    FailedToDeterminePlatformTags(Platform),
+    // ...
+    #[error("failed to get major and minor version from '{0}' version: '{1}'")]
+    FailedToGetMajorMinorVersion(String, String),
+    // ...
+    #[error(transparent)]
+    ParseMatchSpecError(#[from] rattler_conda_types::ParseMatchSpecError),
+}</code></pre>
+    <p>Read each attribute as the hand-written code it replaces:</p>
+    <table>
+      <thead><tr><th>Attribute</th><th>Generates</th></tr></thead>
+      <tbody>
+        <tr><td><code>#[derive(thiserror::Error)]</code></td><td><code>impl std::error::Error for PyPITagError</code></td></tr>
+        <tr><td><code>#[error("...: {0}")]</code> on a variant</td><td>that variant's arm in <code>impl Display</code>; <code>{0}</code>, <code>{1}</code> are the tuple fields</td></tr>
+        <tr><td><code>#[from]</code> on a field</td><td><code>impl From&lt;TagsError&gt; for PyPITagError</code>, and <code>source()</code> returning that field</td></tr>
+        <tr><td><code>#[error(transparent)]</code></td><td><code>Display</code> and <code>source</code> forwarded straight to the wrapped error</td></tr>
+        <tr><td><code>Diagnostic</code> (from miette)</td><td>the hooks miette uses for codes, help text, and labels (all defaults here)</td></tr>
+      </tbody>
+    </table>
+    <p>So the <code>FailedToGetMajorMinorVersion</code> arm is equivalent to this, which you could now write
+      yourself:</p>
+    <pre><code class="language-rust">PyPITagError::FailedToGetMajorMinorVersion(a, b) =&gt; {
+    write!(f, "failed to get major and minor version from '{a}' version: '{b}'")
+}</code></pre>
+    <p>The Playground has <code>thiserror</code>, so you can try the derive. This cell is the error enum from the
+      previous section, written with the derive instead of by hand.</p>
+    <div class="runnable" data-title="thiserror on the Playground" data-predict>
+<textarea>
+use std::num::ParseIntError;
+
+#[derive(Debug, thiserror::Error)]
+enum PinError {
+    #[error("the spec is empty")]
+    EmptySpec,
+    #[error("`{0}` has no `==` version")]
+    MissingVersion(String),
+    #[error("the version is not a number")]
+    BadVersion(#[from] ParseIntError),
+}
+
+fn parse_major(spec: &str) -> Result<u32, PinError> {
+    if spec.is_empty() {
+        return Err(PinError::EmptySpec);
+    }
+    let (_, version) = spec
+        .split_once("==")
+        .ok_or_else(|| PinError::MissingVersion(spec.to_string()))?;
+    Ok(version.parse()?)
+}
+
+fn main() {
+    for spec in ["python==3", "", "numpy", "pandas==two"] {
+        match parse_major(spec) {
+            Ok(major) => println!("{major}"),
+            Err(e) => println!("{e}"),
+        }
+    }
+}
+</textarea>
+    </div>
+    <aside class="callout pixi"><p>In Pixi's CLI code you will see <code>.into_diagnostic()?</code> on calls to other
+      crates, for example compiling a user-supplied regex in <code>pixi exec</code>
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_cli/src/exec.rs#L412-L415">crates/pixi_cli/src/exec.rs</a>):</p>
+    <pre><code class="language-rust">if let Some(ref regex) = regex {
+    let regex = regex::Regex::new(regex).into_diagnostic()?;
+    packages_to_output.retain(|package| regex.is_match(package.name.as_normalized()));
+}</code></pre>
+    <p><code>into_diagnostic()</code> is a miette helper that wraps any <code>std::error::Error</code> as a miette
+      report, so <code>?</code> can return it from a function whose type is <code>miette::Result</code>. It plays the
+      same role as the automatic conversion into <code>Box&lt;dyn Error&gt;</code>.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>thiserror</code> writes the <code>Display</code>,
+      <code>Error</code>, and <code>From</code> impls from attributes; <code>#[from]</code> is what makes
+      <code>?</code> convert. <code>miette</code> is Pixi's user-facing report type, and
+      <code>into_diagnostic()?</code> is how foreign errors enter it.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="pixi-reading">
+    <h2>Reading Pixi</h2>
+    <h3>A pipeline of fallible steps</h3>
+    <p>Pixi computes the Python wheel tags for a platform (the <code>cp313-manylinux_2_28_x86_64</code>-style strings
+      that decide which PyPI wheels are installable) in
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pypi_modifiers/src/pypi_tags.rs#L62-L73">crates/pypi_modifiers/src/pypi_tags.rs</a>:</p>
+    <pre><code class="language-rust">/// Get the python version and implementation name for the specified platform.
+pub fn get_pypi_tags(
+    platform: &amp;PixiPlatform,
+    python_record: &amp;PackageRecord,
+) -&gt; Result&lt;uv_platform_tags::Tags, PyPITagError&gt; {
+    let platform = get_platform_tags(platform)?;
+    let python_version = get_python_version(python_record)?;
+    let implementation_name = get_implementation_name(python_record)?;
+    let gil_disabled = gil_disabled(python_record)?;
+    create_tags(platform, python_version, implementation_name, gil_disabled)
+}</code></pre>
+    <p>And one of the steps it calls
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pypi_modifiers/src/pypi_tags.rs#L238-L246">same file</a>):</p>
+    <pre><code class="language-rust">fn get_python_version(python_record: &amp;PackageRecord) -&gt; Result&lt;(u8, u8), PyPITagError&gt; {
+    let Some(python_version) = python_record.version.as_major_minor() else {
+        return Err(PyPITagError::FailedToGetMajorMinorVersion(
+            python_record.name.as_normalized().to_string(),
+            python_record.version.to_string(),
+        ));
+    };
+    Ok((python_version.0 as u8, python_version.1 as u8))
+}</code></pre>
+    <ul>
+      <li>Both functions borrow their inputs (<code>&amp;PixiPlatform</code>, <code>&amp;PackageRecord</code>, from
+        <a href="m03-ownership-borrowing.html">M03</a>) and return <code>Result&lt;_, PyPITagError&gt;</code>: one error
+        enum for the whole module.</li>
+      <li>In <code>get_pypi_tags</code>, four lines end in <code>?</code>. Each is a step that can fail; the first
+        failure returns from the function. Because every step already returns <code>PyPITagError</code>, the
+        <code>From</code> conversion is the identity.</li>
+      <li>The last line has no <code>?</code> and no <code>Ok(...)</code>: <code>create_tags</code> already returns a
+        <code>Result&lt;Tags, PyPITagError&gt;</code>, so its result is returned as is.</li>
+      <li>Shadowing: <code>let platform = get_platform_tags(platform)?;</code>
+        replaces the <code>&amp;PixiPlatform</code> parameter with the computed tag platform under the same name
+        (shadowing, <a href="m02-types-structs-enums.html">M02</a>).</li>
+      <li>In <code>get_python_version</code>, <code>as_major_minor()</code> returns an <code>Option</code>. The
+        <code>let</code>-<code>else</code> turns <code>None</code> into a specific, descriptive error carrying the
+        package name and version as owned <code>String</code>s, built with <code>to_string()</code> because the error
+        must outlive the borrowed record.</li>
+      <li><code>python_version.0 as u8</code>: tuple field access and a numeric cast (M02). The result is wrapped in
+        <code>Ok</code>.</li>
+    </ul>
+    <h3>Option and Result together, with early returns</h3>
+    <p>From
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/platform/host.rs#L204-L231">crates/pixi_manifest/src/platform/host.rs</a>,
+      which applies a user's <code>CONDA_OVERRIDE_ARCHSPEC</code> environment variable to the detected virtual
+      packages:</p>
+    <pre><code class="language-rust">fn apply_archspec_override(packages: &amp;mut Vec&lt;GenericVirtualPackage&gt;) {
+    if std::env::var_os(Archspec::DEFAULT_ENV_NAME).is_none() {
+        return;
+    }
+    let overridden = match Archspec::detect_with_fallback(&amp;Override::DefaultEnvVar, || Ok(None)) {
+        Ok(overridden) =&gt; overridden,
+        Err(error) =&gt; {
+            tracing::warn!("Ignoring {}: {error}", Archspec::DEFAULT_ENV_NAME);
+            return;
+        }
+    };
+
+    // Set empty: no `__archspec` at all.
+    let Some(overridden) = overridden else {
+        packages.retain(|p| p.name.as_normalized() != "__archspec");
+        return;
+    };
+    // ...
+    let overridden = GenericVirtualPackage::from(overridden);
+    match packages
+        .iter_mut()
+        .find(|p| p.name.as_normalized() == "__archspec")
+    {
+        Some(existing) =&gt; *existing = overridden,
+        None =&gt; packages.push(overridden),
+    }
+}</code></pre>
+    <ul>
+      <li><code>var_os(...)</code> returns <code>Option&lt;OsString&gt;</code>; <code>.is_none()</code> asks "is the
+        variable unset?" and returns early if so.</li>
+      <li><code>detect_with_fallback</code> returns <code>Result&lt;Option&lt;Archspec&gt;, _&gt;</code>: it can fail,
+        and if it succeeds the value may still be absent (the variable was set to an empty string). The
+        <code>match</code> takes the <code>Ok</code> value or logs a warning and returns. This function returns
+        <code>()</code>, so it cannot use <code>?</code>; a bad override is reported and ignored rather than fatal.</li>
+      <li>The <code>let</code>-<code>else</code> handles the <code>None</code> inside: remove any
+        <code>__archspec</code> entry and return. After it, <code>overridden</code> is the plain value.</li>
+      <li>The final <code>match</code> on <code>find</code>'s <code>Option&lt;&amp;mut GenericVirtualPackage&gt;</code>
+        either overwrites the existing entry through the mutable reference (<code>*existing = overridden</code>,
+        M03) or pushes a new one.</li>
+    </ul>
+    <details class="reveal"><summary>Why does <code>get_python_version</code> call <code>.to_string()</code> twice instead of storing <code>&amp;str</code> in the error?</summary>
+      <p>The error is returned to callers who no longer have the record borrowed, so it must own its data.
+        <code>PyPITagError</code>'s variants hold <code>String</code>, so the error is self-contained and can be passed
+        anywhere (it has no lifetime parameter). Owned data in error types is the normal choice.</p>
+    </details>
+    <details class="reveal"><summary>Could <code>apply_archspec_override</code> use <code>?</code> on the <code>detect_with_fallback</code> result?</summary>
+      <p>Not as written: it returns <code>()</code>, so <code>?</code> would be E0277. And it should not: the design
+        choice is that a malformed override is a warning, not a failure. To use <code>?</code>, the function would need
+        to return a <code>Result</code>, and every caller would then have to decide what to do with that error.</p>
+    </details>
+    <details class="reveal"><summary>What does <code>get_pypi_tags</code> return if both <code>get_platform_tags</code> and <code>get_python_version</code> would fail?</summary>
+      <p>Only the first error. <code>?</code> returns at the first failure, so <code>get_python_version</code> is never
+        called. If you wanted to report every problem, you would collect the errors instead of using <code>?</code>.</p>
+    </details>
+  </section>
+
+  <section class="lesson-section" id="practice">
+    <h2>Practice</h2>
+    <p>Each exercise is checked by <code>cargo test</code>. Press Check to run the tests against your code.</p>
+
+    <div class="exercise" data-id="m04-e1" data-title="parse_port with Option">
+      <div class="exercise-prompt">
+        <p>Write <code>parse_port(text: &amp;str) -&gt; Option&lt;u16&gt;</code>. Trim surrounding whitespace, parse the
+          rest as a <code>u16</code>, and return <code>None</code> if it is not a number, is out of range, or is
+          <code>0</code>.</p>
+      </div>
+<textarea class="starter">
+fn parse_port(text: &str) -> Option<u16> {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn valid_ports() {
+    assert_eq!(parse_port("8080"), Some(8080), "8080 is a valid port");
+    assert_eq!(parse_port("  443\n"), Some(443), "surrounding whitespace is trimmed");
+    assert_eq!(parse_port("65535"), Some(65535), "65535 is the largest port");
+}
+
+#[test]
+fn invalid_ports() {
+    assert_eq!(parse_port("80a"), None, "80a is not a number");
+    assert_eq!(parse_port("65536"), None, "65536 does not fit in a u16");
+    assert_eq!(parse_port(""), None, "empty input is not a port");
+    assert_eq!(parse_port("-1"), None, "negative numbers are not ports");
+}
+
+#[test]
+fn zero_is_rejected() {
+    assert_eq!(parse_port("0"), None, "port 0 is reserved and should be None");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>text.trim().parse::&lt;u16&gt;().ok()</code> gives an
+        <code>Option&lt;u16&gt;</code>. Then <code>.filter(|p| *p != 0)</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn parse_port(text: &amp;str) -&gt; Option&lt;u16&gt; {
+    text.trim().parse::&lt;u16&gt;().ok().filter(|p| *p != 0)
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m04-e2" data-title="channel_of with let-else or ?">
+      <div class="exercise-prompt">
+        <p>A spec may name its channel with <code>::</code>, as in <code>"conda-forge::numpy"</code>. Write
+          <code>channel_of(spec: &amp;str) -&gt; Option&lt;&amp;str&gt;</code> that returns the channel part, trimmed. Return
+          <code>None</code> if there is no <code>::</code> or if the channel part is empty after trimming.</p>
+      </div>
+<textarea class="starter">
+fn channel_of(spec: &str) -> Option<&str> {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn finds_channel() {
+    assert_eq!(channel_of("conda-forge::numpy"), Some("conda-forge"), "the part before :: is the channel");
+    assert_eq!(channel_of(" bioconda ::samtools"), Some("bioconda"), "the channel is trimmed");
+}
+
+#[test]
+fn no_channel() {
+    assert_eq!(channel_of("numpy >=2"), None, "no :: means no channel");
+    assert_eq!(channel_of("::numpy"), None, "an empty channel part is None");
+    assert_eq!(channel_of("  ::numpy"), None, "a blank channel part is None");
+}
+
+#[test]
+fn only_first_separator_counts() {
+    assert_eq!(channel_of("a::b::c"), Some("a"), "split at the first ::");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>let (channel, _) = spec.split_once("::")?;</code> then trim,
+        and use <code>if channel.is_empty() { None } else { Some(channel) }</code>, or
+        <code>Some(channel).filter(|c| !c.is_empty())</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn channel_of(spec: &amp;str) -&gt; Option&lt;&amp;str&gt; {
+    let (channel, _) = spec.split_once("::")?;
+    let channel = channel.trim();
+    Some(channel).filter(|c| !c.is_empty())
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m04-e3" data-title="major.minor with Result&lt;_, String&gt;">
+      <div class="exercise-prompt">
+        <p>Write <code>parse_major_minor(text: &amp;str) -&gt; Result&lt;(u32, u32), String&gt;</code>. The input looks like
+          <code>"3.13"</code>: two non-negative integers separated by one dot. Return <code>Ok((3, 13))</code>. On
+          failure return an <code>Err</code> whose message contains the original input, for example
+          <code>"expected MAJOR.MINOR, got `3`"</code>. Extra parts (<code>"3.13.1"</code>) are an error.</p>
+      </div>
+<textarea class="starter">
+fn parse_major_minor(text: &str) -> Result<(u32, u32), String> {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn parses_two_parts() {
+    assert_eq!(parse_major_minor("3.13"), Ok((3, 13)), "3.13 is major 3, minor 13");
+    assert_eq!(parse_major_minor("0.81"), Ok((0, 81)), "0.81 is major 0, minor 81");
+}
+
+#[test]
+fn missing_dot_is_an_error() {
+    let err = parse_major_minor("3").unwrap_err();
+    assert!(err.contains('3'), "the error message should mention the input, got: {err}");
+}
+
+#[test]
+fn bad_numbers_are_errors() {
+    assert!(parse_major_minor("3.x").is_err(), "3.x has a non-numeric minor");
+    assert!(parse_major_minor("a.1").is_err(), "a.1 has a non-numeric major");
+    assert!(parse_major_minor(".1").is_err(), "an empty major is an error");
+}
+
+#[test]
+fn extra_parts_are_errors() {
+    let err = parse_major_minor("3.13.1").unwrap_err();
+    assert!(err.contains("3.13.1"), "the error message should mention the input, got: {err}");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Build the error message once:
+        <code>let bad = || format!("expected MAJOR.MINOR, got `{text}`");</code>. Then
+        <code>text.split_once('.').ok_or_else(bad)?</code>, and for each part
+        <code>part.parse::&lt;u32&gt;().map_err(|_| bad())?</code>. A minor part containing another dot will fail to
+        parse, which covers <code>"3.13.1"</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn parse_major_minor(text: &amp;str) -&gt; Result&lt;(u32, u32), String&gt; {
+    let bad = || format!("expected MAJOR.MINOR, got `{text}`");
+    let (major, minor) = text.split_once('.').ok_or_else(bad)?;
+    let major = major.parse::&lt;u32&gt;().map_err(|_| bad())?;
+    let minor = minor.parse::&lt;u32&gt;().map_err(|_| bad())?;
+    Ok((major, minor))
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m04-e4" data-title="A custom error enum">
+      <div class="exercise-prompt">
+        <p>The starter defines <code>PinError</code>. Complete it:</p>
+        <ul>
+          <li>Implement <code>Display</code> with exactly these messages: <code>EmptySpec</code> →
+            <code>the spec is empty</code>; <code>MissingVersion(name)</code> → <code>`NAME` has no `==` version</code>
+            (with backticks around the name); <code>BadVersion(_)</code> → <code>the version is not a number</code>.</li>
+          <li>Implement <code>std::error::Error</code>, with <code>source()</code> returning the
+            <code>ParseIntError</code> for <code>BadVersion</code> and <code>None</code> otherwise.</li>
+          <li>Implement <code>From&lt;ParseIntError&gt;</code> for <code>PinError</code>.</li>
+          <li>Write <code>parse_pin(spec: &amp;str) -&gt; Result&lt;(String, u32), PinError&gt;</code> for specs like
+            <code>"python==3"</code>: trim the input, return <code>EmptySpec</code> if it is empty,
+            <code>MissingVersion</code> (holding the trimmed spec) if there is no <code>==</code>, and use
+            <code>?</code> for the number. The name is trimmed too.</li>
+        </ul>
+      </div>
+<textarea class="starter">
+use std::error::Error;
+use std::fmt;
+use std::num::ParseIntError;
+
+#[derive(Debug)]
+enum PinError {
+    EmptySpec,
+    MissingVersion(String),
+    BadVersion(ParseIntError),
+}
+
+impl fmt::Display for PinError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        todo!()
+    }
+}
+
+impl Error for PinError {}
+
+fn parse_pin(spec: &str) -> Result<(String, u32), PinError> {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn parses_a_pin() {
+    let (name, major) = parse_pin(" python == 3 ").expect("python == 3 should parse");
+    assert_eq!(name, "python", "the name is trimmed");
+    assert_eq!(major, 3, "the version is 3");
+}
+
+#[test]
+fn empty_spec() {
+    let err = parse_pin("   ").unwrap_err();
+    assert!(matches!(err, PinError::EmptySpec), "blank input should be EmptySpec, got {err:?}");
+    assert_eq!(err.to_string(), "the spec is empty", "Display message for EmptySpec");
+}
+
+#[test]
+fn missing_version() {
+    let err = parse_pin("numpy").unwrap_err();
+    assert!(matches!(&err, PinError::MissingVersion(n) if n == "numpy"), "should be MissingVersion(\"numpy\"), got {err:?}");
+    assert_eq!(err.to_string(), "`numpy` has no `==` version", "Display message for MissingVersion");
+}
+
+#[test]
+fn bad_version_converts_with_from() {
+    let err = parse_pin("pandas==two").unwrap_err();
+    assert!(matches!(err, PinError::BadVersion(_)), "a non-numeric version should be BadVersion, got {err:?}");
+    assert_eq!(err.to_string(), "the version is not a number", "Display message for BadVersion");
+    assert!(err.source().is_some(), "BadVersion should expose the ParseIntError as its source");
+}
+
+#[test]
+fn other_variants_have_no_source() {
+    assert!(PinError::EmptySpec.source().is_none(), "EmptySpec has no underlying cause");
+}
+
+#[test]
+fn from_is_implemented() {
+    let parse_err = "x".parse::<u32>().unwrap_err();
+    let err: PinError = parse_err.into();
+    assert!(matches!(err, PinError::BadVersion(_)), "From<ParseIntError> should produce BadVersion");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>The <code>impl Error</code> in the starter has no body; add a
+        <code>source</code> method returning <code>Option&lt;&amp;(dyn Error + 'static)&gt;</code>. The test for
+        <code>From</code> will not compile until you add <code>impl From&lt;ParseIntError&gt; for PinError</code>: that
+        compile error is expected on the first Check. The "A complete error enum" cell above has the same shape.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">use std::error::Error;
+use std::fmt;
+use std::num::ParseIntError;
+
+#[derive(Debug)]
+enum PinError {
+    EmptySpec,
+    MissingVersion(String),
+    BadVersion(ParseIntError),
+}
+
+impl fmt::Display for PinError {
+    fn fmt(&amp;self, f: &amp;mut fmt::Formatter&lt;'_&gt;) -&gt; fmt::Result {
+        match self {
+            PinError::EmptySpec =&gt; write!(f, "the spec is empty"),
+            PinError::MissingVersion(name) =&gt; write!(f, "`{name}` has no `==` version"),
+            PinError::BadVersion(_) =&gt; write!(f, "the version is not a number"),
+        }
+    }
+}
+
+impl Error for PinError {
+    fn source(&amp;self) -&gt; Option&lt;&amp;(dyn Error + 'static)&gt; {
+        match self {
+            PinError::BadVersion(e) =&gt; Some(e),
+            _ =&gt; None,
+        }
+    }
+}
+
+impl From&lt;ParseIntError&gt; for PinError {
+    fn from(e: ParseIntError) -&gt; Self {
+        PinError::BadVersion(e)
+    }
+}
+
+fn parse_pin(spec: &amp;str) -&gt; Result&lt;(String, u32), PinError&gt; {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err(PinError::EmptySpec);
+    }
+    let Some((name, version)) = spec.split_once("==") else {
+        return Err(PinError::MissingVersion(spec.to_string()));
+    };
+    let major: u32 = version.trim().parse()?;
+    Ok((name.trim().to_string(), major))
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m04-e5" data-title="Option inside Result: highest_major">
+      <div class="exercise-prompt">
+        <p>The starter has a working <code>PinError</code> and <code>parse_pin</code>. Write
+          <code>highest_major(specs: &amp;[&amp;str]) -&gt; Result&lt;Option&lt;u32&gt;, PinError&gt;</code>:</p>
+        <ul>
+          <li>Parse every spec with <code>parse_pin</code>. If any fails, return that error (the first one) with
+            <code>?</code>.</li>
+          <li>If all succeed, return <code>Ok(Some(m))</code> where <code>m</code> is the largest major version, or
+            <code>Ok(None)</code> for an empty list.</li>
+        </ul>
+        <p>The return type separates two different "nothing" cases: "there were no specs" (<code>Ok(None)</code>) and
+          "a spec was broken" (<code>Err</code>).</p>
+      </div>
+<textarea class="starter">
+use std::num::ParseIntError;
+
+#[derive(Debug, PartialEq)]
+enum PinError {
+    MissingVersion(String),
+    BadVersion(ParseIntError),
+}
+
+impl From<ParseIntError> for PinError {
+    fn from(e: ParseIntError) -> Self {
+        PinError::BadVersion(e)
+    }
+}
+
+fn parse_pin(spec: &str) -> Result<(&str, u32), PinError> {
+    let (name, version) = spec
+        .split_once("==")
+        .ok_or_else(|| PinError::MissingVersion(spec.to_string()))?;
+    Ok((name, version.parse()?))
+}
+
+fn highest_major(specs: &[&str]) -> Result<Option<u32>, PinError> {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn finds_the_highest() {
+    assert_eq!(highest_major(&["python==3", "numpy==2", "pandas==4"]), Ok(Some(4)), "4 is the highest major");
+}
+
+#[test]
+fn single_spec() {
+    assert_eq!(highest_major(&["python==3"]), Ok(Some(3)), "one spec gives its own major");
+}
+
+#[test]
+fn empty_list_is_none() {
+    assert_eq!(highest_major(&[]), Ok(None), "no specs means Ok(None), not an error");
+}
+
+#[test]
+fn first_error_wins() {
+    assert_eq!(
+        highest_major(&["python==3", "numpy", "pandas==x"]),
+        Err(PinError::MissingVersion(String::from("numpy"))),
+        "the first broken spec (numpy) should be the error returned"
+    );
+}
+
+#[test]
+fn bad_version_propagates() {
+    let result = highest_major(&["python==3", "pandas==x"]);
+    assert!(matches!(result, Err(PinError::BadVersion(_))), "pandas==x should give BadVersion, got {result:?}");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Keep <code>let mut best: Option&lt;u32&gt; = None;</code>. In a
+        <code>for</code> loop, <code>let (_, major) = parse_pin(spec)?;</code>, then update <code>best</code> with a
+        <code>match</code> on it (or <code>best = Some(best.map_or(major, |b| b.max(major)));</code>). Return
+        <code>Ok(best)</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">use std::num::ParseIntError;
+
+#[derive(Debug, PartialEq)]
+enum PinError {
+    MissingVersion(String),
+    BadVersion(ParseIntError),
+}
+
+impl From&lt;ParseIntError&gt; for PinError {
+    fn from(e: ParseIntError) -&gt; Self {
+        PinError::BadVersion(e)
+    }
+}
+
+fn parse_pin(spec: &amp;str) -&gt; Result&lt;(&amp;str, u32), PinError&gt; {
+    let (name, version) = spec
+        .split_once("==")
+        .ok_or_else(|| PinError::MissingVersion(spec.to_string()))?;
+    Ok((name, version.parse()?))
+}
+
+fn highest_major(specs: &amp;[&amp;str]) -&gt; Result&lt;Option&lt;u32&gt;, PinError&gt; {
+    let mut best: Option&lt;u32&gt; = None;
+    for spec in specs {
+        let (_, major) = parse_pin(spec)?;
+        best = match best {
+            Some(b) if b &gt;= major =&gt; Some(b),
+            _ =&gt; Some(major),
+        };
+    }
+    Ok(best)
+}</code></pre>
+      </details>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="mini-project">
+    <h2>Mini-project</h2>
+    <div class="project-box">
+      <div class="widget-head"><span class="w-kind">Mini-project</span><span class="w-title">An activation-file reader with real errors</span></div>
+      <div class="widget-body">
+        <p>Pixi lets a workspace set environment variables on activation. Build a small command-line tool that reads
+          a file of <code>KEY=VALUE</code> lines (like a <code>.env</code> file) and prints the variables sorted by key,
+          with error handling that would pass a Pixi review: no <code>unwrap</code> on input, a custom error enum in the
+          library part, and <code>Box&lt;dyn Error&gt;</code> only in <code>main</code>.</p>
+        <pre data-label="Terminal"><code class="language-bash">pixi init envread &amp;&amp; cd envread
+pixi add rust
+pixi run cargo init --name envread
+pixi run cargo run -- example.env</code></pre>
+        <p>Spec:</p>
+        <ul>
+          <li>A <code>ParseError</code> enum with variants <code>MissingEquals { line: usize }</code>,
+            <code>EmptyKey { line: usize }</code>, and <code>InvalidKey { line: usize, key: String }</code> (a key must
+            be ASCII letters, digits, and <code>_</code>, not starting with a digit). Implement <code>Display</code> (with
+            the 1-based line number in every message) and <code>Error</code>.</li>
+          <li><code>fn parse_line(line: &amp;str, number: usize) -&gt; Result&lt;Option&lt;(String, String)&gt;, ParseError&gt;</code>:
+            <code>Ok(None)</code> for blank lines and lines starting with <code>#</code>; the value is everything after
+            the first <code>=</code>, trimmed.</li>
+          <li><code>fn parse_file(text: &amp;str) -&gt; Result&lt;Vec&lt;(String, String)&gt;, ParseError&gt;</code> using
+            <code>?</code> on each line.</li>
+          <li><code>fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt;</code> that reads the path from
+            <code>std::env::args().nth(1)</code> (turn the <code>None</code> into an error with <code>ok_or</code>),
+            reads the file with <code>std::fs::read_to_string(path)?</code>, parses, sorts, and prints.</li>
+        </ul>
+        <h4>Acceptance criteria</h4>
+        <ul class="checklist" data-id="m04-mini">
+          <li>No <code>unwrap()</code> or <code>expect()</code> outside <code>#[cfg(test)]</code> code</li>
+          <li>Unit tests cover each <code>ParseError</code> variant, a comment line, a blank line, and a value containing
+            <code>=</code> (<code>URL=a=b</code> gives value <code>a=b</code>)</li>
+          <li>Running with no argument prints a helpful error and exits with a non-zero status</li>
+          <li>Running on a missing file prints the I/O error (for example "No such file or directory") rather than
+            panicking</li>
+          <li><code>pixi run cargo clippy --all-targets -- -D warnings</code> is clean</li>
+        </ul>
+        <h4>Stretch goals</h4>
+        <ul>
+          <li>Add a <code>Duplicate { line: usize, key: String, first: usize }</code> variant and report a key defined
+            twice.</li>
+          <li>Add a top-level <code>EnvFileError</code> with <code>Io(std::io::Error)</code> and
+            <code>Parse(ParseError)</code> variants, <code>From</code> impls for both, and a <code>source()</code> that
+            returns the inner error. Make <code>fn load(path: &amp;str) -&gt; Result&lt;Vec&lt;_&gt;, EnvFileError&gt;</code>
+            use <code>?</code> for both kinds.</li>
+          <li>Rewrite <code>ParseError</code> with <code>thiserror</code> (<code>pixi run cargo add thiserror</code>) and
+            check that your tests still pass unchanged.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="quiz">
+    <h2>Quiz</h2>
+    <div class="quiz" data-id="m04-quiz">
+<script type="application/json">
+{"title": "Option, Result and ?", "passScore": 0.7, "questions": [
+  {"type": "single", "prompt": "Does this compile?", "code": "fn main() {\n    let v = vec![1, 2, 3];\n    let x: i32 = v.get(0);\n    println!(\"{x}\");\n}", "options": ["Yes, it prints 1", "No: E0308, get returns Option<&i32>, not i32", "No: E0382, v was moved", "It compiles but panics"], "answer": 1, "explanation": "<p><code>Vec::get</code> returns <code>Option&lt;&amp;T&gt;</code> because the index may be out of range. You must handle the <code>None</code> case before you have an <code>i32</code>.</p>"},
+  {"type": "output", "prompt": "What does this print?", "code": "fn main() {\n    let a: Option<u32> = Some(4);\n    let b: Option<u32> = None;\n    println!(\"{:?} {:?}\", a.map(|x| x * 2), b.map(|x| x * 2));\n}", "answer": "Some(8) None", "explanation": "<p><code>map</code> transforms the value inside <code>Some</code> and passes <code>None</code> through untouched.</p>"},
+  {"type": "single", "prompt": "Which combinator should you use when the next step itself returns an <code>Option</code>?", "options": ["<code>map</code>", "<code>and_then</code>", "<code>unwrap_or</code>", "<code>ok_or</code>"], "answer": 1, "explanation": "<p><code>and_then</code> flattens: its closure returns an <code>Option</code>, and the result is a single <code>Option</code>. Using <code>map</code> would produce <code>Option&lt;Option&lt;T&gt;&gt;</code>.</p>"},
+  {"type": "single", "prompt": "What does <code>expr?</code> do when <code>expr</code> is <code>Err(e)</code>?", "options": ["Panics with e", "Returns Err(From::from(e)) from the enclosing function", "Replaces e with a default value", "Logs e and continues"], "answer": 1, "explanation": "<p><code>?</code> returns early with the error, converted to the function's error type through the <code>From</code> trait.</p>"},
+  {"type": "single", "prompt": "Does this compile?", "code": "fn main() {\n    let n: u32 = \"4\".parse()?;\n    println!(\"{n}\");\n}", "options": ["Yes", "No: E0277, ? needs a function returning Result or Option"], "answer": 1, "explanation": "<p>This <code>main</code> returns <code>()</code>, so there is nowhere to send the error. Declare <code>fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt;</code> and end with <code>Ok(())</code>.</p>"},
+  {"type": "output", "prompt": "What does this print?", "code": "fn first_char(s: &str) -> Option<char> {\n    let word = s.split_whitespace().next()?;\n    word.chars().next()\n}\nfn main() {\n    println!(\"{:?} {:?}\", first_char(\"  pixi run\"), first_char(\"   \"));\n}", "answer": "Some('p') None", "explanation": "<p>For an all-space string, <code>split_whitespace().next()</code> is <code>None</code>, and <code>?</code> returns <code>None</code> from <code>first_char</code> immediately.</p>"},
+  {"type": "multi", "prompt": "Where is <code>unwrap()</code> or <code>expect()</code> generally acceptable?", "options": ["In a <code>#[test]</code> function", "When parsing a user's <code>pixi.toml</code>", "When an invariant guarantees success, with an <code>expect</code> message saying why", "When reading an environment variable the user may not have set"], "answer": [0, 2], "explanation": "<p>A panic means \"this is a bug\". Tests and proven invariants qualify. User files and environment variables fail for reasons outside your program, so they need real error handling.</p>"},
+  {"type": "single", "prompt": "Why does <code>?</code> compile on a <code>ParseIntError</code> in a function returning <code>Result&lt;T, MyError&gt;</code>?", "options": ["Because every error converts to every other error", "Because <code>MyError</code> implements <code>From&lt;ParseIntError&gt;</code>", "Because <code>MyError</code> implements <code>Display</code>", "It does not compile"], "answer": 1, "explanation": "<p><code>?</code> calls <code>From::from</code> on the error. Without that impl it is E0277, \"<code>?</code> couldn't convert the error\".</p>"},
+  {"type": "single", "prompt": "In <code>thiserror</code>, what does <code>#[from]</code> on a variant's field generate?", "options": ["A Display impl", "A From impl for the field's type, and source() returning that field", "A Debug impl", "A Clone impl"], "answer": 1, "explanation": "<p><code>#[from]</code> writes <code>impl From&lt;Inner&gt; for YourError</code> so that <code>?</code> converts automatically, and marks the field as the error's source.</p>"},
+  {"type": "single", "prompt": "Does this compile?", "code": "fn major(v: &str) -> u32 {\n    let Some((m, _)) = v.split_once('.') else {\n        println!(\"no dot\");\n    };\n    m.parse().unwrap_or(0)\n}", "options": ["Yes", "No: the else block of let-else must diverge (return, break, continue, or panic)"], "answer": 1, "explanation": "<p>If the pattern fails there is no <code>m</code> to continue with, so the <code>else</code> must leave the function. Add <code>return 0;</code>.</p>"},
+  {"type": "text", "prompt": "Which <code>Option</code> method turns <code>None</code> into <code>Err(e)</code> and <code>Some(v)</code> into <code>Ok(v)</code>? (name only, for an eager error value)", "answer": ["ok_or", "ok_or()"], "explanation": "<p><code>ok_or(e)</code>, or <code>ok_or_else(|| e)</code> when building the error is expensive.</p>"},
+  {"type": "output", "prompt": "What does this print?", "code": "fn main() {\n    let r: Result<u8, String> = \"300\".parse::<u8>().map_err(|e| e.to_string());\n    match r {\n        Ok(v) => println!(\"ok {v}\"),\n        Err(e) => println!(\"err {e}\"),\n    }\n}", "answer": "err number too large to fit in target type", "explanation": "<p>300 does not fit in a <code>u8</code>, so <code>parse</code> fails. <code>map_err</code> turns the <code>ParseIntError</code> into its <code>Display</code> string.</p>"},
+  {"type": "single", "prompt": "Which return type fits a CLI <code>main</code> that uses <code>?</code> on both file I/O and number parsing?", "options": ["<code>()</code>", "<code>Result&lt;(), std::io::Error&gt;</code>", "<code>Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt;</code>", "<code>Option&lt;()&gt;</code>"], "answer": 2, "explanation": "<p><code>Box&lt;dyn Error&gt;</code> accepts any error type through <code>?</code>. <code>io::Error</code> alone would reject the <code>ParseIntError</code> (E0277).</p>"}
+]}
+</script>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="recap">
+    <h2>Recap</h2>
+    <ul>
+      <li><code>Option&lt;T&gt;</code> (<code>Some</code>/<code>None</code>) and <code>Result&lt;T, E&gt;</code>
+        (<code>Ok</code>/<code>Err</code>) are ordinary enums that put absence and failure into the type.</li>
+      <li>Unpack with <code>match</code>, <code>if let</code> (one case), <code>let</code>-<code>else</code> (bind or
+        return early; the <code>else</code> must diverge), and <code>while let</code>.</li>
+      <li><code>unwrap</code>/<code>expect</code> panic; use them in tests and for real invariants, with an
+        <code>expect</code> message saying why. Prefer <code>unwrap_or</code>, <code>unwrap_or_else</code>,
+        <code>unwrap_or_default</code> for defaults.</li>
+      <li>Combinators: <code>map</code> (cannot fail), <code>and_then</code> (can fail), <code>ok_or</code>,
+        <code>ok()</code>, <code>map_err</code>, <code>filter</code>.</li>
+      <li><code>?</code> unwraps or returns early, converting the error with <code>From</code>. It works on
+        <code>Option</code> in functions returning <code>Option</code>.</li>
+      <li>Library errors are enums with <code>Debug</code>, <code>Display</code>, <code>Error</code>, and
+        <code>From</code>. Application code can use <code>Box&lt;dyn Error&gt;</code>; Pixi uses
+        <code>miette::Result</code>.</li>
+      <li><code>thiserror</code> generates the error impls from <code>#[error(...)]</code> and <code>#[from]</code>;
+        <code>into_diagnostic()?</code> brings foreign errors into miette.</li>
+    </ul>
+    <div class="flashcards" data-title="Option, Result and ?">
+      <script type="application/json">
+      [{"front": "The two variants of <code>Option&lt;T&gt;</code>", "back": "<code>Some(T)</code> and <code>None</code>."},
+       {"front": "The two variants of <code>Result&lt;T, E&gt;</code>", "back": "<code>Ok(T)</code> and <code>Err(E)</code>."},
+       {"front": "What must the <code>else</code> of <code>let</code>-<code>else</code> do?", "back": "Diverge: <code>return</code>, <code>break</code>, <code>continue</code>, or panic."},
+       {"front": "<code>map</code> vs <code>and_then</code>", "back": "<code>map</code> when the step returns a plain value; <code>and_then</code> when it returns an <code>Option</code>/<code>Result</code>."},
+       {"front": "What does <code>x?</code> expand to on a Result?", "back": "<code>match x { Ok(v) =&gt; v, Err(e) =&gt; return Err(From::from(e)) }</code>"},
+       {"front": "<code>ok_or</code> vs <code>ok()</code>", "back": "<code>ok_or(e)</code>: Option → Result. <code>ok()</code>: Result → Option (drops the error)."},
+       {"front": "When is <code>expect</code> acceptable?", "back": "Tests, and invariants you can explain in the message. Never on user input, files, network, or env vars."},
+       {"front": "Three impls of a good error enum", "back": "<code>Display</code>, <code>std::error::Error</code> (with <code>source</code>), and <code>From</code> for each wrapped error."},
+       {"front": "What does <code>main</code> print when it returns <code>Err(e)</code>?", "back": "<code>Error: </code> followed by <code>e</code>'s <code>Debug</code> form; exit status 1."},
+       {"front": "thiserror <code>#[from]</code>", "back": "Generates <code>From&lt;Inner&gt;</code> for the error and makes the field its <code>source()</code>."},
+       {"front": "<code>into_diagnostic()?</code> in Pixi", "back": "miette's way to turn any <code>std::error::Error</code> into a <code>miette::Report</code> for a <code>miette::Result</code> function."}]
+      </script>
+    </div>
+    <h3>Going further</h3>
+    <ul>
+      <li><a href="https://doc.rust-lang.org/book/ch06-01-defining-an-enum.html">The Rust Book 6.1: The Option enum</a> and <a href="https://doc.rust-lang.org/book/ch09-00-error-handling.html">chapter 9: Error Handling</a></li>
+      <li><a href="https://doc.rust-lang.org/rust-by-example/error.html">Rust by Example: Error handling</a></li>
+      <li>std docs: <a href="https://doc.rust-lang.org/std/option/enum.Option.html"><code>Option</code></a>, <a href="https://doc.rust-lang.org/std/result/enum.Result.html"><code>Result</code></a>, and <a href="https://doc.rust-lang.org/std/error/trait.Error.html"><code>std::error::Error</code></a></li>
+      <li><a href="https://doc.rust-lang.org/reference/expressions/operator-expr.html#the-question-mark-operator">The Rust Reference: the question mark operator</a> and <a href="https://doc.rust-lang.org/reference/statements.html#let-else-statements">let-else statements</a></li>
+      <li><a href="https://docs.rs/thiserror">thiserror on docs.rs</a> and <a href="https://docs.rs/miette">miette on docs.rs</a> (taught in Level 2)</li>
+      <li>Pixi: <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pypi_modifiers/src/pypi_tags.rs#L13-L45"><code>PyPITagError</code></a> and <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_spec/src/exclude_newer.rs#L177-L202"><code>parse_exclude_newer_str</code></a>, which tries three parsers and combines their errors into one message</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

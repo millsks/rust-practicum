@@ -1,0 +1,6 @@
+# The smallest valid manifest: only the required workspace keys.
+
+[workspace]
+name = "empty"
+channels = []
+platforms = ["noarch"]

@@ -1,0 +1,19 @@
+# Task graphs for ordering tests. None of these loop.
+
+[workspace]
+name = "task-graphs"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tasks]
+# A diamond: top needs left and right, and both need base.
+base = "echo base"
+left = { cmd = "echo left", depends-on = ["base"] }
+right = { cmd = "echo right", depends-on = ["base"] }
+top = { cmd = "echo top", depends-on = ["left", "right"] }
+
+# The same diamond with depends-on written in the opposite order.
+top-reversed = { cmd = "echo top", depends-on = ["right", "left"] }
+
+# An alias that lists a task twice, directly and through another task.
+everything = { depends-on = ["top", "base", "left"] }

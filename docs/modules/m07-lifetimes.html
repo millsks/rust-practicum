@@ -1,0 +1,1209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M07 · Lifetimes in Practice · Rust Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-rust.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-module="m07">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Stage 2 · Idiomatic Rust · Module 07</p>
+    <h1>Lifetimes in Practice</h1>
+    <p class="lede">In <a href="m03-ownership-borrowing.html">M03</a> the borrow checker followed references inside
+      one function. This module is about references that cross a function boundary or sit inside a struct, where the
+      compiler needs you to say how they relate. A lifetime annotation is that statement: "the reference I return
+      points into this argument, not that one." Once you read <code>'a</code> as a relationship rather than a length
+      of time, most lifetime errors become one-line fixes, and you will know when the right fix is to stop borrowing
+      and own the data.</p>
+    <div class="lesson-meta"><span>⏱ ~2 hours</span><span>Prerequisites: <a href="m03-ownership-borrowing.html">M03 Ownership &amp; Borrowing</a>, <a href="m06-traits-generics.html">M06 Traits &amp; Generics</a></span></div>
+    <ul class="objectives">
+      <li>Explain what a lifetime annotation means: a constraint linking references, not a duration you choose</li>
+      <li>Apply the three elision rules to predict when a signature needs explicit lifetimes</li>
+      <li>Write functions that return references tied to the correct input, and only that input</li>
+      <li>Define structs that hold references, and write <code>impl</code> blocks and trait impls for them</li>
+      <li>Tell <code>&amp;'static str</code> apart from the bound <code>T: 'static</code>, and explain why threads and tasks need the bound</li>
+      <li>Read and fix E0106, E0597, E0515, E0716, and E0373</li>
+      <li>Decide when to stop fighting the borrow checker and return or store owned data instead</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="the-problem">
+    <h2>The problem lifetimes solve</h2>
+    <p>In Python, a reference keeps its object alive. If you write <code>r = config["channels"]</code> and then
+      <code>del config</code>, the list is still there: the interpreter counts references, and the list is freed only
+      when the last one goes away. You can never hold a reference to freed memory, because holding the reference is
+      what prevents the free.</p>
+    <p>Rust does not count references. A <code>&amp;T</code> is a plain pointer with no say over when its target is
+      freed. The owner decides that: the value is dropped when its owner goes out of scope (M03). So Rust needs a
+      different guarantee, and it gets one at compile time. The borrow checker proves, for every reference, that the
+      value it points to is still alive at every place the reference is used. A reference that outlives its target
+      is a <strong>dangling reference</strong>, and Rust refuses to compile one.</p>
+    <p>The <strong>lifetime</strong> of a reference is the region of code over which that reference must stay valid:
+      from where it is created to its last use. The compiler computes these regions itself. Step through the program
+      below and watch the borrow arrow outlive its target.</p>
+    <div class="viz" data-viz="ownership" data-config='{"title": "A dangling reference is rejected", "code": ["fn main() {", "    let r;", "    {", "        let x = String::from(\"pixi\");", "        r = &x;", "    }", "    println!(\"{r}\"); // error[E0597]", "}"], "steps": [{"line": 2, "note": "<code>r</code> is declared but not yet initialized. Its type will be <code>&amp;String</code>.", "stack": [{"name": "r", "type": "&String", "value": "(uninit)"}], "heap": []}, {"line": 4, "note": "Inside the inner block, <code>x</code> owns a heap buffer holding <code>\"pixi\"</code>.", "stack": [{"name": "r", "type": "&String", "value": "(uninit)"}, {"name": "x", "type": "String", "owns": "h1"}], "heap": [{"id": "h1", "value": "\"pixi\""}]}, {"line": 5, "note": "<code>r = &amp;x</code>: <code>r</code> now borrows <code>x</code>. For this to be valid, <code>x</code> must stay alive until the last use of <code>r</code>.", "stack": [{"name": "r", "type": "&String", "ref": "x"}, {"name": "x", "type": "String", "owns": "h1"}], "heap": [{"id": "h1", "value": "\"pixi\""}]}, {"line": 6, "note": "The block ends. <code>x</code> is dropped and its buffer freed. <code>r</code> still points at the slot where <code>x</code> was.", "stack": [{"name": "r", "type": "&String", "ref": "x"}, {"name": "x", "type": "String", "state": "dropped"}], "heap": []}, {"line": 7, "note": "This use of <code>r</code> would read freed memory. The compiler sees that the borrow must last until line 7 but <code>x</code> dies on line 6, and reports <strong>E0597: <code>x</code> does not live long enough</strong>. The program never runs.", "stack": [{"name": "r", "type": "&String", "ref": "x"}, {"name": "x", "type": "String", "state": "dropped"}], "heap": []}]}'></div>
+    <p>Here is the same program for the compiler. Press Compile and read the error.</p>
+    <div class="runnable" data-title="E0597: borrowed value does not live long enough" data-compile-fail>
+<textarea>
+fn main() {
+    let r;
+    {
+        let x = String::from("pixi");
+        r = &x;
+    }
+    println!("{r}");
+}
+</textarea>
+    </div>
+    <p>The error has three labels, and they always mean the same things:</p>
+    <ul>
+      <li><code>borrowed value does not live long enough</code> points at <code>&amp;x</code>: the borrow that
+        cannot be kept.</li>
+      <li><code>`x` dropped here while still borrowed</code> points at the closing <code>}</code>: where the owner
+        dies.</li>
+      <li><code>borrow later used here</code> points at <code>println!</code>: the use that needed the borrow to
+        survive.</li>
+    </ul>
+    <p>Notice that there is no lifetime annotation anywhere in this program, and none would help. Annotations do not
+      make values live longer. The fix is to change the code so the owner outlives the use: move
+      <code>let x</code> out of the inner block, or move the <code>println!</code> into it.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> a reference never keeps its target alive. The borrow
+      checker proves the target outlives every use of the reference, and rejects the program when it cannot.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="annotations">
+    <h2>What <code>'a</code> means: a relationship, not a duration</h2>
+    <p>Inside one function the compiler can see every borrow and every drop, so it never asks you for help. A
+      function signature is different. When <code>main</code> calls a function, the compiler checks the call using
+      only the function's signature, not its body. That is what keeps compile times and error messages local: change a
+      body, and callers do not need rechecking. So if a function returns a reference, the signature must say which
+      argument that reference borrows from.</p>
+    <p>Try a function that returns the longer of two names:</p>
+    <div class="runnable" data-title="E0106: missing lifetime specifier" data-compile-fail>
+<textarea>
+fn longer(a: &str, b: &str) -> &str {
+    if a.len() >= b.len() { a } else { b }
+}
+
+fn main() {
+    println!("{}", longer("numpy", "scipy-stack"));
+}
+</textarea>
+    </div>
+    <p>E0106 says the return type "contains a borrowed value, but the signature does not say whether it is borrowed
+      from <code>a</code> or <code>b</code>". The compiler is not confused about the body. It is telling you the
+      signature is incomplete: a caller would not know how long it may keep the result.</p>
+    <p>You answer with a <strong>lifetime parameter</strong>. It is declared in angle brackets like a generic type
+      parameter, written with a leading apostrophe, and conventionally named <code>'a</code>, <code>'b</code>, and so
+      on:</p>
+    <div class="runnable" data-title="Tie the result to both inputs" data-predict>
+<textarea>
+fn longer<'a>(a: &'a str, b: &'a str) -> &'a str {
+    if a.len() >= b.len() { a } else { b }
+}
+
+fn main() {
+    let first = String::from("numpy");
+    let second = String::from("scipy-stack");
+    let winner = longer(&first, &second);
+    println!("{winner} ({} bytes)", winner.len());
+}
+</textarea>
+    </div>
+    <p>Read the signature out loud as a contract: "for some region <code>'a</code>, if both <code>a</code> and
+      <code>b</code> are valid for all of <code>'a</code>, then the result is valid for <code>'a</code> too." At
+      each call, the compiler picks <code>'a</code> as the region where both arguments are alive (their overlap),
+      and then checks that the result is not used outside it. You never pick the length of <code>'a</code>. You only
+      state which references are linked.</p>
+    <p>That is why "lifetime annotations describe, they do not prescribe" is the most useful sentence in this module.
+      An annotation cannot extend or shorten how long a value lives. It gives the compiler a relationship to check,
+      and if the relationship is false, the program does not compile.</p>
+    <p>Here is the contract being enforced. <code>second</code> lives only inside the inner block, so the overlap
+      <code>'a</code> ends there, and using <code>winner</code> after the block is rejected, even though on this
+      particular input the winner happens to be <code>first</code>:</p>
+    <div class="runnable" data-title="The result cannot outlive the shorter input" data-compile-fail>
+<textarea>
+fn longer<'a>(a: &'a str, b: &'a str) -> &'a str {
+    if a.len() >= b.len() { a } else { b }
+}
+
+fn main() {
+    let first = String::from("scipy-stack");
+    let winner;
+    {
+        let second = String::from("numpy");
+        winner = longer(&first, &second);
+    }
+    println!("{winner}");
+}
+</textarea>
+    </div>
+    <p>The compiler does not run your code to see which branch was taken. It trusts the signature, and the signature
+      says the result might borrow from <code>second</code>. This is the guarantee you want: the function's author
+      can later change the body to return <code>b</code> more often, and no caller can break.</p>
+    <aside class="callout note" data-title="Syntax summary"><p><code>&amp;'a T</code> is a shared reference valid for
+      <code>'a</code>; <code>&amp;'a mut T</code> is a mutable one. Lifetime parameters go first in the angle brackets:
+      <code>fn parse&lt;'a, T: FromStr&gt;(s: &amp;'a str) -&gt; ...</code>. The name is arbitrary; Pixi mostly uses
+      <code>'a</code>, and <code>'s</code> or <code>'de</code> where a name helps (serde uses <code>'de</code>
+      for "the deserializer's input").</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>'a</code> names a region the compiler chooses. Writing
+      the same <code>'a</code> on an input and the output means "the output borrows from that input." It never changes
+      when anything is dropped.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="elision">
+    <h2>Elision: when you can leave them out</h2>
+    <p>If every function that returned a reference needed <code>&lt;'a&gt;</code>, Rust would be noisy. In practice
+      most do not, because the compiler applies three <strong>lifetime elision rules</strong> to fill in the obvious
+      cases. Elision means "left out": the lifetimes are still there, you just do not have to write them.</p>
+    <table>
+      <thead><tr><th>Rule</th><th>What the compiler does</th><th>Example</th></tr></thead>
+      <tbody>
+        <tr><td>1. Inputs</td><td>Every reference parameter without a written lifetime gets its own distinct lifetime</td><td><code>fn f(a: &amp;str, b: &amp;str)</code> becomes <code>fn f&lt;'x, 'y&gt;(a: &amp;'x str, b: &amp;'y str)</code></td></tr>
+        <tr><td>2. One input</td><td>If there is exactly one input lifetime, every elided output lifetime is that one</td><td><code>fn first(s: &amp;str) -&gt; &amp;str</code> means the result borrows from <code>s</code></td></tr>
+        <tr><td>3. Methods</td><td>If there are several input lifetimes and one is <code>&amp;self</code> or <code>&amp;mut self</code>, elided outputs get <code>self</code>'s lifetime</td><td><code>fn name(&amp;self, key: &amp;str) -&gt; &amp;str</code> borrows from <code>self</code></td></tr>
+      </tbody>
+    </table>
+    <p>If, after these rules, an output lifetime is still unknown, you get E0106 and must write it yourself. That is
+      exactly what happened with <code>longer</code>: two inputs, no <code>self</code>, so rule 2 and rule 3 do not
+      apply.</p>
+    <p>Predict what this prints. Every function here relies on elision.</p>
+    <div class="runnable" data-title="Elision at work" data-predict>
+<textarea>
+struct Package {
+    name: String,
+    channel: String,
+}
+
+impl Package {
+    // Rule 3: the result borrows from self, not from `prefix`.
+    fn label(&self, prefix: &str) -> &str {
+        if self.name.starts_with(prefix) { &self.name } else { &self.channel }
+    }
+}
+
+// Rule 2: one input, so the result borrows from `spec`.
+fn name_part(spec: &str) -> &str {
+    spec.split_whitespace().next().unwrap_or("")
+}
+
+fn main() {
+    let pkg = Package { name: "python".to_string(), channel: "conda-forge".to_string() };
+    println!("{}", pkg.label("py"));
+    println!("{}", pkg.label("num"));
+    println!("{}", name_part("numpy >=2"));
+}
+</textarea>
+    </div>
+    <p>Rule 3 has a consequence worth knowing. In <code>label</code>, the result is tied to <code>self</code> only.
+      If you tried to return <code>prefix</code> from that method, it would not compile, because the elided signature
+      promises the result comes from <code>self</code>. When a method returns something borrowed from a non-self
+      argument, you write the lifetimes out:</p>
+    <pre><code class="language-rust">impl Package {
+    fn pick&lt;'p&gt;(&amp;self, preferred: &amp;'p str) -&gt; &amp;'p str {
+        preferred
+    }
+}</code></pre>
+    <h3>The anonymous lifetime <code>'_</code></h3>
+    <p>Sometimes a type has a lifetime parameter and elision would pick the right one, but you still have to show that
+      a borrow is involved. Write <code>'_</code>, the anonymous lifetime: "there is a lifetime here; apply the usual
+      rules." You will see it constantly in Pixi:</p>
+    <pre><code class="language-rust">fn parse_line(line: &amp;str) -&gt; Option&lt;Entry&lt;'_&gt;&gt;      // Entry borrows from `line`
+impl fmt::Display for TableName&lt;'_&gt; { ... }          // "for any lifetime"
+fn fmt(&amp;self, f: &amp;mut fmt::Formatter&lt;'_&gt;) -&gt; fmt::Result</code></pre>
+    <p>Writing <code>Entry</code> without <code>&lt;'_&gt;</code> in a return type still compiles, but the
+      <code>elided_lifetimes_in_paths</code> lint and code reviewers prefer the marker, because it tells the reader at
+      a glance that the returned value borrows from an argument.</p>
+    <aside class="callout pixi"><p>Pixi's small shell interpreter looks up a variable and returns a borrowed
+      <code>&amp;str</code>. There are two inputs, so elision cannot decide, and the author names the one the result
+      comes from (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_script_shell/src/execute.rs#L323-L331">crates/pixi_script_shell/src/execute.rs</a>):</p>
+    <pre><code class="language-rust">fn variable&lt;'a&gt;(name: &amp;str, context: &amp;'a ShellContext) -&gt; Result&lt;&amp;'a str, ShellExecutionError&gt; {
+    context
+        .variables
+        .get(name)
+        .map(String::as_str)
+        .ok_or_else(|| ShellExecutionError::UndefinedVariable {
+            name: name.to_owned(),
+        })
+}</code></pre>
+    <p><code>name</code> has its own elided lifetime, unrelated to <code>'a</code>. That is precise: the value lives
+      in the context's map, so callers may drop the name they searched for and keep the result. Note the error path:
+      it needs to keep the name, and it cannot borrow it for longer than the call, so it copies it with
+      <code>to_owned()</code>.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> one reference in, or a <code>&amp;self</code> method, and
+      you rarely write lifetimes. Two or more reference inputs with a reference output, and you must say which input
+      the output borrows from.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="returning-references">
+    <h2>Returning references: E0515 and what it is telling you</h2>
+    <p>A Python habit causes the most common lifetime error. In Python a function can build a new string and return
+      it, and the caller gets a reference to it. Translated literally into Rust:</p>
+    <div class="runnable" data-title="E0515: returns a reference to data owned by the current function" data-compile-fail>
+<textarea>
+fn normalized(name: &str) -> &str {
+    let lower = name.to_lowercase();
+    lower.as_str()
+}
+
+fn main() {
+    println!("{}", normalized("NumPy"));
+}
+</textarea>
+    </div>
+    <p>The signature compiles (rule 2 links the result to <code>name</code>), but the body breaks the promise.
+      <code>lower</code> is a new <code>String</code> owned by the function. It is dropped at the closing brace, so a
+      reference into it would dangle the moment the function returns. No annotation can fix this, because the data
+      you want to return does not exist anywhere outside the function.</p>
+    <p>The fix is to return the owner. Ownership moves out to the caller, and nothing is dropped:</p>
+    <div class="runnable" data-title="Return the owned value" data-predict>
+<textarea>
+fn normalized(name: &str) -> String {
+    name.to_lowercase().replace('_', "-")
+}
+
+fn main() {
+    let spec = String::from("Typing_Extensions");
+    let clean = normalized(&spec);
+    drop(spec);
+    println!("{clean}");
+}
+</textarea>
+    </div>
+    <p>A function can return a reference only into something that outlives the call: one of its reference arguments
+      (as in <code>longer</code>), data reachable through <code>&amp;self</code>, or data that lives for the whole
+      program, such as a string literal. If the value is computed inside the function, return it by value.</p>
+    <p>The error comes in two forms. "cannot return reference to local variable <code>x</code>" appears for a plain
+      <code>&amp;x</code>. "cannot return value referencing local variable <code>lower</code>", with the label
+      "returns a value referencing data owned by the current function", appears when the borrow is hidden inside
+      another value, such as <code>lower.as_str()</code> or a struct that borrows a local. Both mean the same
+      thing.</p>
+    <aside class="callout warn"><p>A related trap: returning a reference to a parameter that was passed <em>by
+      value</em>. In <code>fn first(v: Vec&lt;String&gt;) -&gt; &amp;String</code>, <code>v</code> is owned by the
+      function and dropped at its end, so you get E0106 (no input lifetime to borrow from) and, if you add one,
+      E0515. Take <code>&amp;[String]</code> instead.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> E0515 means "the thing you are pointing at dies when this
+      function returns." The fix is almost always to return the owned value (<code>String</code>,
+      <code>Vec&lt;T&gt;</code>, <code>PathBuf</code>), not to add annotations.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="structs">
+    <h2>Structs that borrow</h2>
+    <p>A struct can hold references, which lets it act as a cheap <strong>view</strong> into data someone else owns.
+      Parsing is the classic case: you read a file into one <code>String</code>, then build many small structs that
+      point into it, without copying any text. Python cannot express this, since every slice of a <code>str</code>
+      is a new object.</p>
+    <p>A struct that holds a reference must declare a lifetime parameter and use it on each reference field:</p>
+    <div class="runnable" data-title="A struct that borrows from its input" data-predict>
+<textarea>
+#[derive(Debug)]
+struct Entry<'a> {
+    key: &'a str,
+    value: &'a str,
+}
+
+impl<'a> Entry<'a> {
+    fn parse(line: &'a str) -> Option<Entry<'a>> {
+        let (key, value) = line.split_once('=')?;
+        Some(Entry { key: key.trim(), value: value.trim().trim_matches('"') })
+    }
+
+    // Returns data from the original text, so it uses 'a, not self's lifetime.
+    fn value(&self) -> &'a str {
+        self.value
+    }
+}
+
+fn main() {
+    let manifest = String::from("name = \"demo\"\nchannels = \"conda-forge\"\n");
+    let entries: Vec<Entry<'_>> = manifest.lines().filter_map(Entry::parse).collect();
+    println!("{}", entries.len());
+    println!("{:?}", entries[1]);
+    println!("{}", entries[0].value());
+}
+</textarea>
+    </div>
+    <p>Three pieces of syntax:</p>
+    <ul>
+      <li><code>struct Entry&lt;'a&gt;</code> declares the parameter; <code>key: &amp;'a str</code> says the field
+        borrows for <code>'a</code>. Read the type <code>Entry&lt;'a&gt;</code> as "an entry that is valid only while
+        whatever it borrows from is valid for <code>'a</code>."</li>
+      <li><code>impl&lt;'a&gt; Entry&lt;'a&gt;</code> introduces <code>'a</code> for the block, just like
+        <code>impl&lt;T&gt; Wrapper&lt;T&gt;</code>.</li>
+      <li><code>fn value(&amp;self) -&gt; &amp;'a str</code> is more generous than the elided version would be. Elision
+        would tie the result to the borrow of <code>self</code> (rule 3); naming <code>'a</code> ties it to the
+        original text, so the caller may drop the <code>Entry</code> and keep the value.</li>
+    </ul>
+    <p>The struct inherits the rule from its fields: it cannot outlive what it borrows. Here the text is dropped while
+      an entry still points into it:</p>
+    <div class="runnable" data-title="A borrowing struct cannot outlive its source" data-compile-fail>
+<textarea>
+struct Entry<'a> {
+    key: &'a str,
+}
+
+fn main() {
+    let entry;
+    {
+        let text = String::from("name = demo");
+        entry = Entry { key: &text[..4] };
+    }
+    println!("{}", entry.key);
+}
+</textarea>
+    </div>
+    <p>Same E0597 as before: the struct is just a container for the borrow. You will meet a related shape often:
+      a function that reads a file and tries to return parsed views of it. The <code>String</code> holding the file is
+      local, so the views cannot leave the function (E0515). The usual design is to have the caller own the text and
+      pass <code>&amp;str</code> in, or to make the parsed struct own its fields.</p>
+    <h3>Trait impls for borrowing structs</h3>
+    <p>When you implement a trait for a struct with a lifetime, you usually do not care which lifetime it is, so you
+      write <code>'_</code>:</p>
+    <pre><code class="language-rust">impl fmt::Display for Entry&lt;'_&gt; {
+    fn fmt(&amp;self, f: &amp;mut fmt::Formatter&lt;'_&gt;) -&gt; fmt::Result {
+        write!(f, "{} = {:?}", self.key, self.value)
+    }
+}</code></pre>
+    <aside class="callout pixi"><p>Pixi uses borrowing structs as builder and context types that gather references
+      for one operation. <code>TableName</code> builds a TOML table path like <code>feature.cuda.dependencies</code>
+      from pieces it borrows (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/manifests/table_name.rs#L5-L17">crates/pixi_manifest/src/manifests/table_name.rs</a>):</p>
+    <pre><code class="language-rust">/// Struct that is used to access a table in `pixi.toml` or `pyproject.toml`.
+pub struct TableName&lt;'a&gt; {
+    prefix: Option&lt;&amp;'static str&gt;,
+    target: Option&lt;TargetSelector&gt;,
+    feature_name: Option&lt;&amp;'a FeatureName&gt;,
+    table: Option&lt;&amp;'a str&gt;,
+}
+
+impl Display for TableName&lt;'_&gt; {
+    fn fmt(&amp;self, f: &amp;mut Formatter) -&gt; fmt::Result {
+        write!(f, "{}", self.to_toml_table_name())
+    }
+}</code></pre>
+    <p>One struct mixes three kinds of field: an owned <code>TargetSelector</code>, references valid for the
+      caller-chosen <code>'a</code>, and a <code>&amp;'static str</code> prefix that must be a literal such as
+      <code>"tool.pixi"</code>. The next section explains <code>'static</code>.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> a struct with a reference field needs
+      <code>&lt;'a&gt;</code>, and a value of that struct cannot outlive the data it points into. Use borrowing
+      structs for short-lived views; use owned fields for anything you store or return.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="static">
+    <h2><code>'static</code>, and the bound <code>T: 'static</code></h2>
+    <p><code>'static</code> is the one lifetime with a built-in name. It is the region "the rest of the program". It
+      shows up in two places that look similar and mean different things.</p>
+    <h3><code>&amp;'static T</code>: a reference that is valid forever</h3>
+    <p>A string literal such as <code>"conda-forge"</code> is compiled into the program binary, so it exists for the
+      whole run. Its type is <code>&amp;'static str</code>. A function can return one without any argument to borrow
+      from:</p>
+    <div class="runnable" data-title="Returning &amp;'static str" data-predict>
+<textarea>
+fn default_channel(platform: &str) -> &'static str {
+    match platform {
+        "emscripten-wasm32" => "emscripten-forge",
+        _ => "conda-forge",
+    }
+}
+
+fn main() {
+    let platform = String::from("linux-64");
+    let channel = default_channel(&platform);
+    drop(platform);
+    println!("{channel}");
+}
+</textarea>
+    </div>
+    <p>The result is not linked to <code>platform</code>, so dropping <code>platform</code> is fine. Statics
+      (<code>static NAME: &amp;str = "pixi";</code>) are also <code>'static</code>, and so is memory you deliberately
+      leak with <code>Box::leak</code>, which you will rarely need.</p>
+    <h3><code>T: 'static</code>: a type that contains no short-lived borrows</h3>
+    <p>The bound <code>T: 'static</code> on a generic type does <em>not</em> mean "the value lives forever". It means
+      "the type <code>T</code> holds no references that could expire": it is safe to keep a <code>T</code> for as long
+      as you like. Every owned type meets the bound. <code>String</code>, <code>Vec&lt;u8&gt;</code>,
+      <code>PathBuf</code> and <code>i32</code> are all <code>'static</code> types, even though a particular
+      <code>String</code> may be dropped a microsecond later. <code>&amp;'a str</code> for a local <code>'a</code>, or
+      <code>Entry&lt;'a&gt;</code>, are not.</p>
+    <p>You meet this bound whenever code hands a value to something that may outlive the current function, such as a
+      new thread. <code>std::thread::spawn</code> requires its closure to be <code>'static</code>, because the thread
+      might still run after <code>main</code>'s locals are gone:</p>
+    <div class="runnable" data-title="E0373: the thread may outlive the borrowed value" data-compile-fail>
+<textarea>
+use std::thread;
+
+fn main() {
+    let packages = vec![String::from("numpy"), String::from("pandas")];
+    let handle = thread::spawn(|| {
+        println!("{} packages", packages.len());
+    });
+    handle.join().unwrap();
+}
+</textarea>
+    </div>
+    <p>E0373 says the closure "may outlive the current function, but it borrows <code>packages</code>", and its
+      <code>help:</code> line gives the fix: add <code>move</code>, so the closure takes ownership of the vector.
+      A closure that owns its data holds no borrows, so it is <code>'static</code>:</p>
+    <div class="runnable" data-title="move makes the closure 'static" data-predict>
+<textarea>
+use std::thread;
+
+fn main() {
+    let packages = vec![String::from("numpy"), String::from("pandas")];
+    let handle = thread::spawn(move || packages.len());
+    let count = handle.join().unwrap();
+    println!("{count} packages");
+}
+</textarea>
+    </div>
+    <p>You can write the same bound on your own functions. This helper stores anything printable for later; owned
+      values pass, borrows of locals do not:</p>
+    <pre><code class="language-rust">fn keep_for_later&lt;T: std::fmt::Debug + Send + 'static&gt;(value: T) -&gt; std::thread::JoinHandle&lt;()&gt; {
+    std::thread::spawn(move || println!("{value:?}"))
+}
+
+keep_for_later(String::from("ok"));   // String: 'static
+let local = String::from("no");
+keep_for_later(&amp;local);              // error[E0597]: argument requires that `local` is borrowed for `'static`</code></pre>
+    <aside class="callout pixi"><p>Async tasks have the same rule. Pixi runs blocking filesystem work on a tokio
+      thread pool, and the helper's bounds say exactly what the pool needs
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_command_dispatcher/src/file_fingerprint.rs#L19-L42">crates/pixi_command_dispatcher/src/file_fingerprint.rs</a>):</p>
+    <pre><code class="language-rust">pub(crate) async fn spawn_blocking_with_io_permit&lt;T&gt;(
+    io_semaphore: Option&lt;Arc&lt;Semaphore&gt;&gt;,
+    task: impl FnOnce() -&gt; T + Send + 'static,
+) -&gt; Result&lt;T, tokio::task::JoinError&gt;
+where
+    T: Send + 'static,
+{
+    // ...
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        task()
+    })
+    .await
+}</code></pre>
+    <p>Both the closure and its result must be <code>Send</code> (safe to move to another thread, M08) and
+      <code>'static</code> (no borrowed locals). This is why Pixi code clones an <code>Arc</code> or a
+      <code>PathBuf</code> just before spawning: the task must own what it uses. Async is Level 2; for now, read
+      <code>+ Send + 'static</code> as "this will run somewhere else, later".</p></aside>
+    <aside class="callout warn"><p>When a lifetime error suggests "consider using the <code>'static</code> lifetime",
+      treat it with suspicion. Changing <code>&amp;'a str</code> to <code>&amp;'static str</code> in a signature makes
+      the error move to every caller that passes a non-literal string. The right fix is usually to own the data.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>&amp;'static T</code> is a reference valid for the
+      whole program (literals, statics). <code>T: 'static</code> means "T contains no expiring borrows": every owned
+      type satisfies it. Threads and spawned tasks require it.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="errors">
+    <h2>The lifetime errors you will actually meet</h2>
+    <p>Lifetime problems show up as a handful of error codes. Learn to recognize each by its first line, then go
+      straight to the usual fix.</p>
+    <table>
+      <thead><tr><th>Code</th><th>First line</th><th>What it means</th><th>Usual fix</th></tr></thead>
+      <tbody>
+        <tr><td>E0106</td><td>missing lifetime specifier</td><td>A signature or struct field has a reference whose lifetime elision cannot work out</td><td>Add <code>&lt;'a&gt;</code> and link the output to the right input; or return an owned value</td></tr>
+        <tr><td>E0597</td><td><code>x</code> does not live long enough</td><td>A borrow is used after its owner is dropped</td><td>Move the owner to an outer scope, or shorten the use</td></tr>
+        <tr><td>E0515</td><td>cannot return reference to local variable / cannot return value referencing local variable</td><td>You return a reference into something the function owns</td><td>Return the owned value</td></tr>
+        <tr><td>E0716</td><td>temporary value dropped while borrowed</td><td>You borrowed from a temporary (an unnamed value) that dies at the end of the statement</td><td>Bind the temporary to a <code>let</code> first</td></tr>
+        <tr><td>E0373</td><td>closure may outlive the current function, but it borrows <code>x</code></td><td>A thread or task closure borrows a local</td><td><code>move</code> the data in (clone first if you still need it)</td></tr>
+        <tr><td>(no code)</td><td>lifetime may not live long enough</td><td>The body returns data with a different lifetime than the signature promises</td><td>Fix the signature to name the input the data really comes from</td></tr>
+      </tbody>
+    </table>
+    <p>E0716 deserves an example, because it looks like perfectly reasonable code:</p>
+    <div class="runnable" data-title="E0716: temporary value dropped while borrowed" data-compile-fail>
+<textarea>
+fn main() {
+    let name: &str = String::from("pixi").to_uppercase().as_str();
+    println!("{name}");
+}
+</textarea>
+    </div>
+    <p><code>to_uppercase()</code> creates a new <code>String</code> that has no name. Rust drops unnamed temporaries
+      at the end of the statement (the <code>;</code>), so <code>name</code> would point into freed memory on the next
+      line. The help line says "consider using a <code>let</code> binding to create a longer lived value". Give the
+      owner a name: <code>let upper = String::from("pixi").to_uppercase(); let name = upper.as_str();</code>, or just
+      keep the <code>String</code>.</p>
+    <p>The unnamed error, "lifetime may not live long enough", comes from a signature that names the wrong input:</p>
+    <div class="runnable" data-title="The body returns data from the wrong input" data-compile-fail>
+<textarea>
+fn channel_or_default<'a, 'b>(manifest: &'a str, fallback: &'b str) -> &'a str {
+    if manifest.is_empty() { fallback } else { manifest }
+}
+
+fn main() {
+    println!("{}", channel_or_default("", "conda-forge"));
+}
+</textarea>
+    </div>
+    <p>The signature promises the result comes from <code>manifest</code>, but one branch returns
+      <code>fallback</code>, which has an unrelated lifetime <code>'b</code>. The compiler's help suggests adding the
+      bound <code>'b: 'a</code> ("<code>'b</code> outlives <code>'a</code>"). That works, but the simpler fix is to
+      use one lifetime for both, as in <code>longer</code>.</p>
+    <aside class="callout pro"><p>When you read a lifetime error, find the three spans: the borrow, the drop, and the
+      later use. One of the three is in the wrong place. Do not start by adding annotations; annotations change only
+      what the signature promises, and a wrong promise just moves the error to the caller.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> E0597 is "owner died first", E0515 is "you returned a
+      pointer to your own local", E0716 is "the owner never had a name", E0373 is "a thread borrowed a local".</p></aside>
+  </section>
+
+  <section class="lesson-section" id="own-it">
+    <h2>When to stop fighting and own the data</h2>
+    <p>Borrowing avoids copies. Copies cost time and memory, but usually far less than you think: cloning a package
+      name is a small allocation and a <code>memcpy</code> of a few bytes. Lifetime parameters cost something too:
+      every struct that holds one infects its users, who must carry the parameter in their own types and keep the
+      source alive. Experienced Rust developers borrow freely in function <em>arguments</em> and own by default in
+      <em>stored</em> data.</p>
+    <div class="card-grid">
+      <div class="card"><h4>Borrow (<code>&amp;str</code>, <code>&amp;[T]</code>, <code>&amp;T</code>)</h4><p>Function parameters you only read. Return values that are a sub-slice of an input. Short-lived views and iterators over data the caller owns. Hot loops where a copy per item would show up in a profile.</p></div>
+      <div class="card"><h4>Own (<code>String</code>, <code>Vec&lt;T&gt;</code>, <code>PathBuf</code>)</h4><p>Struct fields that live beyond one call. Values you return that you computed. Anything you send to a thread or task. Error types (they travel up the call stack). Values whose source is about to be dropped.</p></div>
+    </div>
+    <p>Here is the same parse written both ways. The owned version has no lifetime parameter, can be returned from a
+      function that reads a file, stored in a <code>Vec</code> that outlives the text, and sent to a thread:</p>
+    <div class="tabs">
+      <div class="tab" data-label="Borrowed view">
+    <pre><code class="language-rust">struct Entry&lt;'a&gt; {
+    key: &amp;'a str,
+    value: &amp;'a str,
+}
+
+fn parse(line: &amp;str) -&gt; Option&lt;Entry&lt;'_&gt;&gt; {
+    let (key, value) = line.split_once('=')?;
+    Some(Entry { key: key.trim(), value: value.trim() })
+}</code></pre>
+      </div>
+      <div class="tab" data-label="Owned">
+    <pre><code class="language-rust">struct Entry {
+    key: String,
+    value: String,
+}
+
+fn parse(line: &amp;str) -&gt; Option&lt;Entry&gt; {
+    let (key, value) = line.split_once('=')?;
+    Some(Entry { key: key.trim().to_string(), value: value.trim().to_string() })
+}</code></pre>
+      </div>
+    </div>
+    <p>Notice that the owned version still takes <code>&amp;str</code>. Borrowing the input and owning the output is
+      the most common shape in Rust code, and in Pixi. You can convert at the edge: borrow while searching, then call
+      <code>.to_string()</code>, <code>.to_owned()</code>, or <code>PathBuf::from</code> on the one value you keep.</p>
+    <p>The program below reads a "file" in a helper function and returns owned entries. Try changing
+      <code>Entry</code> to hold <code>&amp;str</code> fields and see which error you get.</p>
+    <div class="runnable" data-title="Owned data can leave the function">
+<textarea>
+#[derive(Debug)]
+struct Entry {
+    key: String,
+    value: String,
+}
+
+fn read_manifest() -> Vec<Entry> {
+    let text = String::from("name = demo\nversion = 0.1.0\n"); // stands in for fs::read_to_string
+    text.lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(k, v)| Entry { key: k.trim().to_string(), value: v.trim().to_string() })
+        .collect()
+}
+
+fn main() {
+    for entry in read_manifest() {
+        println!("{} -> {}", entry.key, entry.value);
+    }
+}
+</textarea>
+    </div>
+    <p>Two more tools sit between "borrow" and "copy", and they are the subject of the next module:
+      <code>Cow&lt;'_, str&gt;</code> (borrow when you can, own when you must) and <code>Rc</code>/<code>Arc</code>
+      (share one owned value between many owners cheaply).</p>
+    <aside class="callout pro"><p>Clippy will not complain about a well-placed <code>.clone()</code>, and reviewers on
+      the Pixi repository rarely do either. What they do flag is a public type that grew a lifetime parameter for no
+      measurable gain, because every caller now pays for it. If you are fighting the borrow checker for more than a few
+      minutes in non-hot code, own the data and move on.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> borrow in parameters, own in fields and return values.
+      A clone that removes a lifetime parameter is usually a good trade.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="pixi-reading">
+    <h2>Reading Pixi</h2>
+    <p>Two short excerpts show the module's ideas in real code: a function that returns a borrow tied to one specific
+      input, and a borrowing "view" struct used only for formatting.</p>
+    <h3>1. Reading a value out of <code>CMakeCache.txt</code></h3>
+    <p>Pixi's CMake build backend reads CMake's cache file to learn where the sources are and which
+      <code>ninja</code> binary CMake chose
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_build_cmake/src/inputs.rs#L106-L110">crates/pixi_build_cmake/src/inputs.rs#L106-L110</a>):</p>
+    <pre><code class="language-rust">/// Returns the value of a `KEY:TYPE=value` entry from a parsed
+/// `CMakeCache.txt`, or `None` if the key isn't present.
+fn read_cache_value&lt;'a&gt;(cache: &amp;'a str, key: &amp;str) -&gt; Option&lt;&amp;'a str&gt; {
+    cache.lines().find_map(|l| l.strip_prefix(key))
+}</code></pre>
+    <p>And its caller
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_build_cmake/src/inputs.rs#L52-L65">crates/pixi_build_cmake/src/inputs.rs#L52-L65</a>):</p>
+    <pre><code class="language-rust">let cache = fs_err::read_to_string(build_dir.join("CMakeCache.txt"))?;
+let source_dir = read_cache_value(&amp;cache, CMAKE_HOME_DIRECTORY_KEY)
+    .map(PathBuf::from)
+    .ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "CMAKE_HOME_DIRECTORY not found in CMakeCache.txt",
+        )
+    })?;
+// ...
+let ninja_binary = read_cache_value(&amp;cache, CMAKE_MAKE_PROGRAM_KEY)
+    .map(PathBuf::from)
+    .unwrap_or_else(|| PathBuf::from("ninja"));</code></pre>
+    <ul>
+      <li><code>fn read_cache_value&lt;'a&gt;</code>: two reference inputs, so elision cannot pick one; the author
+        declares <code>'a</code>.</li>
+      <li><code>cache: &amp;'a str, key: &amp;str</code>: only <code>cache</code> carries <code>'a</code>. The key
+        gets its own anonymous lifetime, because the result never points into it.</li>
+      <li><code>Option&lt;&amp;'a str&gt;</code>: the value found is a slice of the cache text, with no copying.
+        <code>lines()</code> yields <code>&amp;'a str</code> slices of <code>cache</code>, and
+        <code>strip_prefix</code> returns the rest of one of them, still borrowed from <code>cache</code>.</li>
+      <li>In the caller, <code>cache</code> is an owned <code>String</code>, local to the function. The borrowed
+        results are immediately converted with <code>.map(PathBuf::from)</code>: borrow to search, own what you keep.
+        That conversion is what allows <code>source_dir</code> and <code>ninja_binary</code> to be stored in a
+        <code>Ninja</code> struct and used after <code>cache</code> is dropped.</li>
+    </ul>
+    <details class="reveal"><summary>Question: what would change if the signature were <code>fn read_cache_value&lt;'a&gt;(cache: &amp;'a str, key: &amp;'a str) -&gt; Option&lt;&amp;'a str&gt;</code>?</summary>
+      <p>It would still compile here, because both the cache and the constant key live long enough. But the
+        signature would be less precise: callers would have to keep <code>key</code> alive as long as they keep the
+        result, even though the result never borrows from it. A caller that built the key with <code>format!</code>
+        and dropped it would get E0597 for no good reason. Give an input a lifetime only if the output can borrow
+        from it.</p></details>
+    <details class="reveal"><summary>Question: could <code>read_cache_value</code> return <code>Option&lt;PathBuf&gt;</code> directly?</summary>
+      <p>Yes, and then it would need no lifetime parameter at all. The author kept the function generic and cheap
+        (the value is just text, and not every key is a path), and let each caller decide what to own. Both are
+        reasonable; the borrowed version avoids an allocation when the caller only needs to compare.</p></details>
+
+    <h3>2. A view struct for error messages</h3>
+    <p>Pixi's error messages talk about "feature 'cuda'", but a feature synthesized from an environment should be
+      described as "environment 'cuda'". Rather than build a <code>String</code> eagerly, <code>FeatureName</code>
+      hands out a tiny struct that borrows it and knows how to print it
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/feature.rs#L104-L124">crates/pixi_manifest/src/feature.rs#L104-L124</a>):</p>
+    <pre><code class="language-rust">    pub fn user_facing(&amp;self) -&gt; UserFacingFeatureName&lt;'_&gt; {
+        UserFacingFeatureName(self)
+    }
+}
+
+/// Helper returned by [`FeatureName::user_facing`] that renders a feature name
+/// for diagnostics, describing a synthesized environment feature as an
+/// environment rather than a feature.
+pub struct UserFacingFeatureName&lt;'a&gt;(&amp;'a FeatureName);
+
+impl fmt::Display for UserFacingFeatureName&lt;'_&gt; {
+    fn fmt(&amp;self, f: &amp;mut fmt::Formatter&lt;'_&gt;) -&gt; fmt::Result {
+        match self.0 {
+            FeatureName::Environment(name) =&gt; write!(f, "environment '{name}'"),
+            _ =&gt; write!(f, "feature '{}'", self.0.as_str()),
+        }
+    }
+}</code></pre>
+    <ul>
+      <li><code>UserFacingFeatureName&lt;'a&gt;(&amp;'a FeatureName)</code> is a tuple struct with one borrowed field,
+        accessed as <code>self.0</code>. It is the size of one pointer.</li>
+      <li><code>fn user_facing(&amp;self) -&gt; UserFacingFeatureName&lt;'_&gt;</code>: rule 2 (one input) ties the
+        view to <code>self</code>; <code>'_</code> shows the reader that the return value borrows.</li>
+      <li><code>impl fmt::Display for UserFacingFeatureName&lt;'_&gt;</code>: the impl works for any lifetime, so
+        it uses the anonymous one.</li>
+      <li>Callers write <code>format!("{} is empty", name.user_facing())</code> or put it in a
+        <code>thiserror</code> message. The view lives for one expression, so the borrow never causes trouble.</li>
+    </ul>
+    <details class="reveal"><summary>Question: why is a borrowing struct a good fit here, when the previous section said to own stored data?</summary>
+      <p>Because it is not stored. It exists only to be formatted, almost always within one expression, and owning
+        would mean cloning the feature name for every message. Short-lived views are where lifetime parameters pay
+        off with no cost to users.</p></details>
+    <details class="reveal"><summary>Question: in <code>match self.0</code>, <code>self.0</code> is a <code>&amp;FeatureName</code>. Why can the arm bind <code>name</code> without moving anything out?</summary>
+      <p>Matching on a reference uses default binding modes (match ergonomics): the pattern
+        <code>FeatureName::Environment(name)</code> binds <code>name</code> as a reference into the borrowed enum, not
+        as an owned value. Nothing moves, which is exactly what you want behind a <code>&amp;</code>.</p></details>
+  </section>
+
+  <section class="lesson-section" id="practice">
+    <h2>Practice</h2>
+    <p>Five exercises, from elision to an iterator that borrows. Some ask you to change a signature; the prompt says
+      so, and then the compiler error from the tests is your first clue.</p>
+
+    <div class="exercise" data-id="m07-e1" data-title="First word, no annotations">
+      <div class="exercise-prompt">
+        <p>Write <code>name_of(spec: &amp;str) -&gt; &amp;str</code> that returns the package name part of a
+          dependency spec: everything before the first space, <code>=</code>, <code>&lt;</code>, <code>&gt;</code>,
+          or <code>!</code>, with surrounding whitespace trimmed. <code>"numpy &gt;=2"</code> gives
+          <code>"numpy"</code>, <code>"python==3.14"</code> gives <code>"python"</code>, <code>"  rich "</code> gives
+          <code>"rich"</code>. The result must be a slice of the input (no allocation). The signature needs no
+          lifetime annotations; say to yourself which elision rule makes that true.</p>
+      </div>
+<textarea class="starter">
+fn name_of(spec: &str) -> &str {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn stops_at_space_and_operators() {
+    assert_eq!(name_of("numpy >=2"), "numpy", "stop at the first space");
+    assert_eq!(name_of("python==3.14"), "python", "stop at '='");
+    assert_eq!(name_of("pandas<3"), "pandas", "stop at '<'");
+    assert_eq!(name_of("rust!=1.80"), "rust", "stop at '!'");
+}
+
+#[test]
+fn trims_and_handles_bare_names() {
+    assert_eq!(name_of("  rich "), "rich", "trim surrounding whitespace");
+    assert_eq!(name_of("pixi"), "pixi", "a bare name is returned whole");
+    assert_eq!(name_of(""), "", "an empty spec gives an empty name");
+}
+
+#[test]
+fn result_points_into_the_input() {
+    let spec = String::from("scipy >=1.14");
+    let name = name_of(&spec);
+    let start = spec.as_ptr() as usize;
+    let at = name.as_ptr() as usize;
+    assert!(at >= start && at < start + spec.len(), "return a slice of the input, not a new String");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Trim first, then find the end with
+        <code>s.find(|c: char| c == ' ' || "=&lt;&gt;!".contains(c))</code>, and slice <code>&amp;s[..end]</code>.
+        <code>trim</code> returns a slice of its input, so the chain stays borrowed. Elision rule 2 links the output to
+        the only input.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn name_of(spec: &amp;str) -&gt; &amp;str {
+    let s = spec.trim();
+    let end = s.find(|c: char| c == ' ' || "=&lt;&gt;!".contains(c)).unwrap_or(s.len());
+    &amp;s[..end]
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m07-e2" data-title="Tie the result to the right input">
+      <div class="exercise-prompt">
+        <p><code>pick_channel</code> returns the channel from <code>channels</code> that equals
+          <code>preferred</code>, or the first channel if none matches, or <code>None</code> if the list is empty. The
+          starter's signature ties the result to <em>both</em> inputs. The tests drop <code>preferred</code> while
+          still using the result, so they will not compile against the starter (E0597). <strong>Fix the signature</strong>
+          so the result borrows only from <code>channels</code>, then implement the body.</p>
+      </div>
+<textarea class="starter">
+fn pick_channel<'a>(channels: &'a [String], preferred: &'a str) -> Option<&'a str> {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+fn channels() -> Vec<String> {
+    vec!["conda-forge".to_string(), "bioconda".to_string(), "pytorch".to_string()]
+}
+
+#[test]
+fn finds_the_preferred_channel() {
+    let list = channels();
+    let picked;
+    {
+        let preferred = String::from("bioconda");
+        picked = pick_channel(&list, &preferred);
+    }
+    assert_eq!(picked, Some("bioconda"), "the result must outlive `preferred`, so it can only borrow from `channels`");
+}
+
+#[test]
+fn falls_back_to_the_first() {
+    let list = channels();
+    let picked;
+    {
+        let preferred = format!("{}-nightly", "pytorch");
+        picked = pick_channel(&list, &preferred);
+    }
+    assert_eq!(picked, Some("conda-forge"), "no match: fall back to the first channel");
+}
+
+#[test]
+fn empty_list_gives_none() {
+    let list: Vec<String> = Vec::new();
+    assert_eq!(pick_channel(&list, "conda-forge"), None, "no channels: None");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Remove <code>'a</code> from <code>preferred</code> (leave it
+        as plain <code>&amp;str</code>). In the body, <code>channels.iter().find(|c| c.as_str() == preferred)</code>
+        and <code>.or_else(|| channels.first())</code>, then <code>.map(String::as_str)</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn pick_channel&lt;'a&gt;(channels: &amp;'a [String], preferred: &amp;str) -&gt; Option&lt;&amp;'a str&gt; {
+    channels
+        .iter()
+        .find(|c| c.as_str() == preferred)
+        .or_else(|| channels.first())
+        .map(String::as_str)
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m07-e3" data-title="A struct that borrows">
+      <div class="exercise-prompt">
+        <p>Define <code>struct Entry&lt;'a&gt;</code> with two <code>&amp;'a str</code> fields, <code>key</code> and
+          <code>value</code>. Write <code>parse_entries(text: &amp;str) -&gt; Vec&lt;Entry&lt;'_&gt;&gt;</code> that
+          turns each <code>key = value</code> line into an entry with both sides trimmed. Skip blank lines, lines
+          starting with <code>#</code> (after trimming), and lines without <code>=</code>. Split on the
+          <em>first</em> <code>=</code> only, so <code>cmd = a=b</code> has value <code>a=b</code>. Then write
+          <code>lookup&lt;'a&gt;(entries: &amp;[Entry&lt;'a&gt;], key: &amp;str) -&gt; Option&lt;&amp;'a str&gt;</code>
+          returning the value of the <em>last</em> entry with that key, borrowed from the original text.</p>
+      </div>
+<textarea class="starter">
+struct Entry<'a> {
+    key: &'a str,
+    value: &'a str,
+}
+
+fn parse_entries(text: &str) -> Vec<Entry<'_>> {
+    todo!()
+}
+
+fn lookup<'a>(entries: &[Entry<'a>], key: &str) -> Option<&'a str> {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+const TEXT: &str = "# demo\nname = demo\n\nchannels = conda-forge\ncmd = echo a=b\nnot a pair\nname = renamed\n";
+
+#[test]
+fn parses_pairs_and_skips_noise() {
+    let entries = parse_entries(TEXT);
+    let keys: Vec<&str> = entries.iter().map(|e| e.key).collect();
+    assert_eq!(keys, vec!["name", "channels", "cmd", "name"], "skip comments, blank lines and lines without '='");
+    assert_eq!(entries[2].value, "echo a=b", "split on the first '=' only");
+}
+
+#[test]
+fn lookup_returns_the_last_match() {
+    let entries = parse_entries(TEXT);
+    assert_eq!(lookup(&entries, "name"), Some("renamed"), "a later key overrides an earlier one");
+    assert_eq!(lookup(&entries, "missing"), None, "an unknown key gives None");
+}
+
+#[test]
+fn values_outlive_the_entries_vec() {
+    let text = String::from("platform = linux-64\n");
+    let value;
+    {
+        let entries = parse_entries(&text);
+        value = lookup(&entries, "platform");
+    }
+    assert_eq!(value, Some("linux-64"), "lookup's result borrows from the text, not from the Vec of entries");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>text.lines().filter_map(|line| { ... })</code> with
+        <code>let line = line.trim();</code>, an early <code>return None</code> for blanks and comments, and
+        <code>line.split_once('=')?</code>. For <code>lookup</code>, <code>entries.iter().rev().find(...)</code> then
+        <code>.map(|e| e.value)</code>; copying the <code>&amp;'a str</code> out of the entry keeps the
+        <code>'a</code> lifetime.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">struct Entry&lt;'a&gt; {
+    key: &amp;'a str,
+    value: &amp;'a str,
+}
+
+fn parse_entries(text: &amp;str) -&gt; Vec&lt;Entry&lt;'_&gt;&gt; {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let (key, value) = line.split_once('=')?;
+            Some(Entry { key: key.trim(), value: value.trim() })
+        })
+        .collect()
+}
+
+fn lookup&lt;'a&gt;(entries: &amp;[Entry&lt;'a&gt;], key: &amp;str) -&gt; Option&lt;&amp;'a str&gt; {
+    entries.iter().rev().find(|e| e.key == key).map(|e| e.value)
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m07-e4" data-title="Stop fighting: return an owned value">
+      <div class="exercise-prompt">
+        <p>The starter's <code>normalize</code> promises to return a <code>&amp;str</code>, but a normalized name
+          (lowercase, with <code>_</code> and <code>.</code> replaced by <code>-</code>, as for PyPI names) is new
+          text that does not exist in the input. No lifetime can make that work (E0515). <strong>Change the return
+          type to <code>String</code></strong> (the tests expect it), and implement it. Also write
+          <code>normalize_all(names: &amp;[&amp;str]) -&gt; Vec&lt;String&gt;</code>.</p>
+      </div>
+<textarea class="starter">
+fn normalize(name: &str) -> &str {
+    todo!()
+}
+
+fn normalize_all(names: &[&str]) -> Vec<String> {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn normalizes_one_name() {
+    let out: String = normalize("Typing_Extensions");
+    assert_eq!(out, "typing-extensions", "lowercase and replace '_' with '-'");
+    assert_eq!(normalize("zope.interface"), "zope-interface", "replace '.' with '-'");
+    assert_eq!(normalize("numpy"), "numpy", "an already-normal name is unchanged");
+}
+
+#[test]
+fn result_outlives_the_input() {
+    let out;
+    {
+        let input = String::from("Ruamel.YAML");
+        out = normalize(&input);
+    }
+    assert_eq!(out, "ruamel-yaml", "an owned String can outlive the input it was computed from");
+}
+
+#[test]
+fn normalizes_many() {
+    assert_eq!(normalize_all(&["A_B", "c.d"]), vec!["a-b".to_string(), "c-d".to_string()], "normalize each name in order");
+    assert!(normalize_all(&[]).is_empty(), "no names gives an empty Vec");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>name.to_lowercase()</code> returns a new
+        <code>String</code>; <code>.replace(['_', '.'], "-")</code> accepts an array of chars as the pattern. For the
+        list, <code>names.iter().map(|n| normalize(n)).collect()</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn normalize(name: &amp;str) -&gt; String {
+    name.to_lowercase().replace(['_', '.'], "-")
+}
+
+fn normalize_all(names: &amp;[&amp;str]) -&gt; Vec&lt;String&gt; {
+    names.iter().map(|n| normalize(n)).collect()
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m07-e5" data-title="An iterator that borrows its input">
+      <div class="exercise-prompt">
+        <p>Pixi's task shell has a <code>Parser&lt;'a&gt;</code> that walks over a borrowed command string. Build a
+          small version: <code>struct Args&lt;'a&gt; { rest: &amp;'a str }</code> with
+          <code>Args::new(line: &amp;'a str)</code>, and implement <code>Iterator</code> for it with
+          <code>type Item = &amp;'a str;</code>. Each call to <code>next</code> skips leading whitespace and yields the
+          next whitespace-separated word, except that a word starting with <code>"</code> runs to the next
+          <code>"</code> and is yielded <em>without</em> the quotes. An unterminated quote yields the rest of the line
+          (without the opening quote). Every item must be a slice of the original line, so items can outlive the
+          iterator.</p>
+      </div>
+<textarea class="starter">
+struct Args<'a> {
+    rest: &'a str,
+}
+
+impl<'a> Args<'a> {
+    fn new(line: &'a str) -> Self {
+        Args { rest: line }
+    }
+}
+
+impl<'a> Iterator for Args<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<&'a str> {
+        todo!()
+    }
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn splits_on_whitespace() {
+    let words: Vec<&str> = Args::new("  cargo   build --release ").collect();
+    assert_eq!(words, vec!["cargo", "build", "--release"], "split on runs of whitespace, ignore leading/trailing");
+}
+
+#[test]
+fn quoted_words_keep_spaces() {
+    let words: Vec<&str> = Args::new("echo \"hello world\" done").collect();
+    assert_eq!(words, vec!["echo", "hello world", "done"], "a quoted word runs to the closing quote, quotes removed");
+}
+
+#[test]
+fn unterminated_quote_takes_the_rest() {
+    let words: Vec<&str> = Args::new("echo \"oops no end").collect();
+    assert_eq!(words, vec!["echo", "oops no end"], "an unterminated quote yields the rest of the line");
+}
+
+#[test]
+fn empty_line_yields_nothing() {
+    assert_eq!(Args::new("   ").next(), None, "only whitespace: no items");
+}
+
+#[test]
+fn items_outlive_the_iterator() {
+    let line = String::from("pixi run test");
+    let first;
+    {
+        let mut args = Args::new(&line);
+        first = args.next();
+    }
+    assert_eq!(first, Some("pixi"), "items borrow from the line ('a), not from the iterator");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Start with <code>let s = self.rest.trim_start();</code> and
+        return <code>None</code> if it is empty. For a quote, <code>let body = &amp;s[1..];</code> and
+        <code>body.find('"')</code>: on <code>Some(end)</code> the item is <code>&amp;body[..end]</code> and the rest
+        is <code>&amp;body[end + 1..]</code>. Otherwise find the next whitespace with
+        <code>s.find(char::is_whitespace)</code>. Because <code>self.rest</code> is <code>&amp;'a str</code>, every
+        slice of it is <code>&amp;'a str</code> too.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">struct Args&lt;'a&gt; {
+    rest: &amp;'a str,
+}
+
+impl&lt;'a&gt; Args&lt;'a&gt; {
+    fn new(line: &amp;'a str) -&gt; Self {
+        Args { rest: line }
+    }
+}
+
+impl&lt;'a&gt; Iterator for Args&lt;'a&gt; {
+    type Item = &amp;'a str;
+
+    fn next(&amp;mut self) -&gt; Option&lt;&amp;'a str&gt; {
+        let s = self.rest.trim_start();
+        if s.is_empty() {
+            self.rest = s;
+            return None;
+        }
+        if let Some(body) = s.strip_prefix('"') {
+            match body.find('"') {
+                Some(end) =&gt; {
+                    self.rest = &amp;body[end + 1..];
+                    Some(&amp;body[..end])
+                }
+                None =&gt; {
+                    self.rest = "";
+                    Some(body)
+                }
+            }
+        } else {
+            let end = s.find(char::is_whitespace).unwrap_or(s.len());
+            self.rest = &amp;s[end..];
+            Some(&amp;s[..end])
+        }
+    }
+}</code></pre>
+      </details>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="mini-project">
+    <h2>Mini-project</h2>
+    <div class="project-box">
+      <div class="widget-head"><span class="w-kind">Mini-project</span><span class="w-title">A zero-copy task scanner</span></div>
+      <div class="widget-body">
+        <p>Build a command-line tool that reads a small TOML-like file and lists the tasks in its
+          <code>[tasks]</code> table, borrowing from the file's text wherever it can. No TOML crate: parse lines by
+          hand, so the lifetimes are yours to design.</p>
+        <pre data-label="Terminal"><code class="language-bash">pixi init task-scan &amp;&amp; cd task-scan
+pixi add rust
+pixi run cargo init --name task_scan
+pixi run cargo run -- pixi.toml</code></pre>
+        <p><strong>Spec.</strong></p>
+        <ol>
+          <li>In <code>main</code>, read the path from <code>std::env::args().nth(1)</code> and the file with
+            <code>std::fs::read_to_string</code>. The <code>String</code> lives in <code>main</code>, which owns it for
+            the whole run.</li>
+          <li>Write <code>struct Task&lt;'a&gt; { name: &amp;'a str, cmd: &amp;'a str, line: usize }</code> and
+            <code>fn tasks(text: &amp;str) -&gt; Vec&lt;Task&lt;'_&gt;&gt;</code> that collects <code>name = "cmd"</code>
+            lines inside the <code>[tasks]</code> table only (a table starts at a line like <code>[name]</code> and ends
+            at the next one), stripping the quotes from the command.</li>
+          <li>Write <code>fn find&lt;'a&gt;(tasks: &amp;[Task&lt;'a&gt;], name: &amp;str) -&gt; Option&lt;&amp;Task&lt;'a&gt;&gt;</code>.</li>
+          <li>Implement <code>Display for Task&lt;'_&gt;</code> printing <code>name (line N): cmd</code>.</li>
+          <li>Report duplicate task names with both line numbers, using a <code>BTreeMap&lt;&amp;str, Vec&lt;usize&gt;&gt;</code>
+            whose keys borrow from the text.</li>
+          <li>Finally, add <code>struct OwnedTask { name: String, cmd: String }</code> and
+            <code>impl From&lt;&amp;Task&lt;'_&gt;&gt; for OwnedTask</code>, and a function
+            <code>fn load(path: &amp;Path) -&gt; std::io::Result&lt;Vec&lt;OwnedTask&gt;&gt;</code> that reads the file
+            itself. Write a comment explaining why <code>load</code> cannot return <code>Vec&lt;Task&lt;'_&gt;&gt;</code>.</li>
+        </ol>
+        <ul class="checklist" data-id="m07-mini">
+          <li>Running it on a real <code>pixi.toml</code> lists the tasks with line numbers</li>
+          <li><code>tasks</code> and <code>find</code> compile with no lifetime annotations beyond those in the spec</li>
+          <li>Unit tests cover: tasks outside <code>[tasks]</code> are ignored, quotes are stripped, duplicates are reported</li>
+          <li>A test shows a <code>&amp;str</code> from <code>find</code> outliving the <code>Vec&lt;Task&gt;</code> it came from</li>
+          <li>You triggered E0515 once on purpose by making <code>load</code> return borrowed tasks, read the error, and reverted</li>
+          <li><code>pixi run cargo clippy --all-targets -- -D warnings</code> and <code>pixi run cargo fmt --check</code> pass</li>
+        </ul>
+        <p><strong>Stretch goals.</strong> Support inline tables (<code>build = { cmd = "cargo build" }</code>) by
+          extracting the <code>cmd</code> value as a slice. Make <code>tasks</code> return an iterator,
+          <code>impl Iterator&lt;Item = Task&lt;'_&gt;&gt; + '_</code>, instead of a <code>Vec</code>, and explain the
+          <code>+ '_</code>. Compare your parser's approach with Pixi's
+          <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_script_shell/src/parse.rs#L84-L88"><code>Parser&lt;'a&gt;</code></a>.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="quiz">
+    <h2>Quiz</h2>
+    <div class="quiz" data-id="m07-quiz">
+<script type="application/json">
+{"title": "Lifetimes quiz", "passScore": 0.7, "questions": [
+  {"type": "single", "prompt": "What does the annotation <code>'a</code> in <code>fn f&lt;'a&gt;(x: &amp;'a str) -&gt; &amp;'a str</code> do?", "options": ["It makes <code>x</code> live at least as long as the program", "It tells the compiler the returned reference borrows from <code>x</code>, so the result may be used only while <code>x</code>'s data is alive", "It allocates <code>x</code> on the heap", "It delays dropping <code>x</code> until the result is dropped"], "answer": 1, "explanation": "<p>A lifetime annotation states a relationship that the compiler checks. It never changes when anything is dropped.</p>"},
+  {"type": "single", "prompt": "Does this compile?", "code": "fn first(s: &str) -> &str {\n    &s[..1]\n}", "options": ["Yes: elision rule 2 links the output to the only input", "No: E0106 missing lifetime specifier", "No: E0515"], "answer": 0, "explanation": "<p>One input lifetime, so every elided output lifetime is that one. No annotation is needed.</p>"},
+  {"type": "single", "prompt": "Does this compile?", "code": "fn pick(a: &str, b: &str) -> &str {\n    a\n}", "options": ["Yes", "No: E0106, because there are two input lifetimes and no <code>self</code>", "No: E0597"], "answer": 1, "explanation": "<p>Rule 1 gives <code>a</code> and <code>b</code> separate lifetimes; rule 2 needs exactly one input and rule 3 needs <code>&amp;self</code>. The output is ambiguous, so the compiler asks you to name it, even though the body returns <code>a</code>. Signatures are checked without looking at bodies.</p>"},
+  {"type": "single", "prompt": "In <code>impl Package { fn label(&amp;self, prefix: &amp;str) -&gt; &amp;str { ... } }</code>, which input does the returned reference borrow from?", "options": ["<code>prefix</code>", "<code>self</code>", "Both", "Neither; it must be <code>'static</code>"], "answer": 1, "explanation": "<p>Elision rule 3: with several inputs, one of them <code>&amp;self</code>, elided outputs get <code>self</code>'s lifetime. Returning <code>prefix</code> from this method would not compile.</p>"},
+  {"type": "text", "prompt": "Which error code means \"returns a reference to data owned by the current function\"?", "answer": ["E0515"], "explanation": "<p>E0515: the function returns a reference into a local that is dropped when the function returns. Return the owned value instead.</p>"},
+  {"type": "single", "prompt": "Does this compile?", "code": "fn main() {\n    let r;\n    {\n        let s = String::from(\"conda\");\n        r = s.as_str();\n    }\n    println!(\"{r}\");\n}", "options": ["Yes", "No: E0597, <code>s</code> does not live long enough", "No: E0106", "No: E0373"], "answer": 1, "explanation": "<p><code>r</code> borrows from <code>s</code>, which is dropped at the end of the inner block while <code>r</code> is still used later.</p>"},
+  {"type": "output", "prompt": "What does this print?", "code": "fn longer<'a>(a: &'a str, b: &'a str) -> &'a str {\n    if a.len() >= b.len() { a } else { b }\n}\n\nfn main() {\n    let x = String::from(\"pixi\");\n    let y = String::from(\"rattler\");\n    println!(\"{}\", longer(&x, &y));\n}", "answer": "rattler", "explanation": "<p>Both strings live until the end of <code>main</code>, so the borrow is fine; the longer one, <code>rattler</code>, is returned.</p>"},
+  {"type": "multi", "prompt": "Which of these types satisfy the bound <code>T: 'static</code>?", "options": ["<code>String</code>", "<code>&amp;'static str</code>", "<code>Vec&lt;i32&gt;</code>", "<code>&amp;'a str</code> where <code>'a</code> is a local borrow", "<code>Entry&lt;'a&gt;</code> borrowing a local <code>String</code>"], "answer": [0, 1, 2], "explanation": "<p><code>T: 'static</code> means \"contains no borrows that can expire\". Every owned type qualifies, as do references that are themselves <code>'static</code>. Types that borrow from locals do not.</p>"},
+  {"type": "single", "prompt": "Why does <code>std::thread::spawn</code> require its closure to be <code>'static</code>?", "options": ["Threads run forever", "The new thread may keep running after the current function returns, so the closure must not borrow the function's locals", "To make the closure <code>Copy</code>", "Because threads cannot use the heap"], "answer": 1, "explanation": "<p>Nothing guarantees the thread finishes before the spawning function's stack frame is gone. A <code>move</code> closure that owns its data is <code>'static</code>. (M08 shows <code>std::thread::scope</code>, which lifts this restriction by guaranteeing the threads finish first.)</p>"},
+  {"type": "single", "prompt": "This fails with E0716 \"temporary value dropped while borrowed\". What is the simplest fix?", "code": "let name: &str = String::from(\"pixi\").to_uppercase().as_str();\nprintln!(\"{name}\");", "options": ["Add <code>'static</code> to the type of <code>name</code>", "Bind the <code>String</code> to a variable first, then borrow from it (or keep the <code>String</code>)", "Add <code>move</code>", "Use <code>clone()</code> on the <code>&amp;str</code>"], "answer": 1, "explanation": "<p>The temporary <code>String</code> is dropped at the end of the statement. Giving it a name makes it live until the end of the block.</p>"},
+  {"type": "single", "prompt": "Does this compile?", "code": "struct View<'a> {\n    name: &'a str,\n}\n\nfn make() -> View<'static> {\n    View { name: \"conda-forge\" }\n}", "options": ["Yes: a string literal is <code>&amp;'static str</code>", "No: E0515", "No: E0106"], "answer": 0, "explanation": "<p>Literals live for the whole program, so a <code>View&lt;'static&gt;</code> built from one can be returned from anywhere.</p>"},
+  {"type": "multi", "prompt": "You are designing a struct that Pixi stores in a long-lived cache and sends to background tasks. Which choices fit?", "options": ["Fields of type <code>String</code> and <code>PathBuf</code>", "Fields of type <code>&amp;'a str</code> borrowed from the manifest text", "No lifetime parameter on the struct", "Annotate fields with <code>&amp;'static str</code> and leak the manifest text"], "answer": [0, 2], "explanation": "<p>Stored and sent data should own its contents. Borrowed fields would tie the cache to the manifest text and fail the <code>'static</code> bound for tasks; leaking memory to fake <code>'static</code> is a last resort, not a design.</p>"},
+  {"type": "text", "prompt": "What placeholder lifetime do you write in <code>impl fmt::Display for Entry&lt;...&gt;</code> when you do not need to name it?", "answer": ["'_", "_"], "explanation": "<p>The anonymous lifetime <code>'_</code>: <code>impl fmt::Display for Entry&lt;'_&gt;</code>.</p>"}
+]}
+</script>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="recap">
+    <h2>Recap</h2>
+    <ul>
+      <li>A reference never keeps its target alive. The borrow checker proves the owner outlives every use, or
+        rejects the program (E0597).</li>
+      <li>A lifetime annotation is a relationship: the same <code>'a</code> on an input and the output means "the
+        output borrows from that input". The compiler chooses the region; you never choose a duration.</li>
+      <li>Elision: each input gets its own lifetime; with one input it flows to the output; with <code>&amp;self</code>,
+        <code>self</code>'s lifetime flows to the output. Otherwise write it out (E0106).</li>
+      <li>Only give an input a lifetime if the output can borrow from it. Precise signatures help callers.</li>
+      <li>You cannot return a reference to a local (E0515). Return the owned value.</li>
+      <li>Structs that hold references need <code>&lt;'a&gt;</code> and cannot outlive their source. Use them for
+        short-lived views; use owned fields for stored data.</li>
+      <li><code>&amp;'static T</code> is valid for the whole program; <code>T: 'static</code> means "no expiring
+        borrows", which every owned type satisfies. Threads and tasks need it; <code>move</code> provides it.</li>
+      <li>Borrow in parameters, own in fields and return values. A clone that removes a lifetime parameter is often
+        the right call.</li>
+    </ul>
+    <div class="flashcards" data-title="Lifetimes">
+      <script type="application/json">
+      [{"front": "What does <code>'a</code> describe?", "back": "A relationship between references: the region over which a borrow must be valid. It never changes when values are dropped."},
+       {"front": "Elision rule 1", "back": "Each reference parameter without a written lifetime gets its own distinct lifetime."},
+       {"front": "Elision rule 2", "back": "If there is exactly one input lifetime, it is used for all elided output lifetimes."},
+       {"front": "Elision rule 3", "back": "If one input is <code>&amp;self</code> or <code>&amp;mut self</code>, its lifetime is used for all elided outputs."},
+       {"front": "E0106", "back": "Missing lifetime specifier: the output (or a struct field) borrows, but from where is ambiguous. Name it, or return owned data."},
+       {"front": "E0597", "back": "Borrowed value does not live long enough: the owner is dropped while a borrow is still used later."},
+       {"front": "E0515", "back": "Returning a reference to data owned by the function. Return the owned value."},
+       {"front": "E0716", "back": "Temporary value dropped while borrowed. Bind the temporary with <code>let</code> first."},
+       {"front": "<code>&amp;'static str</code> vs <code>T: 'static</code>", "back": "A reference valid for the whole program, vs a type that holds no expiring borrows (every owned type)."},
+       {"front": "<code>'_</code>", "back": "The anonymous lifetime: \"a borrow is here, apply the normal rules\". Common in return types and trait impls."},
+       {"front": "Struct with <code>&lt;'a&gt;</code>", "back": "A view into borrowed data. It cannot outlive its source. Good for short-lived parsing and formatting."},
+       {"front": "When to own instead", "back": "Struct fields that are stored, computed return values, data sent to threads or tasks, errors."}]
+      </script>
+    </div>
+    <h3>Going further</h3>
+    <ul>
+      <li><a href="https://doc.rust-lang.org/book/ch10-03-lifetime-syntax.html">The Rust Book, 10.3: Validating References with Lifetimes</a></li>
+      <li><a href="https://doc.rust-lang.org/rust-by-example/scope/lifetime.html">Rust by Example: Lifetimes</a></li>
+      <li><a href="https://doc.rust-lang.org/reference/lifetime-elision.html">The Rust Reference: Lifetime elision</a></li>
+      <li><a href="https://doc.rust-lang.org/std/keyword.static.html">std docs: the <code>static</code> keyword</a> and <a href="https://doc.rust-lang.org/error_codes/E0515.html">the error index entry for E0515</a></li>
+      <li>Pixi: <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_script_shell/src/parse.rs">crates/pixi_script_shell/src/parse.rs</a>, a hand-written parser built on <code>Parser&lt;'a&gt;</code></li>
+      <li>Next: <a href="m08-smart-pointers.html">M08 Smart Pointers &amp; Shared State</a>, for the cases where neither a borrow nor a single owner fits</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

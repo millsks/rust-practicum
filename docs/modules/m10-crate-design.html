@@ -1,0 +1,1333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M10 · Visibility, Features &amp; Crate Design · Rust Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-rust.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-module="m10">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Stage 2 · Idiomatic Rust · Module 10</p>
+    <h1>Visibility, Features &amp; Crate Design</h1>
+    <p class="lede">Pixi is about sixty crates in one workspace. What each crate exposes, what it hides, and which
+      optional pieces it compiles are all decided in a few places you can learn to read in minutes: <code>pub</code>
+      modifiers, <code>pub use</code> lines in <code>lib.rs</code>, and the <code>[features]</code> and
+      <code>[workspace.dependencies]</code> tables in <code>Cargo.toml</code>. This module teaches those places, and
+      why a maintainer cares about every <code>pub</code> they add.</p>
+    <div class="lesson-meta"><span>⏱ ~1.5 hours</span><span>Prerequisites: <a href="m01-cargo-crates-modules.html">M01 Cargo, Crates &amp; Modules</a>, <a href="m06-traits-generics.html">M06 Traits &amp; Generics</a></span></div>
+    <ul class="objectives">
+      <li>Explain Rust's private-by-default rule and read <code>E0603</code>, <code>E0616</code>, and <code>E0451</code></li>
+      <li>Choose between <code>pub</code>, <code>pub(crate)</code>, <code>pub(super)</code>, and private for an item or a field</li>
+      <li>Design a crate's public surface with private modules and <code>pub use</code> re-exports, and recognize a prelude</li>
+      <li>Read and write <code>[features]</code>, optional dependencies, and <code>default-features = false</code>, and explain feature unification</li>
+      <li>Use <code>#[cfg(...)]</code>, <code>cfg!</code>, and <code>#[cfg_attr(...)]</code> for features, tests, and target platforms</li>
+      <li>Write <code>///</code> and <code>//!</code> doc comments and build them with <code>cargo doc</code></li>
+      <li>Apply semver to a crate's public API, including Cargo's rules for <code>0.x</code> versions</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="private-by-default">
+    <h2>Private by default</h2>
+    <p>In Python, privacy is a convention. A leading underscore says "please do not use this", but
+      <code>from pixi_lib._internal import helper</code> works anyway, and every attribute of every object can be read
+      and changed. Rust reverses the default: <strong>every item is private unless marked <code>pub</code></strong>,
+      and the compiler enforces it.</p>
+    <p>"Private" in Rust means <em>private to the module it is defined in, and that module's descendants</em>. A
+      function in <code>mod manifest</code> can be used anywhere inside <code>manifest</code> (and its submodules),
+      but not from a sibling or parent module:</p>
+    <div class="runnable" data-title="A private function, called from outside its module" data-compile-fail>
+<textarea>
+mod manifest {
+    fn normalize_name(name: &str) -> String {
+        name.trim().to_lowercase()
+    }
+
+    pub fn parse_name(raw: &str) -> String {
+        normalize_name(raw) // fine: same module
+    }
+}
+
+fn main() {
+    println!("{}", manifest::parse_name(" NumPy "));
+    println!("{}", manifest::normalize_name(" NumPy "));
+}
+</textarea>
+    </div>
+    <p><code>E0603</code>: "function <code>normalize_name</code> is private". The compiler points at the private
+      item's definition with a note, and the fix is a design decision: either make it visible, or (better, if
+      <code>parse_name</code> already does the job) keep it private and call the public function.</p>
+    <h3>Struct fields are private too</h3>
+    <p>Marking a struct <code>pub</code> makes the <em>type</em> nameable outside its module. Each field is still
+      private until it is also marked <code>pub</code>. This is how Rust protects an invariant: if code outside the
+      module cannot touch the fields, the only way to make a value is through a constructor you control.</p>
+    <div class="runnable" data-title="Reading a private field" data-compile-fail>
+<textarea>
+mod spec {
+    /// A version that is always at least 1.0.
+    pub struct Version {
+        major: u32,
+        minor: u32,
+    }
+
+    impl Version {
+        pub fn new(major: u32, minor: u32) -> Option<Version> {
+            (major >= 1).then_some(Version { major, minor })
+        }
+
+        pub fn major(&self) -> u32 {
+            self.major
+        }
+    }
+}
+
+fn main() {
+    let v = spec::Version::new(2, 1).unwrap();
+    println!("{}", v.major()); // fine: a public method
+    println!("{}", v.minor);   // not fine: a private field
+}
+</textarea>
+    </div>
+    <p><code>E0616</code>: "field <code>minor</code> of struct <code>Version</code> is private". Reading is blocked,
+      and so is building one by hand. Try to construct a <code>Version</code> with major 0 from outside:</p>
+    <div class="runnable" data-title="A struct literal with private fields" data-compile-fail>
+<textarea>
+mod spec {
+    pub struct Version {
+        major: u32,
+        minor: u32,
+    }
+}
+
+fn main() {
+    let _bad = spec::Version { major: 0, minor: 0 };
+}
+</textarea>
+    </div>
+    <p><code>E0451</code>: "fields <code>major</code> and <code>minor</code> of struct <code>Version</code> are
+      private". Outside the module you cannot write a <code>Version</code> literal at all, so the only way to get one is
+      <code>Version::new</code>, which refuses major 0. The invariant in the doc comment is enforced by the type system,
+      not by hoping callers read the comment. (Python's closest equivalent, a property without a setter plus a
+      validating <code>__init__</code>, can still be bypassed with <code>object.__setattr__</code>.)</p>
+    <aside class="callout note"><p>Enums work the other way: if an enum is <code>pub</code>, all its variants and their
+      fields are public. You cannot hide a variant. To hide an enum's representation, wrap it in a struct with a
+      private field.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> private means "this module and its children". A
+      <code>pub struct</code> with private fields plus a constructor is how you make invalid values
+      unrepresentable.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="restricted-visibility">
+    <h2>pub(crate), pub(super), and friends</h2>
+    <p>Between private and <code>pub</code> there are restricted levels. They matter most in a large codebase,
+      because <code>pub</code> in a library crate means "any crate that depends on me may use this, and I promise not to
+      break it".</p>
+    <table>
+      <thead><tr><th>Modifier</th><th>Visible in</th><th>Use it for</th></tr></thead>
+      <tbody>
+        <tr><td>(nothing)</td><td>this module and its descendants</td><td>the default; helpers and internal state</td></tr>
+        <tr><td><code>pub(super)</code></td><td>the parent module (and so its descendants)</td><td>a submodule's helper that only its parent uses</td></tr>
+        <tr><td><code>pub(in crate::a::b)</code></td><td>the named ancestor module</td><td>rare; precise sharing in deep trees</td></tr>
+        <tr><td><code>pub(crate)</code></td><td>the whole current crate</td><td>shared internals: used across modules but not by other crates</td></tr>
+        <tr><td><code>pub</code></td><td>everyone who can reach it</td><td>the crate's public API</td></tr>
+      </tbody>
+    </table>
+    <p>Note the phrase "who can reach it". A <code>pub fn</code> inside a private module is not reachable from
+      other crates unless something re-exports it (next section). <code>pub</code> is a permission, not a
+      publication.</p>
+    <div class="runnable" data-title="Three visibility levels in one crate" data-predict>
+<textarea>
+mod lock_file {
+    pub mod parse {
+        // Visible to `lock_file`, the parent, and nowhere else.
+        pub(super) fn split_line(line: &str) -> Option<(&str, &str)> {
+            line.split_once("==")
+        }
+    }
+
+    // Visible anywhere in this crate, but would not be part of a library's public API.
+    pub(crate) fn package_names(text: &str) -> Vec<&str> {
+        text.lines()
+            .filter_map(parse::split_line)
+            .map(|(name, _)| name)
+            .collect()
+    }
+}
+
+fn main() {
+    let lock = "numpy==2.3.1\npython==3.14.0\n# comment";
+    println!("{:?}", lock_file::package_names(lock));
+}
+</textarea>
+    </div>
+    <p>If <code>main</code> tried to call <code>lock_file::parse::split_line</code> directly, it would get
+      <code>E0603</code>: <code>pub(super)</code> stops at <code>lock_file</code>.</p>
+    <aside class="callout pixi"><p>Pixi uses <code>pub(crate)</code> about 530 times and <code>pub(super)</code> about 56
+      times at the snapshot. A typical case: the line-ending detector you met in M09 is <code>pub(crate) enum
+      LineEnding</code>
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/script/block.rs#L11-L15">pixi_manifest/src/script/block.rs</a>).
+      Several modules of <code>pixi_manifest</code> need it, but no other crate should depend on how script blocks
+      detect <code>\r\n</code>. If it were <code>pub</code>, changing it later could break crates that started using
+      it.</p></aside>
+    <aside class="callout pro"><p>A reviewer's rule of thumb: start private, widen only when the compiler asks, and
+      widen to the narrowest level that works. Making something less visible later is a breaking change for anyone
+      who used it; making it more visible never is. Clippy and rustc help: an unused private item triggers the
+      <code>dead_code</code> warning, which a <code>pub</code> item never does, so over-wide visibility also hides dead
+      code.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>pub(crate)</code> is the workhorse for internals that
+      cross modules. Plain <code>pub</code> in a library is a promise to other crates.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="re-exports">
+    <h2>Re-exports and the shape of a public API</h2>
+    <p>A crate's module tree is an implementation detail. Users should not have to know that <code>GlobHash</code>
+      lives in a file called <code>glob_hash.rs</code>. The standard Rust pattern is: declare the modules
+      <strong>private</strong>, then <strong>re-export</strong> the public types from the crate root with
+      <code>pub use</code>. Users then write <code>pixi_glob::GlobHash</code>, and the authors can move code between
+      files without breaking anyone.</p>
+    <p>Pixi's glob crate is a compact, complete example
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_glob/src/lib.rs#L1-L13">crates/pixi_glob/src/lib.rs</a>,
+      the whole file):</p>
+    <pre><code class="language-rust">#![deny(missing_docs)]
+//! A crate to deal with glob patterns in Pixi.
+//! And the caching thereof.
+
+mod glob_hash;
+mod glob_hash_cache;
+mod glob_mtime;
+mod glob_set;
+
+pub use glob_hash::{GlobHash, GlobHashError};
+pub use glob_hash_cache::{GlobHashCache, GlobHashKey};
+pub use glob_mtime::{GlobModificationTime, GlobModificationTimeError};
+pub use glob_set::{GlobSet, GlobSetError, Match};</code></pre>
+    <ul>
+      <li>Four <code>mod</code> lines without <code>pub</code>: nobody outside can write
+        <code>pixi_glob::glob_hash::...</code>.</li>
+      <li>Four <code>pub use</code> lines: the crate's entire public API is eleven names at the root, readable in
+        one screen.</li>
+      <li><code>#![deny(missing_docs)]</code> (an inner attribute, applying to the whole crate) makes every public
+        item without a doc comment a compile error. <code>//!</code> is the crate's own doc comment. Both are covered
+        below.</li>
+    </ul>
+    <div class="runnable" data-title="Private modules, public re-exports">
+<textarea>
+mod pixi_spec_like {
+    mod version {
+        #[derive(Debug)]
+        pub struct VersionSpec(pub String);
+    }
+    mod channel {
+        #[derive(Debug)]
+        pub struct Channel(pub String);
+    }
+
+    // The public surface: flat, independent of the file layout.
+    pub use channel::Channel;
+    pub use version::VersionSpec;
+
+    pub mod prelude {
+        //! `use pixi_spec_like::prelude::*;` brings in the common types at once.
+        pub use super::{Channel, VersionSpec};
+    }
+}
+
+use pixi_spec_like::prelude::*;
+
+fn main() {
+    let spec = VersionSpec(">=1.26".into());
+    let channel = Channel("conda-forge".into());
+    println!("{} from {}", spec.0, channel.0);
+}
+</textarea>
+    </div>
+    <h3>Preludes</h3>
+    <p>A <strong>prelude</strong> is a module whose only job is to be glob-imported. The standard library's prelude is
+      imported into every module automatically, which is why <code>Vec</code>, <code>Option</code>,
+      <code>String</code>, <code>Some</code>, and traits like <code>Iterator</code> and <code>Clone</code> need no
+      <code>use</code>. Some crates ship their own (<code>use rayon::prelude::*;</code>, <code>use
+      std::io::prelude::*;</code>), mostly to bring <em>traits</em> into scope, because trait methods are only
+      callable when the trait is imported (M09's <code>use itertools::Itertools;</code> is the one-trait version of
+      the same idea).</p>
+    <aside class="callout warn"><p>A <code>pub use</code> of another crate's type makes that crate part of your public
+      API. If <code>pixi_manifest</code> re-exports a <code>rattler_conda_types</code> type, a breaking upgrade of
+      rattler becomes a breaking change of <code>pixi_manifest</code>. Inside a workspace whose crates are consumed by
+      path (most of Pixi's internal crates sit at version <code>0.1.0</code> and are used only by each other) this costs
+      little, because every user is fixed in the same pull request; for a published library it is a real
+      decision.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> private <code>mod</code> + <code>pub use</code> at the
+      root = a flat API that does not leak your file layout. Read a crate's <code>lib.rs</code> first; it is the table
+      of contents.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="features">
+    <h2>Cargo features</h2>
+    <p>Python packages have <strong>extras</strong>: <code>pip install requests[socks]</code> pulls in more
+      dependencies. Cargo <strong>features</strong> are similar, with one big difference: a feature can also switch
+      <em>code</em> on and off at compile time, so a crate built without a feature contains none of that code.</p>
+    <p>Features are declared in a <code>[features]</code> table. Each feature is a name mapped to a list of things it
+      turns on: other features of this crate, optional dependencies, or features of dependencies.</p>
+    <pre data-label="Cargo.toml"><code class="language-toml">[dependencies]
+reqwest = { version = "0.13", default-features = false }
+pixi_auth = { path = "../pixi_auth", default-features = false }
+serde_json = { version = "1", optional = true }   # only compiled if something enables it
+
+[features]
+default = ["rustls"]                          # enabled unless the user opts out
+rustls = ["reqwest/rustls", "pixi_auth/rustls"]   # "dep/feature": enable a dependency's feature
+native-tls = ["reqwest/native-tls", "pixi_auth/native-tls"]
+json = ["dep:serde_json"]                     # "dep:name": enable an optional dependency</code></pre>
+    <ul>
+      <li><strong><code>default</code></strong> is the list enabled automatically. Users opt out with
+        <code>default-features = false</code> on the dependency, or <code>--no-default-features</code> on the command
+        line.</li>
+      <li><strong>Optional dependencies</strong> (<code>optional = true</code>) are not compiled unless enabled. If no
+        feature mentions <code>dep:serde_json</code>, Cargo creates an implicit feature with the dependency's own name,
+        so <code>features = ["serde_json"]</code> works. Writing <code>dep:</code> anywhere suppresses that implicit
+        feature, which keeps the feature list deliberate.</li>
+      <li><strong><code>"crate/feature"</code></strong> forwards a feature to a dependency. This is how a top-level
+        choice (say, the TLS backend) flows down through every crate that needs it.</li>
+    </ul>
+    <pre data-label="Terminal"><code class="language-bash">pixi run cargo build --features json
+pixi run cargo build --no-default-features --features native-tls
+pixi run cargo test --all-features
+pixi run cargo tree -e features -i reqwest     # who enabled which reqwest features?</code></pre>
+    <h3>Features must be additive</h3>
+    <p>Cargo builds each dependency <strong>once</strong> per build, with the <em>union</em> of the features every
+      dependent asked for. This is called <strong>feature unification</strong>. If crate A wants
+      <code>reqwest/rustls</code> and crate B wants <code>reqwest/native-tls</code>, reqwest is built with both. So a
+      feature must only <em>add</em> capability; turning on a feature must never remove an API or change behavior
+      another crate relies on. "Mutually exclusive features" fight this design, and code that supports two backends
+      (like Pixi's two TLS stacks) has to work, or at least compile, when both are on.</p>
+    <aside class="callout pixi"><p>Pixi's <code>pixi_utils</code> crate is the example above, nearly verbatim
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_utils/Cargo.toml#L61-L68">crates/pixi_utils/Cargo.toml</a>):</p>
+      <pre><code class="language-toml">[features]
+default = ["rustls"]
+native-tls = [
+  "pixi_auth/native-tls",
+  "rattler_networking/native-tls",
+  "reqwest/native-tls",
+]
+rustls = ["pixi_auth/rustls", "rattler_networking/rustls", "reqwest/rustls"]</code></pre>
+      <p>And <code>pixi_manifest</code> uses an implicit feature: <code>rattler_lock = { workspace = true, optional =
+        true }</code>
+        (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/Cargo.toml#L37-L40">Cargo.toml</a>)
+        with no <code>[features]</code> table at all. The conversions to lock-file types are behind
+        <code>#[cfg(feature = "rattler_lock")]</code>, and <code>pixi_core</code> asks for them with <code>pixi_manifest = {
+        workspace = true, features = ["rattler_lock"] }</code>.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> features are additive switches, unified across the whole
+      build. <code>default</code> is on unless opted out; <code>dep:x</code> enables an optional dependency;
+      <code>x/feat</code> forwards a feature.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="workspace-deps">
+    <h2>default-features = false and workspace dependencies</h2>
+    <p>M01 introduced <code>[workspace.dependencies]</code>: the root <code>Cargo.toml</code> names each external
+      dependency and its version once, and member crates write <code>dep = { workspace = true }</code>. A member can
+      add features on top (<code>{ workspace = true, features = ["derive"] }</code>), but it cannot remove features
+      that the workspace entry enables. That is why the workspace entry is the right place to say
+      <code>default-features = false</code>: it starts every member from the minimum, and each member adds only what
+      it needs.</p>
+    <p>Why would Pixi turn off a dependency's defaults? Three reasons, all visible in its manifest:</p>
+    <ul>
+      <li><strong>Choosing one backend.</strong> HTTP and networking crates often pick a TLS implementation in their
+        default features. With defaults left on, unification could compile both TLS stacks, bloating the binary and
+        the build. Pixi turns the
+        defaults off everywhere, then picks <code>rustls</code> or <code>native-tls</code> once, at the top.</li>
+      <li><strong>Build time.</strong> Every enabled feature is code to compile. In a 60-crate workspace that is
+        rebuilt constantly by contributors and CI, unused features are minutes.</li>
+      <li><strong>Control.</strong> When an upstream crate adds a new default feature, it does not silently appear
+        in Pixi's build.</li>
+    </ul>
+    <pre data-label="Cargo.toml (workspace root, excerpt)"><code class="language-toml"># Rattler crates
+rattler = { version = "0.48", default-features = false }
+rattler_conda_types = { version = "0.52", default-features = false, features = [
+  "rayon",
+] }
+rattler_networking = { version = "0.30", default-features = false, features = [
+  "dirs",
+  "google-cloud-auth",
+] }
+rattler_solve = { version = "9.0", default-features = false }</code></pre>
+    <p>A member then adds what it needs. <code>pixi_utils</code> asks for more networking features than the workspace
+      entry gives
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_utils/Cargo.toml#L26-L31">crates/pixi_utils/Cargo.toml</a>):</p>
+    <pre><code class="language-toml">rattler_networking = { workspace = true, features = [
+  "gcs",
+  "netrc-rs",
+  "s3",
+  "system-integration",
+] }</code></pre>
+    <aside class="callout think"><p><code>pixi_cli</code> depends on <code>pixi_utils = { workspace = true,
+      default-features = false }</code>. If it did not say <code>default-features = false</code>, which TLS backend
+      would <code>pixi_utils</code> always get, and why would that make a <code>--no-default-features --features
+      native-tls</code> build of Pixi pull in both?</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> set <code>default-features = false</code> in
+      <code>[workspace.dependencies]</code>, add features per member, and make the final feature choices in the
+      binary crate.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="cfg">
+    <h2>Conditional compilation with cfg</h2>
+    <p>Python decides at run time: <code>if sys.platform == "win32":</code>. Rust can decide at <em>compile</em>
+      time, so code for the wrong platform or a disabled feature is not just skipped, it is not compiled at all (and
+      does not even need to type-check against dependencies that are missing). The tool is the <code>cfg</code>
+      attribute, which takes a <strong>configuration predicate</strong>:</p>
+    <table>
+      <thead><tr><th>Predicate</th><th>True when</th></tr></thead>
+      <tbody>
+        <tr><td><code>feature = "rustls"</code></td><td>that Cargo feature of <em>this</em> crate is on</td></tr>
+        <tr><td><code>test</code></td><td>compiling the crate's test harness (<code>cargo test</code>)</td></tr>
+        <tr><td><code>target_os = "windows"</code>, <code>"macos"</code>, <code>"linux"</code></td><td>compiling for that OS</td></tr>
+        <tr><td><code>unix</code>, <code>windows</code></td><td>shorthands for families of targets</td></tr>
+        <tr><td><code>debug_assertions</code></td><td>debug builds (the default profile)</td></tr>
+        <tr><td><code>all(..)</code>, <code>any(..)</code>, <code>not(..)</code></td><td>combinations</td></tr>
+      </tbody>
+    </table>
+    <p>There are three forms:</p>
+    <ul>
+      <li><code>#[cfg(pred)]</code> on an item (function, <code>impl</code>, <code>mod</code>, <code>use</code>, block):
+        the item exists only when true.</li>
+      <li><code>cfg!(pred)</code>: a macro that evaluates to <code>true</code> or <code>false</code>. Both branches of
+        an <code>if cfg!(..)</code> are still compiled, so both must type-check.</li>
+      <li><code>#[cfg_attr(pred, attr)]</code>: apply <code>attr</code> only when the predicate is true.</li>
+    </ul>
+    <div class="runnable" data-title="Compile-time choices">
+<textarea>
+#[cfg(feature = "native-tls")]
+fn tls_backend() -> &'static str {
+    "native-tls"
+}
+
+#[cfg(not(feature = "native-tls"))]
+fn tls_backend() -> &'static str {
+    "rustls"
+}
+
+fn main() {
+    // No feature is set in a single-file build, so the second definition is the one that exists.
+    println!("TLS backend: {}", tls_backend());
+    let family = if cfg!(windows) { "windows" } else if cfg!(unix) { "unix" } else { "other" };
+    println!("target family: {family}, debug build: {}", cfg!(debug_assertions));
+}
+</textarea>
+    </div>
+    <p>Code under a false <code>cfg</code> is removed before name resolution, so calling it is an "it does not exist"
+      error, not a visibility error. A helper marked <code>#[cfg(test)]</code> cannot be used by normal code:</p>
+    <div class="runnable" data-title="cfg(test) code does not exist in a normal build" data-compile-fail>
+<textarea>
+#[cfg(test)]
+fn sample_manifest() -> &'static str {
+    "[workspace]\nname = \"demo\""
+}
+
+fn main() {
+    println!("{}", sample_manifest());
+}
+</textarea>
+    </div>
+    <p><code>E0425</code>: "cannot find function <code>sample_manifest</code> in this scope", with a note that an item
+      by that name exists but is gated behind <code>#[cfg(test)]</code>. This is exactly the guarantee you want: test
+      fixtures and test-only dependencies (<code>[dev-dependencies]</code>) can never leak into the shipped
+      binary.</p>
+    <aside class="callout pixi"><p>All three forms appear in Pixi. Per-platform definitions of one function
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_utils/src/rlimit.rs#L1-L46">pixi_utils/src/rlimit.rs</a>):</p>
+      <pre><code class="language-rust">#[cfg(not(target_os = "windows"))]
+pub fn try_increase_rlimit_to_sensible() {
+    // ... raise the open-file limit with the `rlimit` crate ...
+}
+
+#[cfg(target_os = "windows")]
+pub fn try_increase_rlimit_to_sensible() {
+    // On Windows, there is no need to increase the RLIMIT_NOFILE resource
+    // limit.
+}</code></pre>
+      <p>Feature-gated blocks inside one function choose the TLS stack
+        (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_utils/src/reqwest.rs#L148-L157">pixi_utils/src/reqwest.rs</a>):</p>
+      <pre><code class="language-rust">#[cfg(feature = "native-tls")]
+{
+    builder = builder.use_native_tls();
+    builder = apply_native_tls_roots(builder, tls_root_certs);
+}
+#[cfg(feature = "rustls")]
+{
+    builder = builder.use_rustls_tls();
+    // ...
+}</code></pre>
+      <p>Because features are additive, both blocks may be compiled at once; then the later one wins at run time.
+        And <code>cfg_attr</code> marks slow tests ignored unless a feature is on, which you will meet in
+        <a href="m11-testing.html">M11</a>: <code>#[cfg_attr(not(feature = "slow_integration_tests"),
+        ignore)]</code>.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>#[cfg]</code> removes code; <code>cfg!</code> keeps both
+      branches and picks one; <code>#[cfg_attr]</code> adds an attribute conditionally. <code>#[cfg(test)] mod tests</code>
+      is the most common <code>cfg</code> of all.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="doc-comments">
+    <h2>Doc comments and cargo doc</h2>
+    <p>Python has docstrings; Rust has <strong>doc comments</strong>, written in Markdown:</p>
+    <ul>
+      <li><code>///</code> documents the item that follows (a function, struct, field, variant, module).</li>
+      <li><code>//!</code> documents the item it is <em>inside</em>: at the top of <code>lib.rs</code> it documents the
+        whole crate; at the top of a module file, that module.</li>
+    </ul>
+    <pre><code class="language-rust">//! Parsing and validation of package names.
+
+/// A normalized conda package name: lowercase, non-empty.
+///
+/// Build one with [`PackageName::new`]; the field is private so every value is valid.
+///
+/// # Errors
+///
+/// [`PackageName::new`] returns an error for empty input or characters outside `[a-z0-9-_.]`.
+///
+/// # Examples
+///
+/// ```
+/// use names::PackageName;
+/// let name = PackageName::new("NumPy").unwrap();
+/// assert_eq!(name.as_str(), "numpy");
+/// ```
+pub struct PackageName(String);</code></pre>
+    <ul>
+      <li>The first paragraph is the summary shown in lists and search results; keep it to one sentence.</li>
+      <li><code>[`PackageName::new`]</code> is an <strong>intra-doc link</strong>: rustdoc resolves the path like a
+        <code>use</code> and links to it, and warns if the target does not exist, so links cannot silently rot.</li>
+      <li>The conventional headings are <code># Errors</code>, <code># Panics</code>, <code># Safety</code> (for
+        <code>unsafe fn</code>), and <code># Examples</code>. Clippy's <code>missing_errors_doc</code> and
+        <code>missing_panics_doc</code> lints check the first two.</li>
+      <li>Code blocks in doc comments are <strong>doc tests</strong>: <code>cargo test</code> compiles and runs them,
+        so examples cannot drift out of date. <a href="m11-testing.html">M11</a> covers them.</li>
+    </ul>
+    <pre data-label="Terminal"><code class="language-bash">pixi run cargo doc --open                # your crate and all dependencies, in the browser
+pixi run cargo doc --no-deps -p pixi_glob # one workspace crate only
+pixi run cargo doc --document-private-items   # include private items (great for learning a codebase)</code></pre>
+    <aside class="callout pro"><p>When you start on an unfamiliar Pixi crate, run <code>cargo doc --no-deps
+      --document-private-items -p &lt;crate&gt; --open</code> in Pixi's checkout. You get a browsable map of every module,
+      type, and trait implementation, with "source" links, which is often faster than reading files in order.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>///</code> for the next item, <code>//!</code> for the
+      enclosing one. First line is the summary; use intra-doc links and <code># Errors</code>/<code># Panics</code>
+      sections.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="semver">
+    <h2>Semver for crates</h2>
+    <p>Cargo assumes every crate follows <strong>semantic versioning</strong> (semver): <code>MAJOR.MINOR.PATCH</code>,
+      where a breaking change bumps MAJOR. A plain version in <code>Cargo.toml</code> is a <strong>caret
+      requirement</strong>: <code>rattler = "0.48"</code> means <code>^0.48</code>, "any version compatible with 0.48".
+      The twist is how Cargo treats <code>0.x</code> versions: the <em>leftmost non-zero</em> component is treated as
+      the major version.</p>
+    <table>
+      <thead><tr><th>Requirement</th><th>Allows</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td><code>"1.3"</code></td><td><code>&gt;=1.3.0, &lt;2.0.0</code></td><td>1 is the major</td></tr>
+        <tr><td><code>"9.0"</code> (rattler_solve)</td><td><code>&gt;=9.0.0, &lt;10.0.0</code></td><td>9 is the major</td></tr>
+        <tr><td><code>"0.48"</code> (rattler)</td><td><code>&gt;=0.48.0, &lt;0.49.0</code></td><td>for 0.x, the minor acts as the major</td></tr>
+        <tr><td><code>"0.2.2"</code></td><td><code>&gt;=0.2.2, &lt;0.3.0</code></td><td>same rule; the patch is a lower bound</td></tr>
+        <tr><td><code>"0.0.3"</code></td><td>exactly <code>0.0.3</code></td><td>0.0.x: every release may break</td></tr>
+      </tbody>
+    </table>
+    <p>So when rattler releases 0.49, Pixi does not get it automatically: someone edits the workspace entry, fixes
+      what broke, and opens a PR. That is a large share of real maintenance work in Pixi. <code>cargo update</code>
+      only moves within the allowed ranges and rewrites <code>Cargo.lock</code>.</p>
+    <h3>What counts as breaking</h3>
+    <p>For a library's public API, these require a major bump (or a minor bump in <code>0.x</code>):</p>
+    <ul>
+      <li>removing or renaming a <code>pub</code> item, or making it less visible;</li>
+      <li>changing a public function's signature (a new parameter, a different type, a tighter trait bound);</li>
+      <li>adding a public field to a struct whose fields are all public (struct literals elsewhere stop compiling);</li>
+      <li>adding a variant to a public enum (other crates' exhaustive <code>match</code>es stop compiling);</li>
+      <li>removing a trait implementation, or removing a Cargo feature.</li>
+    </ul>
+    <p>The escape hatch for the last two kinds of growth is <code>#[non_exhaustive]</code>. On an enum it forces other
+      crates to include a wildcard arm (<code>_ =&gt; ...</code>) in their <code>match</code>; on a struct it forbids
+      struct literals outside the defining crate. You can then add variants or fields in a minor release. It has no
+      effect inside the defining crate, so you cannot see it fail in a single-file example.</p>
+    <pre><code class="language-rust">#[non_exhaustive]
+pub enum ChannelPriority {
+    Strict,
+    Disabled,
+}
+// In another crate:
+match priority {
+    ChannelPriority::Strict =&gt; ..,
+    ChannelPriority::Disabled =&gt; ..,
+    _ =&gt; ..,   // required: future versions may add variants
+}</code></pre>
+    <aside class="callout think"><p>Is adding a new <code>pub fn</code> to a crate breaking? Usually not. Is adding a new
+      method to a public <em>trait</em> breaking? It depends: with a default implementation, existing impls keep
+      compiling; without one, every implementor breaks. Tools like <code>cargo-semver-checks</code> automate these
+      questions for published crates.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> a caret requirement allows changes that keep the leftmost
+      non-zero component. <code>"0.48"</code> stops before 0.49. Removing, narrowing, or exhaustively extending public
+      API is breaking.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="crate-split">
+    <h2>How Pixi splits responsibilities across crates</h2>
+    <p>Why split a program into dozens of crates instead of dozens of modules? A crate is the unit of compilation,
+      of visibility, and of dependencies, and each of those gives a benefit:</p>
+    <ul>
+      <li><strong>Build times.</strong> Cargo compiles crates in parallel and only recompiles crates whose inputs
+        changed. Editing <code>pixi_manifest</code> does not rebuild <code>pixi_glob</code>.</li>
+      <li><strong>Enforced boundaries.</strong> <code>pub(crate)</code> is a hard wall. A lower crate cannot call
+        into a higher one at all (crate dependencies may not form cycles), so the layering is checked by the
+        compiler, not by convention.</li>
+      <li><strong>Lean dependencies.</strong> The manifest parser has no reason to depend on the solver or the HTTP
+        stack, and as a separate crate it cannot accidentally start to.</li>
+      <li><strong>Reuse.</strong> Build backends (<code>pixi_build_*</code>) and tools like <code>pixi_docs</code>
+        reuse the lower crates without pulling in the CLI.</li>
+    </ul>
+    <pre class="mermaid">flowchart TD
+  pixi["pixi (bin: main.rs only)"] --> cli["pixi_cli (argument parsing, commands)"]
+  cli --> core["pixi_core (workspace, lock file, environments)"]
+  cli --> manifest
+  core --> manifest["pixi_manifest (pixi.toml and pyproject.toml model)"]
+  core --> utils["pixi_utils (HTTP client, misc)"]
+  core --> config["pixi_config"]
+  manifest --> spec["pixi_spec, pixi_toml, pixi_consts"]
+  manifest --> rattler["rattler_conda_types (external)"]
+  utils --> config</pre>
+    <p>A simplified view of the dependency edges in each crate's <code>Cargo.toml</code>. At the top,
+      <code>crates/pixi</code> is almost nothing: its <code>main.rs</code> sets up a thread with a large stack and a
+      Tokio runtime, then calls into <code>pixi_cli</code>. Its <code>Cargo.toml</code> is where the final feature
+      decisions live (<code>default = ["rustls"]</code>), which is why the workspace's <code>default-members</code> is
+      <code>crates/pixi</code>. Lower crates are libraries with <code>lib.rs</code> files full of <code>pub use</code>
+      lines.</p>
+    <aside class="callout pixi"><p>The <a href="../reference/pixi-codebase-map.html">Pixi codebase map</a> lists every
+      crate with a one-line purpose. When a change touches a type, check its crate's <code>lib.rs</code> to see
+      whether the type is re-exported; if it is, other crates may depend on it, and a change ripples outward.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> crates buy parallel builds, compiler-enforced layering,
+      and lean dependencies. In Pixi, the binary crate is thin, choices about features live at the top, and libraries
+      expose curated re-exports.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="pixi-reading">
+    <h2>Reading Pixi</h2>
+    <h3>Excerpt 1: the workspace root and the binary's features</h3>
+    <p>From the root manifest
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/Cargo.toml#L1-L29">Cargo.toml, lines 1-29</a>,
+      trimmed, and <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/Cargo.toml#L236-L265">lines 236-265</a>):</p>
+    <pre><code class="language-toml">[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = [
+  # Only pulled in when enabling certain features. We do not want to include
+  # these crates when running workspace wide commands.
+  "crates/pixi_allocator",
+  # ...
+]
+default-members = ["crates/pixi"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.90"
+license = "BSD-3-Clause"
+# ...
+
+[workspace.dependencies]
+# ...
+# Rattler crates
+rattler = { version = "0.48", default-features = false }
+rattler_cache = { version = "0.10", default-features = false }
+rattler_lock = { version = "0.32", default-features = false }
+rattler_shell = { version = "0.27", default-features = false }
+rattler_solve = { version = "9.0", default-features = false }
+# ...</code></pre>
+    <p>And the binary crate's features
+      (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi/Cargo.toml#L78-L90">crates/pixi/Cargo.toml, lines 78-90</a>):</p>
+    <pre><code class="language-toml">[features]
+default = ["rustls"]
+native-tls = ["pixi_cli/native-tls"]
+# run tests connecting to remote Internet services
+online_tests = ["pixi_cli/online_tests"]
+rustls = ["pixi_cli/rustls"]
+self_update = ["pixi_cli/self_update"]
+slow_integration_tests = ["pixi_cli/slow_integration_tests"]
+tokio-console = ["pixi_cli/tokio-console", "tokio/tracing"]
+
+# This feature enables performance optimizations but at the cost of increased
+# compile times. By default, it is only used when building the release binary.
+performance = ["pixi_allocator"]</code></pre>
+    <ul>
+      <li><code>members = ["crates/*"]</code> makes every directory under <code>crates/</code> a member, except those in
+        <code>exclude</code>. <code>default-members</code> is what plain <code>cargo build</code> builds at the root:
+        only the <code>pixi</code> binary (use <code>--workspace</code> for everything, as Pixi's <code>build-debug</code>
+        task does).</li>
+      <li><code>[workspace.package]</code> lets members write <code>edition.workspace = true</code>, so one line sets the
+        edition and minimum Rust version for all of them.</li>
+      <li>Every rattler crate in that block says <code>default-features = false</code>; members add features as
+        needed.</li>
+      <li>Each binary feature only forwards to <code>pixi_cli</code>, which forwards further down
+        (<code>pixi_cli</code>'s <code>rustls</code> enables <code>pixi_utils/rustls</code>, <code>rattler/rustls</code>,
+        and more). <code>online_tests</code> and <code>slow_integration_tests</code> carry no code dependencies at all
+        in <code>pixi_cli</code> (<code>online_tests = []</code>): they exist only to be checked by <code>cfg</code> in
+        tests.</li>
+      <li><code>performance = ["pixi_allocator"]</code> enables an optional dependency through its implicit feature,
+        and <code>crates/pixi/src/main.rs</code> starts with <code>#[cfg(feature = "pixi_allocator")] extern crate
+        pixi_allocator;</code>, a <code>cfg</code> on that implicit feature.</li>
+    </ul>
+    <h3>Excerpt 2: a large crate's front door</h3>
+    <p>The first lines of
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/lib.rs#L1-L46">crates/pixi_manifest/src/lib.rs, lines 1-46</a> (trimmed):</p>
+    <pre><code class="language-rust">mod activation;
+mod build_system;
+pub(crate) mod channel;
+mod dependencies;
+mod discovery;
+// ...
+pub mod platform;
+// ...
+pub mod pypi;
+pub mod pyproject;
+// ...
+pub mod task;
+pub mod toml;
+pub mod utils;
+mod warning;
+mod workspace;
+pub use activation::Activation;
+pub use build_system::BuildBackend;
+pub use build_system::PackageBuild;
+pub use channel::PrioritizedChannel;
+pub use dependencies::{CondaConstraints, CondaDependencies, PyPiDependencies};
+pub use discovery::{
+    DiscoveryStart, ExplicitManifestError, InvalidRequiresPixiError, LoadManifestsError, Manifests,
+    PixiVersionMismatchError, WorkspaceDiscoverer, WorkspaceDiscoveryError,
+};
+pub use environment::{Environment, EnvironmentName, NewEnvironment};
+pub use error::{DependencyError, GenericError, TomlError};
+pub use feature::{Feature, FeatureName};</code></pre>
+    <ul>
+      <li>Most modules are private; a few (<code>platform</code>, <code>pypi</code>, <code>task</code>,
+        <code>toml</code>, ...) are <code>pub mod</code>, so callers can reach their contents by path
+        (<code>pixi_manifest::task::...</code>) as well as through re-exports.</li>
+      <li><code>pub(crate) mod channel;</code> exposes the module to the rest of the crate only, yet line 35
+        re-exports one type from it, <code>PrioritizedChannel</code>. A re-export can make an item public even when the
+        module path to it is not.</li>
+      <li><code>pub use discovery::{...}</code> lifts eight names, including error types, to the root. Error types
+        are part of the API: callers match on them.</li>
+    </ul>
+    <details class="reveal"><summary>Question 1: a contributor adds <code>pub fn helper()</code> inside <code>mod warning</code> (a private module). Can <code>pixi_core</code> call it?</summary>
+      <p>No. <code>pub</code> grants permission, but <code>pixi_core</code> cannot reach the item: <code>warning</code> is
+        private to <code>pixi_manifest</code> and nothing re-exports <code>helper</code>. The contributor should make it
+        <code>pub(crate)</code> (which says what they mean) or add a deliberate <code>pub use</code> in
+        <code>lib.rs</code> if it really belongs to the API.</p></details>
+    <details class="reveal"><summary>Question 2: why is <code>default-features = false</code> on the workspace entry for <code>rattler</code>, rather than in each member?</summary>
+      <p>Members can add features to a workspace dependency but cannot subtract any the workspace entry enables. If
+        the root left defaults on, every member would get rattler's default TLS backend, and Pixi could never build a
+        binary with only <code>native-tls</code>. Turning defaults off at the root gives every member the minimum and
+        leaves the choice to the <code>rustls</code>/<code>native-tls</code> features at the top.</p></details>
+    <details class="reveal"><summary>Question 3: what does <code>cargo build --features slow_integration_tests</code> change in the shipped <code>pixi</code> binary?</summary>
+      <p>Nothing: the feature enables no dependencies and gates only test code (through
+        <code>#[cfg_attr(not(feature = "slow_integration_tests"), ignore)]</code> on tests). It changes which tests
+        <code>cargo test</code> runs instead of skipping. Pixi's <code>test-slow</code> task passes
+        <code>--features slow_integration_tests,online_tests</code>.</p></details>
+  </section>
+
+  <section class="lesson-section" id="practice">
+    <h2>Practice</h2>
+    <p>The checker appends its tests in a sibling module of your code (<code>mod pp_checks</code> at the crate root),
+      so for the tests, "outside the module" means outside any <code>mod</code> you write.</p>
+
+    <div class="exercise" data-id="m10-e1" data-title="Open exactly what the API needs">
+      <div class="exercise-prompt">
+        <p>The <code>manifest</code> module below is entirely private, so the tests cannot use it: they fail to compile
+          with <code>E0603</code> and <code>E0624</code> (private method). Add visibility modifiers so the tests compile
+          and pass. Make <code>Manifest</code>, <code>new</code>, <code>add_channel</code>, <code>name</code>, and
+          <code>channels</code> visible to the crate, and leave <code>normalize</code> and the fields private. Do not
+          change any function bodies.</p>
+      </div>
+<textarea class="starter">
+mod manifest {
+    struct Manifest {
+        name: String,
+        channels: Vec<String>,
+    }
+
+    fn normalize(channel: &str) -> String {
+        channel.trim().trim_end_matches('/').to_lowercase()
+    }
+
+    impl Manifest {
+        fn new(name: &str) -> Self {
+            Manifest { name: name.to_string(), channels: Vec::new() }
+        }
+
+        fn add_channel(&mut self, channel: &str) {
+            let channel = normalize(channel);
+            if !self.channels.contains(&channel) {
+                self.channels.push(channel);
+            }
+        }
+
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn channels(&self) -> &[String] {
+            &self.channels
+        }
+    }
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn builds_through_the_api() {
+    let mut m = manifest::Manifest::new("demo");
+    m.add_channel("Conda-Forge/");
+    m.add_channel("conda-forge");
+    assert_eq!(m.name(), "demo", "name() returns the workspace name");
+    assert_eq!(m.channels(), ["conda-forge".to_string()], "channels are normalized and deduplicated");
+}
+
+#[test]
+fn keeps_order() {
+    let mut m = manifest::Manifest::new("demo");
+    m.add_channel("bioconda");
+    m.add_channel("conda-forge");
+    assert_eq!(m.channels().len(), 2, "two different channels are kept");
+    assert_eq!(m.channels()[0], "bioconda", "channels keep insertion order");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>The tests live outside <code>mod manifest</code> but in the same
+        crate, so <code>pub(crate)</code> is the narrowest level that works for the struct and each method that
+        the tests call. A method's visibility is separate from its type's.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">mod manifest {
+    pub(crate) struct Manifest {
+        name: String,
+        channels: Vec&lt;String&gt;,
+    }
+
+    fn normalize(channel: &amp;str) -&gt; String {
+        channel.trim().trim_end_matches('/').to_lowercase()
+    }
+
+    impl Manifest {
+        pub(crate) fn new(name: &amp;str) -&gt; Self {
+            Manifest { name: name.to_string(), channels: Vec::new() }
+        }
+
+        pub(crate) fn add_channel(&amp;mut self, channel: &amp;str) {
+            let channel = normalize(channel);
+            if !self.channels.contains(&amp;channel) {
+                self.channels.push(channel);
+            }
+        }
+
+        pub(crate) fn name(&amp;self) -&gt; &amp;str {
+            &amp;self.name
+        }
+
+        pub(crate) fn channels(&amp;self) -&gt; &amp;[String] {
+            &amp;self.channels
+        }
+    }
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m10-e2" data-title="Re-exports and a prelude">
+      <div class="exercise-prompt">
+        <p>The types live deep in <code>model::spec</code> and <code>model::channel</code>, and both modules are
+          private. Without moving any code, add re-exports so that (1) <code>Spec</code> and <code>Channel</code> can be
+          named directly at the crate root, and (2) a public <code>prelude</code> module at the root exports both, so
+          <code>use crate::prelude::*;</code> works. Also implement <code>Spec::parse</code>, which splits
+          <code>"numpy &gt;=1.26"</code> at the first space into name and constraint (constraint <code>"*"</code> when
+          there is none). Until you add the re-exports, the tests fail to compile with <code>E0432</code> ("unresolved
+          import <code>crate::prelude</code>") and "cannot find" errors: those are your to-do list.</p>
+      </div>
+<textarea class="starter">
+mod model {
+    mod spec {
+        #[derive(Debug, PartialEq)]
+        pub struct Spec {
+            pub name: String,
+            pub constraint: String,
+        }
+
+        impl Spec {
+            pub fn parse(text: &str) -> Spec {
+                todo!()
+            }
+        }
+    }
+
+    mod channel {
+        #[derive(Debug, PartialEq)]
+        pub struct Channel(pub String);
+    }
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn spec_at_root() {
+    let s = Spec::parse("numpy >=1.26");
+    assert_eq!(s.name, "numpy", "the name is before the first space");
+    assert_eq!(s.constraint, ">=1.26", "the constraint is after the first space");
+}
+
+#[test]
+fn spec_without_constraint() {
+    let s = Spec::parse("python");
+    assert_eq!(s, Spec { name: "python".into(), constraint: "*".into() }, "no constraint means *");
+}
+
+#[test]
+fn prelude_exports_both() {
+    use crate::prelude::*;
+    let c = Channel("conda-forge".into());
+    let s = Spec::parse("pip");
+    assert_eq!(c.0, "conda-forge", "Channel should be available from the prelude");
+    assert_eq!(s.name, "pip", "Spec should be available from the prelude");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Inside <code>mod model</code>, re-export the items from its private
+        children: <code>pub use spec::Spec;</code> and <code>pub use channel::Channel;</code>. At the root,
+        <code>pub use model::{Channel, Spec};</code>. Then <code>pub mod prelude { pub use crate::{Channel, Spec}; }</code>.
+        For parsing, <code>text.split_once(' ')</code> returns <code>Option&lt;(&amp;str, &amp;str)&gt;</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">mod model {
+    mod spec {
+        #[derive(Debug, PartialEq)]
+        pub struct Spec {
+            pub name: String,
+            pub constraint: String,
+        }
+
+        impl Spec {
+            pub fn parse(text: &amp;str) -&gt; Spec {
+                match text.trim().split_once(' ') {
+                    Some((name, constraint)) =&gt; Spec {
+                        name: name.to_string(),
+                        constraint: constraint.trim().to_string(),
+                    },
+                    None =&gt; Spec { name: text.trim().to_string(), constraint: "*".to_string() },
+                }
+            }
+        }
+    }
+
+    mod channel {
+        #[derive(Debug, PartialEq)]
+        pub struct Channel(pub String);
+    }
+
+    pub use channel::Channel;
+    pub use spec::Spec;
+}
+
+pub use model::{Channel, Spec};
+
+pub mod prelude {
+    pub use crate::{Channel, Spec};
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m10-e3" data-title="An invariant behind a private field">
+      <div class="exercise-prompt">
+        <p>Implement <code>PackageName</code> in <code>mod names</code>. Its single field is private, so the only way to
+          get one is <code>PackageName::new</code>, which trims and lowercases the input and returns
+          <code>Err(String)</code> when the result is empty or contains any character other than ASCII letters, digits,
+          <code>-</code>, <code>_</code>, or <code>.</code>. Provide <code>as_str</code>, and implement
+          <code>std::fmt::Display</code> so names print as themselves. Write a <code>///</code> doc comment on the type
+          and on <code>new</code> (not graded, but practice the habit).</p>
+      </div>
+<textarea class="starter">
+mod names {
+    use std::fmt;
+
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct PackageName(String);
+
+    impl PackageName {
+        pub fn new(raw: &str) -> Result<PackageName, String> {
+            todo!()
+        }
+
+        pub fn as_str(&self) -> &str {
+            todo!()
+        }
+    }
+
+    impl fmt::Display for PackageName {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            todo!()
+        }
+    }
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+use names::PackageName;
+
+#[test]
+fn normalizes() {
+    let n = PackageName::new("  NumPy ").expect("valid name");
+    assert_eq!(n.as_str(), "numpy", "names are trimmed and lowercased");
+    assert_eq!(n.to_string(), "numpy", "Display prints the normalized name");
+}
+
+#[test]
+fn allows_punctuation() {
+    assert!(PackageName::new("ruamel.yaml").is_ok(), "dots are allowed");
+    assert!(PackageName::new("scikit-learn").is_ok(), "dashes are allowed");
+    assert!(PackageName::new("typing_extensions").is_ok(), "underscores are allowed");
+}
+
+#[test]
+fn rejects_bad_input() {
+    assert!(PackageName::new("   ").is_err(), "an empty name is an error");
+    assert!(PackageName::new("numpy>=1").is_err(), "'>' and '=' are not allowed");
+    assert!(PackageName::new("my package").is_err(), "inner spaces are not allowed");
+}
+
+#[test]
+fn sorts_like_strings() {
+    let mut v = vec![PackageName::new("zlib").unwrap(), PackageName::new("bzip2").unwrap()];
+    v.sort();
+    assert_eq!(v[0].as_str(), "bzip2", "derived Ord sorts by the inner string");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>let name = raw.trim().to_lowercase();</code>, then check
+        <code>name.is_empty()</code> and <code>name.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))</code>.
+        <code>Display</code> is <code>f.write_str(&amp;self.0)</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">mod names {
+    use std::fmt;
+
+    /// A normalized conda package name: trimmed, lowercase, `[a-z0-9-_.]` only.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct PackageName(String);
+
+    impl PackageName {
+        /// Normalizes and validates `raw`.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if the name is empty or contains other characters.
+        pub fn new(raw: &amp;str) -&gt; Result&lt;PackageName, String&gt; {
+            let name = raw.trim().to_lowercase();
+            if name.is_empty() {
+                return Err("package name is empty".to_string());
+            }
+            if !name.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) {
+                return Err(format!("invalid character in package name '{name}'"));
+            }
+            Ok(PackageName(name))
+        }
+
+        pub fn as_str(&amp;self) -&gt; &amp;str {
+            &amp;self.0
+        }
+    }
+
+    impl fmt::Display for PackageName {
+        fn fmt(&amp;self, f: &amp;mut fmt::Formatter&lt;'_&gt;) -&gt; fmt::Result {
+            f.write_str(&amp;self.0)
+        }
+    }
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m10-e4" data-title="Resolve Cargo features">
+      <div class="exercise-prompt">
+        <p>Model what Cargo does with a <code>[features]</code> table. <code>resolve_features(table, requested,
+          default_features)</code> returns the set of everything enabled:</p>
+        <ul>
+          <li>Start from the <code>requested</code> features, plus <code>"default"</code> if <code>default_features</code>
+            is true and the table has a <code>default</code> entry.</li>
+          <li>Each enabled feature name is in the result, and so is everything it lists. An entry containing
+            <code>/</code> (<code>"reqwest/rustls"</code>) or starting with <code>dep:</code> is added as-is. Any other
+            entry is a feature of this crate and is expanded recursively.</li>
+          <li>A requested or listed feature name not in the table is an error:
+            <code>Err(format!("unknown feature `{name}`"))</code>.</li>
+          <li>Features may refer to each other in cycles; do not loop forever.</li>
+        </ul>
+      </div>
+<textarea class="starter">
+use std::collections::{BTreeMap, BTreeSet};
+
+fn resolve_features(
+    table: &BTreeMap<&str, Vec<&str>>,
+    requested: &[&str],
+    default_features: bool,
+) -> Result<BTreeSet<String>, String> {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+fn pixi_utils_like() -> BTreeMap<&'static str, Vec<&'static str>> {
+    let mut t = BTreeMap::new();
+    t.insert("default", vec!["rustls"]);
+    t.insert("rustls", vec!["pixi_auth/rustls", "reqwest/rustls"]);
+    t.insert("native-tls", vec!["pixi_auth/native-tls", "reqwest/native-tls"]);
+    t.insert("json", vec!["dep:serde_json"]);
+    t.insert("full", vec!["json", "rustls"]);
+    t
+}
+
+fn set(items: &[&str]) -> BTreeSet<String> {
+    items.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn defaults_expand() {
+    let got = resolve_features(&pixi_utils_like(), &[], true).unwrap();
+    assert_eq!(got, set(&["default", "rustls", "pixi_auth/rustls", "reqwest/rustls"]), "default enables rustls and its forwards");
+}
+
+#[test]
+fn no_default_features() {
+    let got = resolve_features(&pixi_utils_like(), &["native-tls"], false).unwrap();
+    assert_eq!(got, set(&["native-tls", "pixi_auth/native-tls", "reqwest/native-tls"]), "only native-tls when defaults are off");
+}
+
+#[test]
+fn nested_and_dep() {
+    let got = resolve_features(&pixi_utils_like(), &["full"], false).unwrap();
+    assert_eq!(got, set(&["full", "json", "dep:serde_json", "rustls", "pixi_auth/rustls", "reqwest/rustls"]), "features expand recursively");
+}
+
+#[test]
+fn unknown_feature() {
+    assert_eq!(resolve_features(&pixi_utils_like(), &["gpu"], true), Err("unknown feature `gpu`".to_string()), "unknown requested feature");
+    let mut t = BTreeMap::new();
+    t.insert("a", vec!["missing"]);
+    assert_eq!(resolve_features(&t, &["a"], false), Err("unknown feature `missing`".to_string()), "unknown listed feature");
+}
+
+#[test]
+fn cycles_terminate() {
+    let mut t = BTreeMap::new();
+    t.insert("a", vec!["b"]);
+    t.insert("b", vec!["a", "x/y"]);
+    assert_eq!(resolve_features(&t, &["a"], true).unwrap(), set(&["a", "b", "x/y"]), "a cycle is visited once; no default entry exists");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Use a work list: <code>let mut todo: Vec&lt;&amp;str&gt; =
+        requested.to_vec();</code>, push <code>"default"</code> when appropriate, then <code>while let Some(name) =
+        todo.pop()</code>. Skip names already in the result (<code>BTreeSet::insert</code> returns <code>false</code>
+        for those), look the name up with <code>table.get(name).ok_or_else(..)?</code>, and for each entry either
+        insert it directly or push it onto <code>todo</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">use std::collections::{BTreeMap, BTreeSet};
+
+fn resolve_features(
+    table: &amp;BTreeMap&lt;&amp;str, Vec&lt;&amp;str&gt;&gt;,
+    requested: &amp;[&amp;str],
+    default_features: bool,
+) -&gt; Result&lt;BTreeSet&lt;String&gt;, String&gt; {
+    let mut enabled = BTreeSet::new();
+    let mut todo: Vec&lt;&amp;str&gt; = requested.to_vec();
+    if default_features &amp;&amp; table.contains_key("default") {
+        todo.push("default");
+    }
+    while let Some(name) = todo.pop() {
+        if !enabled.insert(name.to_string()) {
+            continue;
+        }
+        let entries = table.get(name).ok_or_else(|| format!("unknown feature `{name}`"))?;
+        for entry in entries {
+            if entry.contains('/') || entry.starts_with("dep:") {
+                enabled.insert(entry.to_string());
+            } else {
+                todo.push(entry);
+            }
+        }
+    }
+    Ok(enabled)
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m10-e5" data-title="Cargo's caret rule">
+      <div class="exercise-prompt">
+        <p>Write <code>caret_matches(req, version)</code>, which says whether <code>version</code> (always three parts,
+          like <code>"0.48.3"</code>) satisfies the caret requirement <code>req</code> (one to three parts, like
+          <code>"0.48"</code>, <code>"1"</code>, or <code>"0.2.2"</code>) using Cargo's rules: the version must be at
+          least the requirement (missing parts count as 0), and below the upper bound made by incrementing the leftmost
+          non-zero part of the requirement and zeroing everything after it. If every given part is zero, increment the
+          last given part instead (<code>"0"</code> allows <code>&lt;1.0.0</code>, <code>"0.0"</code> allows
+          <code>&lt;0.1.0</code>, <code>"0.0.3"</code> allows <code>&lt;0.0.4</code>). Inputs are always well-formed.</p>
+      </div>
+<textarea class="starter">
+fn caret_matches(req: &str, version: &str) -> bool {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn major_versions() {
+    assert!(caret_matches("1.3", "1.9.0"), "1.9.0 is compatible with ^1.3");
+    assert!(!caret_matches("1.3", "2.0.0"), "2.0.0 is a new major");
+    assert!(!caret_matches("1.3", "1.2.9"), "1.2.9 is below the requirement");
+    assert!(caret_matches("9.0", "9.4.1"), "rattler_solve ^9.0 accepts 9.4.1");
+}
+
+#[test]
+fn zero_major() {
+    assert!(caret_matches("0.48", "0.48.7"), "^0.48 accepts patch releases");
+    assert!(!caret_matches("0.48", "0.49.0"), "^0.48 stops before 0.49");
+    assert!(caret_matches("0.2.2", "0.2.5"), "^0.2.2 accepts 0.2.5");
+    assert!(!caret_matches("0.2.2", "0.2.1"), "0.2.1 is below 0.2.2");
+}
+
+#[test]
+fn all_zero() {
+    assert!(caret_matches("0.0.3", "0.0.3"), "^0.0.3 accepts exactly 0.0.3");
+    assert!(!caret_matches("0.0.3", "0.0.4"), "^0.0.3 rejects 0.0.4");
+    assert!(caret_matches("0", "0.9.9"), "^0 accepts anything below 1.0.0");
+    assert!(!caret_matches("0.0", "0.1.0"), "^0.0 stops before 0.1.0");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Parse both into <code>Vec&lt;u64&gt;</code> with
+        <code>split('.').map(|p| p.parse().unwrap())</code>. Build <code>lower</code> by padding the requirement to three
+        parts with zeros. For the upper bound, find <code>i = req.iter().position(|&amp;p| p != 0).unwrap_or(req.len() -
+        1)</code>, copy <code>req[..i]</code>, push <code>req[i] + 1</code>, pad with zeros. Arrays and <code>Vec</code>s
+        compare lexicographically, so <code>lower &lt;= v &amp;&amp; v &lt; upper</code> works directly.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn caret_matches(req: &amp;str, version: &amp;str) -&gt; bool {
+    let parse = |s: &amp;str| -&gt; Vec&lt;u64&gt; { s.split('.').map(|p| p.parse().unwrap()).collect() };
+    let req = parse(req);
+    let v = parse(version);
+
+    let mut lower = req.clone();
+    lower.resize(3, 0);
+
+    let i = req.iter().position(|&amp;p| p != 0).unwrap_or(req.len() - 1);
+    let mut upper: Vec&lt;u64&gt; = req[..i].to_vec();
+    upper.push(req[i] + 1);
+    upper.resize(3, 0);
+
+    lower &lt;= v &amp;&amp; v &lt; upper
+}</code></pre>
+      </details>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="mini-project">
+    <h2>Mini-project: a two-crate workspace with features</h2>
+    <div class="project-box">
+      <div class="widget-head"><span class="w-kind">Mini-project</span><span class="w-title">specs: a library crate with a curated API, a feature, and a thin binary</span></div>
+      <div class="widget-body">
+        <p>Build a small Cargo workspace laid out like Pixi: a library crate that owns the logic and exposes a
+          deliberate API, and a binary crate that only parses arguments and chooses features.</p>
+        <pre data-label="Terminal"><code class="language-bash">pixi init specs-ws &amp;&amp; cd specs-ws
+pixi add rust
+mkdir crates
+pixi run cargo new --lib crates/spec_core
+pixi run cargo new crates/spec_cli
+# write the root Cargo.toml by hand: [workspace] members = ["crates/*"], resolver = "3"
+pixi run cargo build --workspace
+pixi run cargo run -p spec_cli -- "numpy >=1.26" "python"
+pixi run cargo run -p spec_cli --features json -- "numpy >=1.26"
+pixi run cargo doc --no-deps --open</code></pre>
+        <p><strong>What to build</strong></p>
+        <ul>
+          <li><code>spec_core</code>: private modules <code>name</code>, <code>spec</code>, and <code>render</code>;
+            <code>lib.rs</code> re-exports <code>PackageName</code>, <code>Spec</code>, and <code>ParseError</code> and has
+            a <code>prelude</code>. <code>PackageName</code> keeps its field private (exercise 3).</li>
+          <li>A <code>json</code> feature in <code>spec_core</code> that adds <code>Spec::to_json(&amp;self) -&gt;
+            String</code> behind <code>#[cfg(feature = "json")]</code>, written by hand (no serde), so the feature has no
+            dependencies, like Pixi's test features.</li>
+          <li><code>spec_cli</code> depends on <code>spec_core = { path = "../spec_core", default-features = false }</code>
+            and declares its own <code>json = ["spec_core/json"]</code> feature, forwarding the choice.</li>
+          <li>The workspace root has <code>[workspace.package]</code> with <code>edition = "2024"</code>, and both crates use
+            <code>edition.workspace = true</code>.</li>
+          <li><code>//!</code> crate docs and <code>///</code> docs on every public item, enforced with
+            <code>#![deny(missing_docs)]</code> in <code>spec_core</code>.</li>
+        </ul>
+        <ul class="checklist" data-id="m10-mini">
+          <li><code>spec_core</code>'s <code>lib.rs</code> has only <code>mod</code>, <code>pub use</code>, and the prelude: no logic</li>
+          <li><code>spec_cli</code> cannot construct a <code>PackageName</code> without <code>PackageName::new</code></li>
+          <li><code>cargo build -p spec_cli</code> works with and without <code>--features json</code>, and <code>--json</code> output appears only with it</li>
+          <li>Removing a doc comment from a public item makes the build fail</li>
+          <li><code>cargo doc --no-deps</code> builds with no warnings and the intra-doc links resolve</li>
+          <li><code>pixi run cargo clippy --workspace --all-targets --all-features -- -D warnings</code> passes</li>
+        </ul>
+        <p><strong>Stretch goals:</strong> move the shared version requirement of a dependency (say, <code>itertools</code>)
+          into <code>[workspace.dependencies]</code> and use <code>workspace = true</code> in both crates; add a
+          <code>#[non_exhaustive]</code> error enum and see the wildcard arm the binary now needs; run
+          <code>cargo tree -e features -p spec_cli --features json</code> and find the forwarded feature.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="quiz">
+    <h2>Quiz</h2>
+    <div class="quiz" data-id="m10-quiz">
+<script type="application/json">
+{"title": "Visibility, features and crate design", "passScore": 0.7, "questions": [
+  {"type": "single", "prompt": "Does this compile?", "code": "mod a {\n    pub struct Config {\n        pub name: String,\n        retries: u32,\n    }\n}\n\nfn main() {\n    let c = a::Config { name: \"x\".into(), retries: 3 };\n    println!(\"{}\", c.name);\n}", "options": ["Yes", "No: E0451, <code>retries</code> is private, so the struct literal is not allowed outside <code>a</code>", "No: E0603, <code>Config</code> is private"], "answer": 1, "explanation": "<p>A <code>pub</code> struct can have private fields. Outside the module you cannot name a private field, so you cannot write a struct literal for the type at all. Provide a constructor in <code>a</code>.</p>"},
+  {"type": "single", "prompt": "Where is a <code>pub(crate) fn</code> callable?", "options": ["Only in the module that defines it", "Anywhere in the same crate, but not from other crates", "From any crate that depends on this one"], "answer": 1, "explanation": "<p><code>pub(crate)</code> is visible across the whole crate and invisible outside it. It is the usual choice for internals shared between modules.</p>"},
+  {"type": "single", "prompt": "In <code>lib.rs</code>: <code>mod parse;</code> and inside <code>parse.rs</code>: <code>pub fn parse_spec()</code>. Can another crate call <code>my_crate::parse::parse_spec()</code>?", "options": ["Yes, the function is <code>pub</code>", "No, the module <code>parse</code> is private, so the path is unreachable; a <code>pub use parse::parse_spec;</code> in <code>lib.rs</code> would expose it as <code>my_crate::parse_spec</code>", "Only with <code>pub(crate)</code>"], "answer": 1, "explanation": "<p>Every segment of a path must be visible. <code>pub</code> on an item inside a private module is a permission that nothing outside can use until a re-export provides a public path.</p>"},
+  {"type": "multi", "prompt": "Which statements about Cargo features are true?", "options": ["Cargo builds a dependency once with the union of all requested features", "A feature should be able to remove an API that another feature adds", "<code>\"reqwest/rustls\"</code> in a feature list enables reqwest's <code>rustls</code> feature", "An optional dependency without <code>dep:</code> mentions gets an implicit feature with its own name"], "answer": [0, 2, 3], "explanation": "<p>Feature unification means features must be additive; one feature must never take away what another provides. <code>crate/feature</code> forwards, and optional dependencies get implicit features unless <code>dep:</code> is used.</p>"},
+  {"type": "single", "prompt": "Why does Pixi's root <code>Cargo.toml</code> put <code>default-features = false</code> on the workspace entry for each rattler crate?", "options": ["To make builds reproducible", "Because members can add features to a workspace dependency but not remove them, so the root must start from the minimum and let the top-level binary choose things like the TLS backend", "Because rattler crates have no default features"], "answer": 1, "explanation": "<p>If the root enabled defaults, every member would inherit them and no build could avoid them. Pixi turns them off at the root and selects <code>rustls</code> or <code>native-tls</code> in <code>crates/pixi</code>.</p>"},
+  {"type": "text", "prompt": "Which <code>cfg</code> predicate is true only while compiling with <code>cargo test</code>? (just the predicate)", "answer": ["test"], "explanation": "<p><code>#[cfg(test)]</code> gates test modules and test-only helpers so they never reach the shipped binary.</p>"},
+  {"type": "output", "prompt": "Compiled as a single file with no features enabled. What does this print?", "code": "#[cfg(feature = \"fast\")]\nconst MODE: &str = \"fast\";\n#[cfg(not(feature = \"fast\"))]\nconst MODE: &str = \"safe\";\n\nfn main() {\n    println!(\"{MODE} {}\", cfg!(feature = \"fast\"));\n}", "answer": "safe false", "explanation": "<p>Only the <code>not(feature = \"fast\")</code> constant exists, and <code>cfg!</code> evaluates the same predicate to <code>false</code>.</p>"},
+  {"type": "single", "prompt": "What is the difference between <code>#[cfg(windows)]</code> on a function and <code>if cfg!(windows) { .. }</code> inside one?", "options": ["None", "The attribute removes the item from non-Windows builds entirely; with <code>cfg!</code> both branches are compiled and type-checked, and one is chosen by a constant", "<code>cfg!</code> is evaluated at run time from the OS"], "answer": 1, "explanation": "<p><code>cfg!</code> expands to <code>true</code> or <code>false</code> at compile time, but the code in both branches must still compile on every platform. Use the attribute when the code uses platform-only APIs.</p>"},
+  {"type": "single", "prompt": "Which doc comment documents the whole crate when placed at the top of <code>lib.rs</code>?", "options": ["<code>/// ...</code>", "<code>//! ...</code>", "<code>/** ... */</code>"], "answer": 1, "explanation": "<p><code>//!</code> (an inner doc comment) documents the enclosing item: at the top of <code>lib.rs</code>, the crate. <code>///</code> documents the next item.</p>"},
+  {"type": "single", "prompt": "Pixi requires <code>rattler = \"0.48\"</code>. Which version can <code>cargo update</code> pick?", "options": ["0.49.0", "0.48.9", "1.0.0"], "answer": 1, "explanation": "<p>For <code>0.x</code>, the minor is treated as the major. <code>^0.48</code> means <code>&gt;=0.48.0, &lt;0.49.0</code>.</p>"},
+  {"type": "multi", "prompt": "Which changes to a published library are breaking (need a major bump, or a minor bump in 0.x)?", "options": ["Adding a variant to a public enum that is not <code>#[non_exhaustive]</code>", "Adding a new public function", "Changing a public item from <code>pub</code> to <code>pub(crate)</code>", "Removing a Cargo feature"], "answer": [0, 2, 3], "explanation": "<p>Adding items is compatible. New enum variants break exhaustive matches downstream, reduced visibility breaks users, and a removed feature breaks anyone who enabled it.</p>"},
+  {"type": "single", "prompt": "Why is Pixi's <code>crates/pixi</code> crate so small?", "options": ["Binary crates cannot contain modules", "It is the composition root: logic lives in library crates (<code>pixi_cli</code>, <code>pixi_core</code>, ...) that compile in parallel and are reusable, and the binary only sets up the runtime and makes the final feature choices", "To reduce the size of the shipped binary"], "answer": 1, "explanation": "<p>Keeping logic in libraries lets Cargo parallelize and cache builds, lets other tools reuse the code, and keeps the top-level decisions (features, allocator, runtime) in one obvious place.</p>"}
+]}
+</script>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="recap">
+    <h2>Recap</h2>
+    <ul>
+      <li>Everything is private by default: visible in its module and descendants. Struct fields are private
+        separately from the struct; enum variants are public with the enum.</li>
+      <li><code>pub(super)</code>, <code>pub(crate)</code>, and <code>pub</code> widen visibility step by step; prefer the
+        narrowest that works. <code>pub</code> in a library is a promise.</li>
+      <li>Private modules plus <code>pub use</code> in <code>lib.rs</code> give a flat API independent of file layout. A
+        prelude is a module meant for <code>use x::prelude::*</code>.</li>
+      <li>Features: <code>[features]</code>, <code>default</code>, <code>dep:</code> for optional dependencies,
+        <code>crate/feature</code> to forward. Features are unified across the build, so they must be additive.</li>
+      <li><code>default-features = false</code> in <code>[workspace.dependencies]</code> starts every member from the
+        minimum; Pixi does this for every rattler crate and picks TLS at the top.</li>
+      <li><code>#[cfg]</code> removes code, <code>cfg!</code> picks a branch, <code>#[cfg_attr]</code> adds an attribute
+        conditionally: for features, tests, and target platforms.</li>
+      <li><code>///</code> and <code>//!</code> are Markdown docs; <code>cargo doc</code> builds them. Caret requirements
+        allow changes that keep the leftmost non-zero version component.</li>
+    </ul>
+    <div class="flashcards" data-title="Visibility and crate design">
+<script type="application/json">
+[{"front": "What does \"private\" mean in Rust?", "back": "Visible in the defining module and its descendants only."},
+ {"front": "E0603 / E0616 / E0451", "back": "Private item / private field accessed / struct literal with private fields."},
+ {"front": "<code>pub(crate)</code>", "back": "Visible anywhere in this crate, invisible to other crates."},
+ {"front": "Why private <code>mod</code> + <code>pub use</code>?", "back": "Users get a flat, stable API; authors can move code between files without breaking anyone."},
+ {"front": "Feature unification", "back": "Each dependency is built once with the union of all features requested anywhere in the build. Features must be additive."},
+ {"front": "<code>dep:serde_json</code> in a feature list", "back": "Enables the optional dependency and suppresses its implicit feature."},
+ {"front": "Why <code>default-features = false</code> at the workspace root?", "back": "Members can add features but not remove them; the root starts from the minimum so the top-level crate chooses."},
+ {"front": "<code>#[cfg(x)]</code> vs <code>cfg!(x)</code>", "back": "The attribute removes the item when false; the macro is a constant <code>bool</code> and both branches must compile."},
+ {"front": "<code>#[cfg_attr(not(feature = \"slow_integration_tests\"), ignore)]</code>", "back": "Marks a test <code>#[ignore]</code> unless the feature is on. Pixi's slow tests use this."},
+ {"front": "<code>///</code> vs <code>//!</code>", "back": "Docs for the next item vs docs for the enclosing item (crate or module)."},
+ {"front": "What does <code>\"0.48\"</code> allow?", "back": "<code>&gt;=0.48.0, &lt;0.49.0</code>: for 0.x the minor acts as the major."},
+ {"front": "<code>#[non_exhaustive]</code>", "back": "Other crates must use a wildcard match arm (enums) or a constructor (structs), so you can add variants or fields without a breaking release."}]
+</script>
+    </div>
+    <h3>Going further</h3>
+    <ul>
+      <li><a href="https://doc.rust-lang.org/book/ch07-00-managing-growing-projects-with-packages-crates-and-modules.html">The Rust Book, chapter 7: Packages, Crates, and Modules</a> and <a href="https://doc.rust-lang.org/book/ch14-00-more-about-cargo.html">chapter 14: More about Cargo</a></li>
+      <li><a href="https://doc.rust-lang.org/rust-by-example/mod/visibility.html">Rust by Example: Visibility</a> and <a href="https://doc.rust-lang.org/rust-by-example/attribute/cfg.html">cfg</a></li>
+      <li><a href="https://doc.rust-lang.org/cargo/reference/features.html">The Cargo Book: Features</a>, <a href="https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html">Specifying dependencies</a>, and <a href="https://doc.rust-lang.org/cargo/reference/semver.html">SemVer compatibility</a></li>
+      <li><a href="https://doc.rust-lang.org/reference/visibility-and-privacy.html">The Rust Reference: Visibility and privacy</a> and <a href="https://doc.rust-lang.org/reference/conditional-compilation.html">Conditional compilation</a></li>
+      <li><a href="https://doc.rust-lang.org/rustdoc/">The rustdoc book</a> (doc comments, intra-doc links)</li>
+      <li>Pixi source: <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/Cargo.toml">the root Cargo.toml</a>, <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/lib.rs">pixi_manifest/src/lib.rs</a>, and the <a href="../reference/pixi-codebase-map.html">codebase map</a></li>
+      <li>Next: <a href="m11-testing.html">M11 Testing Like Pixi Does</a></li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

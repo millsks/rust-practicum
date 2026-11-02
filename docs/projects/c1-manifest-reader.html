@@ -1,0 +1,650 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Capstone 1 · Manifest Reader · Rust Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-rust.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-module="c1">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Stage 2 · Idiomatic Rust · Capstone 1</p>
+    <h1>Capstone 1: Manifest Reader</h1>
+    <p class="lede">Build a small Rust crate that reads a simplified <code>pixi.toml</code> into typed structs, reports
+      every mistake with the exact TOML key where it happened, works out which packages each environment installs, and
+      orders tasks by <code>depends-on</code>. It is Level 1 in one program, and it is a scale model of
+      <code>pixi_manifest</code>, the crate in Pixi that every command depends on.</p>
+    <div class="lesson-meta"><span>⏱ ~8–10 hours</span><span>Prerequisites: <a href="../modules/m01-cargo-crates-modules.html">M01</a> to <a href="../modules/m11-testing.html">M11</a> (M04, M05, M06, and M07 matter most)</span></div>
+    <ul class="objectives">
+      <li>Model a file format with structs and enums so that invalid states cannot be represented</li>
+      <li>Convert an untyped <code>toml::Table</code> into those types by hand with <code>match</code>, <code>Option</code>, and <code>Result</code></li>
+      <li>Write an error enum that implements <code>Display</code>, <code>std::error::Error</code>, and <code>From</code>, so <code>?</code> works and every message names the TOML key at fault</li>
+      <li>Return borrowed results (<code>BTreeMap&lt;&amp;str, &amp;Spec&gt;</code>, <code>Vec&lt;&amp;str&gt;</code>) whose lifetimes are tied to the manifest, not to the arguments</li>
+      <li>Implement a deterministic depth-first task ordering with cycle detection</li>
+      <li>Ship a small command-line tool with correct stdout, stderr, and exit codes</li>
+      <li>Read the matching code in <code>pixi_manifest</code> and <code>pixi_task</code> and explain how it differs from yours</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="scenario">
+    <h2>What you'll build</h2>
+    <p>Every Pixi command starts the same way: find <code>pixi.toml</code>, read it, and turn the text into data the
+      rest of the program can trust. If <code>platforms</code> lists <code>linux-arm64</code> (a common typo for
+      <code>linux-aarch64</code>), Pixi has to say so clearly before it tries to solve anything. If a task depends on a
+      task that does not exist, the user should learn that from one line of output, not from a panic.</p>
+    <p>You will build <code>manifest_reader</code>, a library crate with a small binary called
+      <code>manifest-reader</code>. Given a manifest it prints a summary; given a manifest and a task name it prints
+      the order in which the task and its dependencies run:</p>
+    <pre data-label="Terminal"><code class="language-bash">$ cd work/c1_manifest_reader
+$ F=../../projects/c1_manifest_reader/tests/fixtures
+$ pixi run cargo run -q -- $F/full.toml
+workspace: weather-station
+channels: conda-forge, bioconda
+platforms: linux-64, osx-arm64, win-64
+dependencies: numpy, pandas, python
+tasks: all, clean, fetch, plot, report
+features: lint, py312, test
+environments: ci, default, lint, test
+
+$ pixi run cargo run -q -- $F/full.toml report
+fetch
+clean
+plot
+report
+
+$ pixi run cargo run -q -- $F/unknown-platform.toml
+error: ../../projects/c1_manifest_reader/tests/fixtures/unknown-platform.toml: unknown platform `linux-arm64` at `workspace.platforms[2]` (known platforms: linux-64, linux-aarch64, osx-64, osx-arm64, win-64, noarch)</code></pre>
+    <p>The library does the real work. The tests call it directly: <code>parse_manifest</code> returns a
+      <code>Manifest</code> or a <code>ManifestError</code>, and two methods answer the questions Pixi asks of a
+      manifest all day: "what goes into this environment?" and "what runs before this task?".</p>
+    <aside class="callout note"><p>The only dependency is the <code>toml</code> crate, and you use exactly one thing
+      from it: parsing text into a <code>toml::Table</code>, a map from keys to <code>toml::Value</code>s that could be
+      anything. You will not use serde's <code>#[derive(Deserialize)]</code>, which would do the conversion for you.
+      Writing the conversion by hand is the point: it is where enums, <code>match</code>, ownership,
+      <code>Option</code>, <code>Result</code>, collections, traits, and lifetimes all meet. Serde is Level 2.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="why-pixi">
+    <h2>Why it mirrors pixi_manifest</h2>
+    <p>Pixi reads its manifest in the <code>pixi_manifest</code> crate. It parses with <code>toml_span</code> (a TOML
+      parser that remembers where each value sat in the file, so errors can underline it) and then converts each table
+      by hand in <code>Deserialize</code> impls that look a lot like the functions you are about to write. Here is
+      how its task conversion starts, from
+      <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/toml/task.rs#L126-L156">crates/pixi_manifest/src/toml/task.rs</a>
+      (trimmed):</p>
+    <pre><code class="language-rust">impl&lt;'de&gt; toml_span::Deserialize&lt;'de&gt; for TomlTask {
+    fn deserialize(value: &amp;mut toml_span::Value&lt;'de&gt;) -&gt; Result&lt;Self, DeserError&gt; {
+        let mut th = match value.take() {
+            ValueInner::String(str) =&gt; return Ok(Task::Plain(str.into_owned().into()).into()),
+            ValueInner::Table(table) =&gt; TableHelper::from((table, value.span)),
+            ValueInner::Array(array) =&gt; {
+                // ... an array of { task = "..." } tables becomes an alias ...
+            }
+            inner =&gt; return Err(expected("string or table", inner, value.span).into()),
+        };
+        // ... read `cmd`, `depends-on`, and the other keys from `th` ...</code></pre>
+    <p>That is a <code>match</code> on the kind of TOML value, with a string becoming one variant, a table becoming a
+      richer one, and anything else an error that says what was expected. Your <code>task_from_value</code> has the
+      same shape. The table below maps each part of your crate to its counterpart in Pixi at the frozen snapshot.</p>
+    <table>
+      <thead><tr><th>Your crate</th><th>Pixi</th><th>What is the same, and what is simpler</th></tr></thead>
+      <tbody>
+        <tr><td><code>Task</code> enum with <code>command()</code> and <code>depends_on()</code></td>
+          <td><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/task.rs#L157-L174"><code>pixi_manifest::Task</code></a></td>
+          <td>Pixi's <code>Task</code> has <code>Plain</code>, <code>Execute</code>, <code>Alias</code>, and <code>Custom</code>, and its <code>depends_on()</code> returns <code>&amp;[]</code> for a plain command exactly as yours does. Pixi's <code>Execute</code> also has <code>inputs</code>, <code>outputs</code>, <code>cwd</code>, <code>env</code>, and arguments.</td></tr>
+        <tr><td><code>Environment</code> from a list or a table</td>
+          <td><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/toml/environment.rs#L146-L150"><code>TomlEnvironmentList</code></a> and <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/toml/environment.rs#L235-L249">its deserializer</a></td>
+          <td>Pixi keeps the two forms as two enum variants (<code>Seq</code> and <code>Map</code>) and checks <code>as_array()</code> then <code>as_table()</code>, failing with "either a map or a sequence". You normalize both forms into one struct.</td></tr>
+        <tr><td><code>Spec</code>: a version string or a table</td>
+          <td><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_spec/src/toml.rs#L560-L583"><code>TomlSpec::deserialize_from_value</code></a> in <code>pixi_spec</code></td>
+          <td>The same <code>match</code>: a string is a bare version, a table is a detailed spec, anything else is "a string or a table". Pixi's table form also covers git, path, and URL sources.</td></tr>
+        <tr><td><code>check_keys</code> and <code>UnknownKey</code></td>
+          <td><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/toml/environment.rs#L152-L200"><code>TableHelper</code> in the environment deserializer</a></td>
+          <td>Pixi takes each known key out of a <code>TableHelper</code> and then calls <code>th.finalize(None)?</code>, which fails if any key is left over. That is how Pixi catches <code>depends_on</code> written with an underscore.</td></tr>
+        <tr><td><code>UnknownFeature</code> in <code>validate</code></td>
+          <td><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/toml/manifest.rs#L440-L464">the feature check in <code>toml/manifest.rs</code></a></td>
+          <td>After converting every table, Pixi checks that each feature an environment includes exists: "The feature '...' is not defined in the manifest". It also rejects a feature listed twice.</td></tr>
+        <tr><td><code>environment_dependencies</code></td>
+          <td><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/features_ext.rs#L296-L318"><code>combined_dependencies</code></a></td>
+          <td>Pixi merges the dependencies of an environment's features in feature order. It keeps every requirement for a package (the solver must satisfy them all, and it has to handle platforms and targets); you keep only the last one.</td></tr>
+        <tr><td><code>task_order</code></td>
+          <td><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_task/src/task_graph.rs#L658-L689"><code>TaskGraph::topological_order</code></a> in <code>pixi_task</code></td>
+          <td>The same depth-first walk: visit dependencies, then push the task. Pixi uses a <code>visited</code> set and silently tolerates cycles (see <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_task/src/task_graph.rs#L943-L963"><code>test_cycle_ordered_commands</code></a>); you report them as an error.</td></tr>
+        <tr><td><code>ManifestError</code></td>
+          <td><a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/error.rs#L97-L122"><code>TomlError</code></a></td>
+          <td>An enum of everything that can go wrong, with <code>From</code> impls so <code>?</code> converts lower-level errors. Pixi derives <code>Error</code> with <code>thiserror</code> and attaches source spans with <code>miette</code> (both Level 2); you write the same impls by hand.</td></tr>
+      </tbody>
+    </table>
+    <aside class="callout pixi"><p>Look at the topological order in Pixi once more after you finish milestone 6. Its
+      <code>visit</code> is a nested <code>fn</code> that takes <code>&amp;mut HashSet</code> and <code>&amp;mut Vec</code>
+      parameters, which is the same design as your <code>visit_task</code>. When you read that file during Level 3 you
+      will already know how it works.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="architecture">
+    <h2>How the pieces fit</h2>
+    <p>Reading a manifest happens in three passes, and the crate keeps them in separate modules so each can be
+      understood alone:</p>
+    <ol>
+      <li><strong>Syntax.</strong> <code>src.parse::&lt;toml::Table&gt;()</code> checks that the text is valid TOML.
+        Its error becomes <code>ManifestError::Toml</code> through your <code>From</code> impl.</li>
+      <li><strong>Shape.</strong> <code>convert.rs</code> walks the table and builds typed structs. Every function
+        receives the <em>key path</em> of the value it converts (<code>tasks.test</code>,
+        <code>workspace.platforms[2]</code>), so any error can say exactly where it is.</li>
+      <li><strong>References.</strong> <code>validate</code> checks the links between parts: environments name real
+        features, and <code>depends-on</code> names real tasks.</li>
+    </ol>
+    <pre class="mermaid">
+flowchart LR
+  T[pixi.toml text] -->|"src.parse()"| TT[toml::Table]
+  TT -->|convert.rs| M[Manifest]
+  M -->|validate| V[valid Manifest]
+  V --> Q1["environment_dependencies(env)"]
+  V --> Q2["task_order(task)"]
+  V --> S["summary()"]
+  TT -. syntax error .-> E[ManifestError]
+  M -. wrong shape .-> E
+  V -. bad reference .-> E
+  Q1 -. unknown env .-> E
+  Q2 -. unknown task or cycle .-> E
+    </pre>
+    <p>The two queries return borrowed data. <code>environment_dependencies</code> returns
+      <code>BTreeMap&lt;&amp;str, &amp;Spec&gt;</code>: the names and specs stay where they are inside the
+      <code>Manifest</code>, and the map only points at them. Lifetime elision (<a href="../modules/m07-lifetimes.html">M07</a>)
+      ties every reference in the return type to <code>&amp;self</code>, so the compiler will make sure no result
+      outlives the manifest, and will stop you from accidentally returning a reference to the <code>env</code> or
+      <code>task</code> argument.</p>
+    <aside class="callout think"><p>Why convert by hand when serde could derive it? Look at what the tests demand:
+      <code>depends-on</code> accepts a string or a list, environments accept a list or a table, and every error names
+      a key path. Pixi wants exactly that control (and spans for underlined errors), which is why its manifest is
+      converted by hand-written <code>toml_span</code> impls rather than serde derives.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="setup">
+    <h2>Setup with Pixi</h2>
+    <p>The course repository already pins Rust 1.95 in its <code>pixi.toml</code>, so there is nothing to install. From
+      the repository root:</p>
+    <pre data-label="Terminal"><code class="language-bash">pixi run projects                            # list capstones and whether you've started them
+pixi run start c1                            # copy the starter to work/c1_manifest_reader/
+pixi run grade c1                            # run the 46 grading tests against your work/ copy
+pixi run grade c1 --no-fail-fast          # keep going after the first failing test file
+pixi run grade c1 --test tasks            # one test file only
+pixi run grade c1 --test parse platform   # one file, only tests whose names contain "platform"</code></pre>
+    <p><code>pixi run grade c1</code> runs <code>practicum grade c1</code>. Pixi passes everything after
+      <code>--</code> to it, and any option <code>practicum grade</code> does not recognize goes straight to
+      <code>cargo test</code>. So <code>--test tasks</code> selects the test file <code>tests/tasks.rs</code>, a bare
+      word after it filters test names, and <code>--no-fail-fast</code> runs every test file even after one fails.
+      (Without it, Cargo stops at the first failing file, which for the starter is <code>cli.rs</code>.)</p>
+    <p>Inside your working copy the ordinary Cargo commands work, through Pixi:</p>
+    <pre data-label="Terminal"><code class="language-bash">cd work/c1_manifest_reader
+pixi run cargo build
+pixi run cargo run -- ../../projects/c1_manifest_reader/tests/fixtures/full.toml
+pixi run cargo clippy --all-targets -- -D warnings
+pixi run cargo fmt</code></pre>
+    <table>
+      <thead><tr><th>File</th><th>Status</th><th>What it holds</th></tr></thead>
+      <tbody>
+        <tr><td><code>Cargo.toml</code>, <code>Cargo.lock</code></td><td>given</td><td>Package <code>manifest_reader</code>, edition 2024, <code>rust-version = "1.90"</code> like Pixi, the <code>toml</code> dependency, and a <code>[[bin]]</code> named <code>manifest-reader</code>. The empty <code>[workspace]</code> table makes the crate its own workspace root.</td></tr>
+        <tr><td><code>src/lib.rs</code></td><td>one function</td><td>Module tree, <code>pub use</code> re-exports, <code>parse_manifest</code></td></tr>
+        <tr><td><code>src/platform.rs</code></td><td>yours</td><td><code>Platform</code>: <code>as_str</code>, <code>Display</code>, <code>FromStr</code>; <code>ParsePlatformError</code></td></tr>
+        <tr><td><code>src/model.rs</code></td><td>types given</td><td>The structs and enums, complete; their methods are yours</td></tr>
+        <tr><td><code>src/error.rs</code></td><td>enum given</td><td><code>ManifestError</code>, complete; <code>Display</code>, <code>source</code>, and <code>From</code> are yours</td></tr>
+        <tr><td><code>src/convert.rs</code></td><td>yours</td><td><code>toml::Table</code> to <code>Manifest</code>, and <code>validate</code>. Path helpers <code>join</code> and <code>index</code> are given.</td></tr>
+        <tr><td><code>src/resolve.rs</code></td><td>yours</td><td><code>environment_dependencies</code>, <code>task_order</code>, <code>visit_task</code></td></tr>
+        <tr><td><code>src/main.rs</code></td><td><code>main</code> given</td><td>Argument handling and exit codes are given; <code>run</code> is yours</td></tr>
+      </tbody>
+    </table>
+    <p>Every function you write contains <code>todo!()</code> and a <code>// TODO(c1)</code> comment with step-by-step
+      guidance. Search for <code>TODO(c1)</code> to find them all. The starter compiles without warnings; a
+      <code>#![allow(...)]</code> line at the top of <code>convert.rs</code> and <code>resolve.rs</code> keeps it quiet
+      until you are done, and you should delete it at the end.</p>
+  </section>
+
+  <section class="lesson-section" id="spec">
+    <h2>The spec</h2>
+    <p>The full spec, with every error message, is in <code>projects/c1_manifest_reader/README.md</code>. This is the
+      contract at a glance.</p>
+
+    <h3>The manifest format</h3>
+    <p>Five top-level keys. Only <code>workspace</code> is required, and any other top-level key (including Pixi's older
+      <code>[project]</code>) is an <code>UnknownKey</code> error.</p>
+    <pre><code class="language-toml">[workspace]
+name = "weather-station"                   # required string
+version = "0.3.0"                          # optional string
+description = "Readings from the garden"   # optional string
+channels = ["conda-forge", "bioconda"]     # required array of strings, order kept
+platforms = ["linux-64", "osx-arm64"]      # required array of platform names, order kept
+
+[dependencies]
+python = "3.13.*"                                          # Spec::Version
+pandas = { version = "&gt;=2.2", channel = "conda-forge" }    # Spec::Detailed: version, build, channel (all optional)
+
+[tasks]
+fetch = "python -m station.fetch"                                   # Task::Command
+clean = { cmd = "python -m station.clean", depends-on = "fetch" }   # Task::Execute (one name = a list of one)
+plot = { cmd = "python -m station.plot", depends-on = ["clean"] }   # Task::Execute
+all = { depends-on = ["plot", "fetch"] }                            # Task::Alias (no cmd)
+
+[feature.test.dependencies]               # a feature has optional dependencies and tasks tables
+pytest = "&gt;=8"
+
+[feature.test.tasks]
+test = { cmd = "pytest", depends-on = ["fetch"] }
+
+[environments]
+test = ["test"]                                            # list shorthand
+lint = { features = ["test"], solve-group = "default" }    # table form: features required, solve-group optional</code></pre>
+    <p>The six platforms are <code>linux-64</code>, <code>linux-aarch64</code>, <code>osx-64</code>,
+      <code>osx-arm64</code>, <code>win-64</code>, and <code>noarch</code>, spelled exactly. After conversion,
+      <code>validate</code> checks that every feature an environment lists is defined, that every <code>depends-on</code>
+      entry of a default task names a default task, and that every <code>depends-on</code> entry of a feature task
+      names a task of the same feature or a default task. Cycles are not a parse error; <code>task_order</code>
+      reports them.</p>
+
+    <h3>The types (given in the starter)</h3>
+    <pre><code class="language-rust">pub struct Manifest {
+    pub workspace: Workspace,
+    pub dependencies: BTreeMap&lt;String, Spec&gt;,
+    pub tasks: BTreeMap&lt;String, Task&gt;,
+    pub features: BTreeMap&lt;String, Feature&gt;,
+    pub environments: BTreeMap&lt;String, Environment&gt;,
+}
+pub struct Workspace {
+    pub name: String,
+    pub version: Option&lt;String&gt;,
+    pub description: Option&lt;String&gt;,
+    pub channels: Vec&lt;String&gt;,
+    pub platforms: Vec&lt;Platform&gt;,
+}
+pub enum Platform { Linux64, LinuxAarch64, Osx64, OsxArm64, Win64, NoArch }
+pub enum Spec { Version(String), Detailed(DetailedSpec) }
+pub struct DetailedSpec { pub version: Option&lt;String&gt;, pub build: Option&lt;String&gt;, pub channel: Option&lt;String&gt; }
+pub enum Task {
+    Command(String),
+    Execute { cmd: String, depends_on: Vec&lt;String&gt; },
+    Alias { depends_on: Vec&lt;String&gt; },
+}
+pub struct Feature { pub dependencies: BTreeMap&lt;String, Spec&gt;, pub tasks: BTreeMap&lt;String, Task&gt; }
+pub struct Environment { pub features: Vec&lt;String&gt;, pub solve_group: Option&lt;String&gt; }</code></pre>
+    <p>Notice what the types rule out. A task cannot have a command and be an alias at the same time, because those
+      are different variants. A platform cannot be misspelled once it is a <code>Platform</code>. Every
+      <code>BTreeMap</code> iterates in sorted order, so output is deterministic without extra sorting. (Pixi uses
+      <code>IndexMap</code> to keep the order the user wrote; sorted is enough here.)</p>
+
+    <h3>The functions you write</h3>
+    <pre><code class="language-rust">pub fn parse_manifest(src: &amp;str) -&gt; Result&lt;Manifest, ManifestError&gt;;
+
+impl Platform { pub fn as_str(self) -&gt; &amp;'static str; }       // plus Display and FromStr
+impl Spec {
+    pub fn version(&amp;self) -&gt; Option&lt;&amp;str&gt;;
+    pub fn channel(&amp;self) -&gt; Option&lt;&amp;str&gt;;
+}                                                            // plus Display: "&gt;=2", "* py312* (conda-forge)"
+impl Task {
+    pub fn command(&amp;self) -&gt; Option&lt;&amp;str&gt;;                  // None for an alias
+    pub fn depends_on(&amp;self) -&gt; &amp;[String];                  // empty for a plain command
+}
+impl Manifest {
+    pub fn environment_names(&amp;self) -&gt; Vec&lt;&amp;str&gt;;           // includes "default", sorted, no duplicates
+    pub fn summary(&amp;self) -&gt; String;
+    pub fn environment_dependencies(&amp;self, env: &amp;str) -&gt; Result&lt;BTreeMap&lt;&amp;str, &amp;Spec&gt;, ManifestError&gt;;
+    pub fn task_order(&amp;self, task: &amp;str) -&gt; Result&lt;Vec&lt;&amp;str&gt;, ManifestError&gt;;
+}</code></pre>
+    <ul>
+      <li><code>environment_dependencies</code>: start from the default <code>[dependencies]</code> and apply each
+        feature of the environment in order; a later spec for a package replaces an earlier one. The implicit
+        <code>default</code> environment (when the manifest does not define one) has only the default
+        dependencies.</li>
+      <li><code>task_order</code>: a depth-first walk of the default <code>[tasks]</code> that visits
+        <code>depends-on</code> in the order written and adds each task after all of its dependencies. Each task
+        appears once. Feature tasks are not included.</li>
+      <li><code>summary</code>: seven <code>label: values</code> lines (workspace, channels, platforms, dependencies,
+        tasks, features, environments) joined with <code>\n</code>, no trailing newline. Channels and platforms keep
+        manifest order, the other lists are sorted, and an empty list is <code>(none)</code>.</li>
+    </ul>
+
+    <h3>Errors</h3>
+    <p>A <em>key path</em> joins table keys with <code>.</code> and array positions with <code>[i]</code>. The
+      <code>found</code> field is <code>toml::Value::type_str()</code>: <code>string</code>, <code>integer</code>,
+      <code>float</code>, <code>boolean</code>, <code>datetime</code>, <code>array</code>, or <code>table</code>.</p>
+    <table>
+      <thead><tr><th>Variant</th><th>Example input</th><th>Display</th></tr></thead>
+      <tbody>
+        <tr><td><code>Toml(toml::de::Error)</code></td><td><code>[workspace</code></td><td><code>invalid TOML: ...</code></td></tr>
+        <tr><td><code>MissingKey { path }</code></td><td>no <code>workspace.name</code></td><td><code>missing key `workspace.name`</code></td></tr>
+        <tr><td><code>WrongType { path, expected, found }</code></td><td><code>name = 42</code></td><td><code>wrong type for `workspace.name`: expected string, found integer</code></td></tr>
+        <tr><td><code>UnknownKey { path, allowed }</code></td><td><code>depends_on = [...]</code></td><td><code>unknown key `tasks.test.depends_on` (expected one of: cmd, depends-on)</code></td></tr>
+        <tr><td><code>UnknownPlatform { path, value }</code></td><td><code>"linux-arm64"</code></td><td><code>unknown platform `linux-arm64` at `workspace.platforms[2]` (known platforms: linux-64, ...)</code></td></tr>
+        <tr><td><code>UnknownFeature { environment, feature }</code></td><td><code>docs = ["docs", "theme"]</code></td><td><code>environment `docs` includes unknown feature `theme`</code></td></tr>
+        <tr><td><code>UnknownTask { path, task }</code></td><td><code>depends-on = ["biuld"]</code></td><td><code>`tasks.test.depends-on` refers to unknown task `biuld`</code></td></tr>
+        <tr><td><code>NoSuchEnvironment { name }</code></td><td><code>environment_dependencies("gpu")</code></td><td><code>no environment named `gpu`</code></td></tr>
+        <tr><td><code>NoSuchTask { name }</code></td><td><code>task_order("deploy")</code></td><td><code>no task named `deploy`</code></td></tr>
+        <tr><td><code>DependencyCycle { cycle }</code></td><td><code>a -&gt; b -&gt; a</code></td><td><code>dependency cycle: a -&gt; b -&gt; a</code></td></tr>
+      </tbody>
+    </table>
+    <p><code>expected</code> is one of <code>"string"</code>, <code>"table"</code>, <code>"array"</code>,
+      <code>"string or table"</code> (a dependency or a task), <code>"string or array"</code>
+      (<code>depends-on</code>), and <code>"array or table"</code> (an environment). A task table with neither
+      <code>cmd</code> nor <code>depends-on</code> is <code>MissingKey</code> at <code>&lt;task&gt;.cmd</code>. When a
+      table has several unknown keys, report the first in sorted order.</p>
+
+    <h3>The command line</h3>
+    <table>
+      <thead><tr><th>Invocation</th><th>stdout</th><th>stderr</th><th>Exit code</th></tr></thead>
+      <tbody>
+        <tr><td><code>manifest-reader pixi.toml</code></td><td><code>summary()</code></td><td></td><td>0</td></tr>
+        <tr><td><code>manifest-reader pixi.toml test</code></td><td><code>task_order("test")</code>, one per line</td><td></td><td>0</td></tr>
+        <tr><td>file cannot be read</td><td></td><td><code>error: cannot read &lt;path&gt;: &lt;io error&gt;</code></td><td>1</td></tr>
+        <tr><td>invalid manifest, unknown task, or cycle</td><td></td><td><code>error: &lt;path&gt;: &lt;ManifestError&gt;</code></td><td>1</td></tr>
+        <tr><td>no arguments or more than two</td><td></td><td><code>usage: manifest-reader &lt;path/to/pixi.toml&gt; [task]</code></td><td>2</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="lesson-section" id="milestones">
+    <h2>Milestones</h2>
+    <p>Work in this order. Each milestone has its own slice of the tests, so you always have a short list of failures
+      to read. The hints are there when you are stuck; try each step for a while before you open them.</p>
+
+    <div class="milestone">
+      <h3>Milestone 1: platforms</h3>
+      <p>Start in <code>src/platform.rs</code>. <code>as_str</code> is an exhaustive <code>match</code>
+        (<a href="../modules/m02-types-structs-enums.html">M02</a>); <code>Display</code> and <code>FromStr</code> are
+        the conversion traits from <a href="../modules/m06-traits-generics.html">M06</a>. Once <code>FromStr</code>
+        exists, <code>"osx-arm64".parse::&lt;Platform&gt;()</code> works anywhere.</p>
+      <ul class="checklist" data-id="c1-m1">
+        <li><code>as_str</code> covers all six variants, with no <code>_</code> arm</li>
+        <li><code>Display</code> reuses <code>as_str</code> instead of repeating the names</li>
+        <li><code>FromStr</code> searches <code>Platform::ALL</code>, so adding a platform later means editing one place</li>
+        <li><code>pixi run grade c1 --test parse platform</code> passes (2 tests)</li>
+      </ul>
+      <details class="reveal"><summary>Hint: FromStr without a second match</summary>
+        <p><code>Platform::ALL.into_iter().find(|p| p.as_str() == s)</code> gives an <code>Option&lt;Platform&gt;</code>.
+          <code>.ok_or_else(|| ParsePlatformError { value: s.to_string() })</code> turns it into the
+          <code>Result</code> that <code>from_str</code> returns. Use <code>ok_or_else</code> rather than
+          <code>ok_or</code> so the <code>String</code> is only built on failure.</p></details>
+      <details class="reveal"><summary>Hint: what goes in Display</summary>
+        <p><code>f.write_str(self.as_str())</code> is the whole body. For <code>ParsePlatformError</code>, use
+          <code>write!(f, "unknown platform `{}`", self.value)</code>; the backticks are part of the message.</p></details>
+    </div>
+
+    <div class="milestone">
+      <h3>Milestone 2: model methods and the error type</h3>
+      <p>Fill in the small methods in <code>src/model.rs</code> (<code>Spec::version</code>, <code>Spec::channel</code>,
+        <code>Display for Spec</code>, <code>Task::command</code>, <code>Task::depends_on</code>) and the three impls in
+        <code>src/error.rs</code>. This is <a href="../modules/m04-option-result.html">M04</a> in practice: a
+        <code>Display</code> impl with one arm per variant, <code>source()</code> for the wrapped error, and
+        <code>From&lt;toml::de::Error&gt;</code> so <code>?</code> can convert.</p>
+      <ul class="checklist" data-id="c1-m2">
+        <li><code>Spec::version</code> uses <code>as_deref</code> instead of cloning</li>
+        <li><code>Task::command</code> covers <code>Command</code> and <code>Execute</code> in one arm with <code>|</code></li>
+        <li>Every <code>ManifestError</code> message matches the README exactly</li>
+        <li><code>source()</code> returns <code>Some</code> only for <code>Toml</code></li>
+        <li><code>pixi run grade c1 --test parse spec_display</code> and <code>pixi run grade c1 --test errors query_errors</code> pass</li>
+      </ul>
+      <details class="reveal"><summary>Hint: returning &amp;str from an Option&lt;String&gt;</summary>
+        <p><code>detailed.version</code> is an <code>Option&lt;String&gt;</code> inside <code>&amp;self</code>.
+          <code>detailed.version.as_deref()</code> borrows it as <code>Option&lt;&amp;str&gt;</code> without copying.
+          <code>.clone()</code> would compile only if the return type were <code>Option&lt;String&gt;</code>.</p></details>
+      <details class="reveal"><summary>Hint: depends_on for a Command</summary>
+        <p>The return type is <code>&amp;[String]</code>. An empty slice literal <code>&amp;[]</code> has a
+          <code>'static</code> lifetime, which is longer than <code>&amp;self</code>, so it fits. For the other two
+          variants, a <code>&amp;Vec&lt;String&gt;</code> coerces to <code>&amp;[String]</code> automatically. Pixi's
+          <code>Task::depends_on</code> is written exactly this way.</p></details>
+      <details class="reveal"><summary>Hint: joining the platforms in UnknownPlatform's message</summary>
+        <p>Collect the names first: <code>let known: Vec&lt;&amp;str&gt; = Platform::ALL.iter().map(|p| p.as_str()).collect();</code>,
+          then <code>known.join(", ")</code>. The same trick joins <code>allowed</code> and <code>cycle</code>
+          (<code>cycle.join(" -&gt; ")</code> works directly on a <code>Vec&lt;String&gt;</code>).</p></details>
+    </div>
+
+    <div class="milestone">
+      <h3>Milestone 3: converting a valid manifest</h3>
+      <p>The biggest milestone. In <code>src/convert.rs</code>, write the small helpers first (<code>wrong_type</code>,
+        <code>check_keys</code>, <code>as_str</code>, <code>as_table</code>, <code>string_list</code>,
+        <code>required</code>, <code>optional_string</code>, <code>optional_table</code>), then the converters from the
+        leaves up: <code>spec_from_value</code>, <code>depends_on_from_value</code>, <code>task_from_value</code>,
+        <code>environment_from_value</code>, <code>feature_from_table</code>, <code>workspace_from_value</code>, and
+        finally <code>manifest_from_table</code>. Leave <code>validate</code> as <code>Ok(())</code> for now. Then
+        <code>parse_manifest</code>, <code>environment_names</code>, and <code>summary</code>.</p>
+      <ul class="checklist" data-id="c1-m3">
+        <li>Every converter takes a <code>path: &amp;str</code> and builds child paths with <code>join</code> and <code>index</code></li>
+        <li>No <code>unwrap</code> or <code>expect</code> anywhere in <code>convert.rs</code>; every failure is a <code>ManifestError</code></li>
+        <li>Helpers return borrowed data (<code>&amp;'a str</code>, <code>&amp;'a Table</code>) and you clone only when a struct needs to own it</li>
+        <li><code>pixi run grade c1 --test parse</code> passes (12 tests)</li>
+      </ul>
+      <details class="reveal"><summary>Hint: the helper pattern</summary>
+        <p>Each type check is one line built from <code>Option</code> combinators:</p>
+        <pre><code class="language-rust">fn as_str&lt;'a&gt;(value: &amp;'a Value, path: &amp;str) -&gt; Result&lt;&amp;'a str, ManifestError&gt; {
+    value.as_str().ok_or_else(|| wrong_type(path, "string", value))
+}</code></pre>
+        <p>The lifetime <code>'a</code> says the returned <code>&amp;str</code> borrows from <code>value</code>, not from
+          <code>path</code>. Without it, elision cannot decide (there are two reference inputs and no
+          <code>self</code>), and you get E0106.</p></details>
+      <details class="reveal"><summary>Hint: optional keys and transpose</summary>
+        <p><code>table.get(key)</code> is <code>Option&lt;&amp;Value&gt;</code>. Mapping it through
+          <code>as_str</code> gives <code>Option&lt;Result&lt;&amp;str, ManifestError&gt;&gt;</code>, but you want
+          <code>Result&lt;Option&lt;String&gt;, ManifestError&gt;</code> so that <code>?</code> works. That flip is
+          exactly what <code>Option::transpose</code> does:</p>
+        <pre><code class="language-rust">table.get(key).map(|v| as_str(v, &amp;join(path, key)).map(str::to_string)).transpose()</code></pre></details>
+      <details class="reveal"><summary>Hint: collecting a table of results</summary>
+        <p><code>dependencies_from_table</code> maps each <code>(name, value)</code> to
+          <code>Ok((name.clone(), spec_from_value(value, &amp;join(path, name))?))</code> inside a closure that returns
+          <code>Result</code>, and then <code>.collect()</code>s into <code>Result&lt;BTreeMap&lt;String, Spec&gt;, _&gt;</code>.
+          <code>collect</code> stops at the first <code>Err</code>, as you saw for <code>Result&lt;Vec&lt;_&gt;, _&gt;</code>
+          in <a href="../modules/m05-collections-iterators.html">M05</a>.</p></details>
+      <details class="reveal"><summary>Hint: telling the three task forms apart</summary>
+        <p>After reading <code>cmd</code> (an <code>Option&lt;String&gt;</code>) and <code>depends-on</code> (an
+          <code>Option&lt;Vec&lt;String&gt;&gt;</code>), match on the pair: <code>(Some(cmd), deps)</code> is
+          <code>Execute</code> with <code>deps.unwrap_or_default()</code>, <code>(None, Some(deps))</code> is
+          <code>Alias</code>, and <code>(None, None)</code> is <code>MissingKey</code> at <code>&lt;path&gt;.cmd</code>.
+          Matching on a tuple makes all four combinations visible, and the compiler checks you covered them.</p></details>
+      <details class="reveal"><summary>Hint: the summary's list helper</summary>
+        <p>A nested function <code>fn list&lt;'a&gt;(items: impl IntoIterator&lt;Item = &amp;'a str&gt;) -&gt; String</code>
+          that collects into a <code>Vec&lt;&amp;str&gt;</code> and returns <code>"(none)"</code> when it is empty
+          keeps the seven lines short. Build the lines as an array of <code>String</code> and <code>join("\n")</code>.
+          <code>environment_names</code> is easiest with a <code>BTreeSet&lt;&amp;str&gt;</code>, which sorts and
+          removes the duplicate <code>default</code> for you.</p></details>
+    </div>
+
+    <div class="milestone">
+      <h3>Milestone 4: every error path</h3>
+      <p>Run the error tests and fix them one at a time. Most will pass already if your helpers are right; the rest
+        are about choosing the right <code>expected</code> text, the right path, and writing <code>validate</code>
+        and <code>check_task_references</code>. Read each failing assertion: it prints the error you returned.</p>
+      <ul class="checklist" data-id="c1-m4">
+        <li>Array items report their index: <code>workspace.channels[1]</code></li>
+        <li>Unknown keys are rejected at every level: top, workspace, spec tables, task tables, features, environments</li>
+        <li><code>validate</code> checks environments before tasks, and default tasks before feature tasks</li>
+        <li>A feature task may depend on its own feature's tasks and on default tasks, but not on another feature's</li>
+        <li><code>pixi run grade c1 --test errors</code> passes (14 tests)</li>
+      </ul>
+      <details class="reveal"><summary>Hint: check_keys in one expression</summary>
+        <p><code>table.keys().find(|key| !allowed.contains(&amp;key.as_str()))</code> returns the first unexpected key
+          (the toml crate's table is a <code>BTreeMap</code>, so this is the first in sorted order). Match on it:
+          <code>Some(key)</code> is the error, <code>None</code> is <code>Ok(())</code>. Note
+          <code>&amp;key.as_str()</code>: <code>contains</code> on a <code>&amp;[&amp;str]</code> wants a
+          <code>&amp;&amp;str</code>.</p></details>
+      <details class="reveal"><summary>Hint: UnknownPlatform from ParsePlatformError</summary>
+        <p><code>text.parse::&lt;Platform&gt;().map_err(|err| ManifestError::UnknownPlatform { path: item_path, value: err.value })?</code>.
+          <code>map_err</code> converts the low-level error into one that knows where it happened. That is the general
+          pattern whenever a lower layer cannot know the context.</p></details>
+      <details class="reveal"><summary>Hint: closures for "does this task exist?"</summary>
+        <p><code>check_task_references</code> takes <code>exists: impl Fn(&amp;str) -&gt; bool</code>, so the same
+          function checks both default and feature tasks. For default tasks pass
+          <code>|name| manifest.tasks.contains_key(name)</code>; for a feature, a closure that also checks
+          <code>feature.tasks</code>. The closures borrow <code>manifest</code> and <code>feature</code>
+          (<a href="../modules/m09-closures-iterators.html">M09</a>).</p></details>
+    </div>
+
+    <div class="milestone">
+      <h3>Milestone 5: environment dependencies</h3>
+      <p>In <code>src/resolve.rs</code>, write <code>environment_dependencies</code>. It returns references, so you
+        never clone a <code>Spec</code>; a test checks that with <code>std::ptr::eq</code>.</p>
+      <ul class="checklist" data-id="c1-m5">
+        <li><code>default</code> works without an <code>[environments]</code> entry, and an explicit <code>default</code> wins</li>
+        <li>Features are applied in the order listed; the last one to name a package wins</li>
+        <li>No <code>.clone()</code> of a <code>Spec</code> or a <code>String</code> in this function</li>
+        <li><code>pixi run grade c1 --test environments</code> passes (7 tests)</li>
+      </ul>
+      <details class="reveal"><summary>Hint: choosing the feature list</summary>
+        <p>A <code>match</code> with a guard reads well:</p>
+        <pre><code class="language-rust">let features: &amp;[String] = match self.environments.get(env) {
+    Some(environment) =&gt; &amp;environment.features,
+    None if env == "default" =&gt; &amp;[],
+    None =&gt; return Err(ManifestError::NoSuchEnvironment { name: env.to_string() }),
+};</code></pre></details>
+      <details class="reveal"><summary>Hint: building the map</summary>
+        <p><code>self.dependencies.iter().map(|(name, spec)| (name.as_str(), spec)).collect()</code> gives the starting
+          <code>BTreeMap&lt;&amp;str, &amp;Spec&gt;</code>. For each feature, <code>deps.extend(...)</code> with the same
+          kind of iterator overwrites existing keys, which is the "later wins" rule.</p></details>
+    </div>
+
+    <div class="milestone">
+      <h3>Milestone 6: task order and cycles</h3>
+      <p>Write <code>task_order</code> and its helper <code>visit_task</code>: a depth-first, post-order walk
+        (dependencies first, then the task). Keep two lists: <code>order</code>, the tasks already scheduled, and
+        <code>in_progress</code>, the chain you are currently inside. Meeting a task that is already in
+        <code>in_progress</code> means you went round a loop.</p>
+      <ul class="checklist" data-id="c1-m6">
+        <li>A diamond (<code>top</code> needs <code>left</code> and <code>right</code>, both need <code>base</code>) runs <code>base</code> once</li>
+        <li><code>depends-on</code> order decides ties, not alphabetical order</li>
+        <li>A cycle error starts and ends with the repeated task, and a self-dependency is <code>[x, x]</code></li>
+        <li><code>pixi run grade c1 --test tasks</code> passes (8 tests)</li>
+      </ul>
+      <details class="reveal"><summary>Hint: the visit_task signature</summary>
+        <pre><code class="language-rust">fn visit_task&lt;'a&gt;(
+    &amp;'a self,
+    name: &amp;str,
+    in_progress: &amp;mut Vec&lt;&amp;'a str&gt;,
+    order: &amp;mut Vec&lt;&amp;'a str&gt;,
+) -&gt; Result&lt;(), ManifestError&gt;</code></pre>
+        <p><code>name</code> has its own, possibly short, lifetime: the very first call passes the caller's argument.
+          Everything pushed onto the lists must live as long as <code>'a</code>, the borrow of <code>self</code>.</p></details>
+      <details class="reveal"><summary>Hint: lifetime may not live long enough</summary>
+        <p>If you push <code>name</code> onto <code>order</code>, the compiler refuses: <code>name</code> is not known to
+          live for <code>'a</code>. Look the task up with <code>self.tasks.get_key_value(name)</code> instead. It returns
+          <code>Option&lt;(&amp;'a String, &amp;'a Task)&gt;</code>; push the key, which borrows from <code>self</code>.
+          The test <code>the_order_borrows_from_the_manifest_not_the_argument</code> passes a <code>String</code> that
+          is dropped before the result is used, which only compiles because of this.</p></details>
+      <details class="reveal"><summary>Hint: building the cycle</summary>
+        <p><code>if let Some(start) = in_progress.iter().position(|n| *n == name)</code> finds where the loop begins.
+          The cycle is <code>in_progress[start..]</code> (as owned <code>String</code>s) followed by <code>name</code>
+          again. Check <code>order</code> before <code>in_progress</code>: a finished task is never part of a
+          cycle.</p></details>
+    </div>
+
+    <div class="milestone">
+      <h3>Milestone 7: the command line</h3>
+      <p><code>main</code> is given: it matches on the argument slice, calls <code>run</code>, and turns its
+        <code>Result&lt;String, String&gt;</code> into output and an <code>ExitCode</code>. Write <code>run</code>.
+        Then run the whole suite.</p>
+      <ul class="checklist" data-id="c1-m7">
+        <li>Errors use <code>ManifestError</code>'s <code>Display</code>, never <code>{:?}</code></li>
+        <li>Nothing is printed to stdout when the run fails</li>
+        <li><code>pixi run grade c1</code> passes all 46 tests</li>
+        <li><code>pixi run cargo clippy --all-targets -- -D warnings</code> and <code>pixi run cargo fmt --check</code> are clean in your work copy, with the starter's <code>#![allow(...)]</code> lines deleted</li>
+      </ul>
+      <details class="reveal"><summary>Hint: why not fn main() -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt;?</summary>
+        <p>Returning an error from <code>main</code> prints it with <code>Debug</code>, as
+          <code>Error: UnknownPlatform { path: "...", ... }</code>, and exits with code 1. That is fine for a quick
+          tool, but the spec wants a readable <code>error: </code> line and a separate code 2 for bad usage, so
+          <code>main</code> returns <code>ExitCode</code> and does the printing itself.</p></details>
+      <details class="reveal"><summary>Hint: three map_errs</summary>
+        <p><code>std::fs::read_to_string(path).map_err(|err| format!("cannot read {path}: {err}"))?</code>, then the
+          same shape for <code>parse_manifest</code> and <code>task_order</code> with
+          <code>format!("{path}: {err}")</code>. Converting errors into <code>String</code> is acceptable at the very top
+          of a binary, where the only thing left to do with an error is show it.</p></details>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="grading">
+    <h2>How grading works</h2>
+    <p><code>pixi run grade c1</code> copies your crate (or the starter, if you have not run <code>start</code> yet) into
+      <code>target/practicum/c1_manifest_reader-work/</code>, adds the grading tests as its <code>tests/</code> directory,
+      and runs <code>cargo test</code> there with its own <code>CARGO_TARGET_DIR</code>. Your <code>work/</code> copy
+      never contains the tests, so you cannot change them by accident, but you should read them in
+      <code>projects/c1_manifest_reader/tests/</code>: they are Cargo <em>integration tests</em>
+      (<a href="../modules/m11-testing.html">M11</a>), which means each file is a separate crate that can only use your
+      public API.</p>
+    <table>
+      <thead><tr><th>File</th><th>Tests</th><th>What it checks</th></tr></thead>
+      <tbody>
+        <tr><td><code>parse.rs</code></td><td>12</td><td>Platforms; workspace, dependencies, tasks, features, environments of valid manifests; <code>Spec</code> and <code>Task</code> methods; <code>environment_names</code>; <code>summary</code></td></tr>
+        <tr><td><code>errors.rs</code></td><td>14</td><td>Every <code>ManifestError</code> variant from parsing, its key path, and its <code>Display</code>; <code>source</code> and <code>From</code></td></tr>
+        <tr><td><code>environments.rs</code></td><td>7</td><td>Default and explicit environments, feature order, borrowing, unknown environments and features</td></tr>
+        <tr><td><code>tasks.rs</code></td><td>8</td><td>Chains, aliases, diamonds, tie order, borrowing, unknown tasks, cycles</td></tr>
+        <tr><td><code>cli.rs</code></td><td>5</td><td>stdout, stderr, and exit codes of <code>manifest-reader</code></td></tr>
+      </tbody>
+    </table>
+    <p>The fixtures are ordinary TOML files in <code>tests/fixtures/</code>, loaded at compile time with
+      <code>include_str!("fixtures/full.toml")</code>; the path is relative to the test file. The CLI tests run your
+      binary through <code>env!("CARGO_BIN_EXE_manifest-reader")</code>, a path Cargo provides to integration tests
+      for every <code>[[bin]]</code> in the package. A typical test reads like this:</p>
+    <pre><code class="language-rust">#[test]
+fn an_unknown_platform_names_its_position() {
+    let err = error_for(include_str!("fixtures/unknown-platform.toml"));
+    assert!(
+        matches!(&amp;err, ManifestError::UnknownPlatform { path, value }
+            if path == "workspace.platforms[2]" &amp;&amp; value == "linux-arm64"),
+        "expected UnknownPlatform at workspace.platforms[2] with value linux-arm64, got {err:?}"
+    );
+    // ... and the exact Display text ...
+}</code></pre>
+    <aside class="callout tip"><p>A <code>todo!()</code> panics with <code>not yet implemented: &lt;message&gt;</code>,
+      and the starter's messages name the function (<code>todo!("Spec::version")</code>). When a test fails with one of
+      those, the panic tells you which function to write next.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="review">
+    <h2>Self-review checklist</h2>
+    <p>Passing the tests means the behavior is right. Before you call the capstone done, review the code the way a Pixi
+      maintainer would review a pull request.</p>
+    <ul class="checklist" data-id="c1-review">
+      <li>There is no <code>unwrap</code>, <code>expect</code>, <code>panic!</code>, or indexing that can panic in library code; every failure is a <code>ManifestError</code></li>
+      <li>No <code>todo!()</code> is left, and the starter's <code>#![allow(...)]</code> lines are gone</li>
+      <li>Values are cloned only where a struct must own them; helpers return borrowed <code>&amp;str</code> and <code>&amp;Table</code></li>
+      <li>Every <code>match</code> on <code>toml::Value</code> ends with an arm that reports <code>WrongType</code>, never a silent default</li>
+      <li>Each error message names the key path a user would search for in their file</li>
+      <li>You can explain, without looking, why <code>visit_task</code> pushes the key from <code>get_key_value</code> and not <code>name</code></li>
+      <li>You can explain what <code>Option::transpose</code> does and why <code>optional_string</code> needs it</li>
+      <li><code>pixi run cargo clippy --all-targets -- -D warnings</code> and <code>pixi run cargo fmt --check</code> are clean</li>
+      <li>Public items have <code>///</code> doc comments, and <code>pixi run cargo doc --open</code> renders a page you would be happy to read</li>
+      <li>You ran the binary on the real <code>pixi.toml</code> of this repository and understood each error it reported (the real file uses keys this capstone does not support)</li>
+    </ul>
+  </section>
+
+  <section class="lesson-section" id="stretch">
+    <h2>Stretch goals</h2>
+    <p>None of these are graded. Add your own tests for each one in a new file in your work copy, such as
+      <code>tests/stretch.rs</code>, and run them with <code>pixi run cargo test</code>. Pick a file name the grading
+      tests do not use: when grading, their files are copied into your <code>tests/</code> directory, and your extra
+      files run too. Some stretch goals change graded behavior on purpose (keeping the user's order changes
+      <code>summary</code>), so try those on a branch or a copy.</p>
+    <ul>
+      <li><strong>No default feature.</strong> Support Pixi's <code>no-default-feature = true</code> in the table form of
+        an environment, which leaves out the default <code>[dependencies]</code>.</li>
+      <li><strong>Duplicate features.</strong> Reject an environment that lists the same feature twice, as Pixi does
+        ("Since the order of the features matters, a duplicate feature is ambiguous").</li>
+      <li><strong>Commands as arrays.</strong> Accept <code>cmd = ["cargo", "test"]</code> and store it as a
+        <code>Vec&lt;String&gt;</code>; decide how <code>command()</code> should behave.</li>
+      <li><strong>Environment tasks.</strong> Add <code>task_order_in(&amp;self, env: &amp;str, task: &amp;str)</code> that
+        also sees the tasks of the environment's features, with feature tasks able to override default tasks.</li>
+      <li><strong>Every cycle at once.</strong> Add <code>Manifest::check_cycles</code> that walks every task and reports
+        all cycles, sorted, not just the first.</li>
+      <li><strong>Keep the user's order.</strong> Swap <code>BTreeMap</code> for <code>IndexMap</code> (enable the
+        <code>toml</code> crate's <code>preserve_order</code> feature too) and make <code>summary</code> list tasks in the
+        order they were written, as Pixi does. Which tests change, and why?</li>
+      <li><strong>Did you mean?</strong> When a platform, feature, or task name is unknown, suggest the closest known
+        name by edit distance (<code>linux-arm64</code> to <code>linux-aarch64</code>).</li>
+      <li><strong>Preview Level 2.</strong> Rewrite <code>ManifestError</code> with <code>thiserror</code>'s
+        <code>#[derive(Error)]</code> and <code>#[error("...")]</code> attributes, and confirm that the
+        <code>errors.rs</code> tests still pass unchanged.</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

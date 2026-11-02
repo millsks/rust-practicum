@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glossary · Rust Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-rust.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+<style>
+  .gl-tools { position: sticky; top: calc(var(--header-h, 56px) + 8px); z-index: 2; background: var(--bg); padding: 0.6em 0; border-bottom: 1px solid var(--border); margin-bottom: 1em; }
+  .gl-tools input { width: 100%; font: inherit; padding: 0.55em 0.8em; border: 1px solid var(--border-strong, var(--border)); border-radius: var(--radius, 8px); background: var(--bg-elev, var(--bg)); color: var(--fg); }
+  .gl-letters { display: flex; flex-wrap: wrap; gap: 4px 10px; font-weight: 600; margin: 0.5em 0 0; }
+  .gl-letters a { text-decoration: none; }
+  .gl-list { margin: 0 0 1em; }
+  .gl-entry { padding: 0.55em 0; border-bottom: 1px solid var(--border); }
+  .gl-entry dt { font-weight: 650; scroll-margin-top: calc(var(--header-h, 56px) + 140px); }
+  .gl-entry dd { margin: 0.2em 0 0; color: var(--fg); }
+  .gl-module { font-size: 0.85em; white-space: nowrap; }
+  .gl-entry[hidden], .gl-letter[hidden], .gl-list[hidden] { display: none; }
+</style>
+</head>
+<body data-root="../" data-page="ref-glossary">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Reference · Vocabulary</p>
+    <h1>Glossary</h1>
+    <p class="lede">90 Rust and Pixi-codebase terms used in the course, from ownership and borrowing to
+      MatchSpec and insta snapshots. Each entry has a short definition and a link to the module that teaches it; terms
+      taught in later levels link to the roadmap.</p>
+    <div class="lesson-meta"><span>⏱ Look things up as you go</span><span>90 terms</span></div>
+    <ul class="objectives">
+      <li>Look up any term used in the course and jump to where it is taught</li>
+      <li>Filter by keyword</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="terms">
+    <h2>Terms A-Z</h2>
+    <div class="gl-tools" role="search">
+      <label class="visually-hidden" for="gl-filter">Filter the glossary</label>
+      <input id="gl-filter" type="search" placeholder="Filter terms and definitions, e.g. borrow, trait, lock" autocomplete="off">
+      <nav class="gl-letters" aria-label="Jump to letter"><a href="#letter-a">A</a> <a href="#letter-b">B</a> <a href="#letter-c">C</a> <a href="#letter-d">D</a> <a href="#letter-e">E</a> <a href="#letter-f">F</a> <a href="#letter-g">G</a> <a href="#letter-h">H</a> <a href="#letter-i">I</a> <a href="#letter-l">L</a> <a href="#letter-m">M</a> <a href="#letter-n">N</a> <a href="#letter-o">O</a> <a href="#letter-p">P</a> <a href="#letter-q">Q</a> <a href="#letter-r">R</a> <a href="#letter-s">S</a> <a href="#letter-t">T</a> <a href="#letter-u">U</a> <a href="#letter-v">V</a> <a href="#letter-w">W</a></nav>
+    </div>
+    <p id="gl-empty" class="status" hidden>No terms match. Try a shorter word.</p>
+    <h3 id="letter-a" class="gl-letter">A</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="arc arc&lt;t&gt; (atomically reference-counted) gives shared ownership of a heap value across threads; cloning it bumps a counter instead of copying the value. pixi passes arc-wrapped state between async tasks everywhere.">
+        <dt id="term-arc">Arc</dt>
+        <dd><code>Arc&lt;T&gt;</code> (atomically reference-counted) gives shared ownership of a heap value across threads; cloning it bumps a counter instead of copying the value. Pixi passes <code>Arc</code>-wrapped state between async tasks everywhere. <a class="gl-module" href="../modules/m08-smart-pointers.html">M08 Smart Pointers &amp; Shared State</a></dd>
+      </div>
+      <div class="gl-entry" data-search="associated type a type named inside a trait that each implementation fills in, such as iterator::item. it lets a trait talk about related types without a generic parameter.">
+        <dt id="term-associated-type">Associated type</dt>
+        <dd>A type named inside a trait that each implementation fills in, such as <code>Iterator::Item</code>. It lets a trait talk about related types without a generic parameter. <a class="gl-module" href="../modules/m06-traits-generics.html">M06 Traits &amp; Generics</a></dd>
+      </div>
+      <div class="gl-entry" data-search="async / await async fn returns a future, a value that does nothing until it is polled; .await waits for one. pixi runs its futures on the tokio runtime.">
+        <dt id="term-async-await">async / await</dt>
+        <dd><code>async fn</code> returns a future, a value that does nothing until it is polled; <code>.await</code> waits for one. Pixi runs its futures on the tokio runtime. <a class="gl-module" href="roadmap.html#stage-5">Roadmap: Stage 5 (planned)</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-b" class="gl-letter">B</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="blanket implementation an impl&lt;t: bound&gt; trait for t that implements a trait for every type meeting a bound. pixi&#x27;s fromtomlstr is implemented this way for every toml_span::deserialize type.">
+        <dt id="term-blanket-implementation">Blanket implementation</dt>
+        <dd>An <code>impl&lt;T: Bound&gt; Trait for T</code> that implements a trait for every type meeting a bound. Pixi's <code>FromTomlStr</code> is implemented this way for every <code>toml_span::Deserialize</code> type. <a class="gl-module" href="../modules/m06-traits-generics.html">M06 Traits &amp; Generics</a></dd>
+      </div>
+      <div class="gl-entry" data-search="borrow taking a reference (&amp;x or &amp;mut x) to a value without taking ownership. the owner keeps the value and gets it back when the borrow ends.">
+        <dt id="term-borrow">Borrow</dt>
+        <dd>Taking a reference (<code>&amp;x</code> or <code>&amp;mut x</code>) to a value without taking ownership. The owner keeps the value and gets it back when the borrow ends. <a class="gl-module" href="../modules/m03-ownership-borrowing.html">M03 Ownership &amp; Borrowing</a></dd>
+      </div>
+      <div class="gl-entry" data-search="borrow checker the part of the compiler that enforces the borrowing rules: any number of shared references or exactly one mutable reference, and no reference outliving its value.">
+        <dt id="term-borrow-checker">Borrow checker</dt>
+        <dd>The part of the compiler that enforces the borrowing rules: any number of shared references or exactly one mutable reference, and no reference outliving its value. <a class="gl-module" href="../modules/m03-ownership-borrowing.html">M03 Ownership &amp; Borrowing</a></dd>
+      </div>
+      <div class="gl-entry" data-search="box box&lt;t&gt; owns a single value on the heap. it is used for recursive types, large values, and trait objects (box&lt;dyn trait&gt;).">
+        <dt id="term-box">Box</dt>
+        <dd><code>Box&lt;T&gt;</code> owns a single value on the heap. It is used for recursive types, large values, and trait objects (<code>Box&lt;dyn Trait&gt;</code>). <a class="gl-module" href="../modules/m08-smart-pointers.html">M08 Smart Pointers &amp; Shared State</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-c" class="gl-letter">C</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="cargo rust&#x27;s build tool and package manager: it compiles crates, fetches dependencies from crates.io, and runs tests. in this course it comes from pixi add rust and runs as pixi run cargo ....">
+        <dt id="term-cargo">Cargo</dt>
+        <dd>Rust's build tool and package manager: it compiles crates, fetches dependencies from crates.io, and runs tests. In this course it comes from <code>pixi add rust</code> and runs as <code>pixi run cargo ...</code>. <a class="gl-module" href="../modules/m01-cargo-crates-modules.html">M01 Cargo, Crates &amp; Modules</a></dd>
+      </div>
+      <div class="gl-entry" data-search="cargo feature a named, optional part of a crate declared in [features], turned on by dependents and tested with #[cfg(feature = &quot;...&quot;)]. pixi uses default-features = false on every rattler crate to choose features explicitly.">
+        <dt id="term-cargo-feature">Cargo feature</dt>
+        <dd>A named, optional part of a crate declared in <code>[features]</code>, turned on by dependents and tested with <code>#[cfg(feature = "...")]</code>. Pixi uses <code>default-features = false</code> on every rattler crate to choose features explicitly. <a class="gl-module" href="../modules/m10-crate-design.html">M10 Visibility, Features &amp; Crate Design</a></dd>
+      </div>
+      <div class="gl-entry" data-search="cargo.lock the file that records the exact version of every dependency in a build, like pixi.lock. commit it for binaries and workspaces.">
+        <dt id="term-cargo-lock">Cargo.lock</dt>
+        <dd>The file that records the exact version of every dependency in a build, like <code>pixi.lock</code>. Commit it for binaries and workspaces. <a class="gl-module" href="../modules/m01-cargo-crates-modules.html">M01 Cargo, Crates &amp; Modules</a></dd>
+      </div>
+      <div class="gl-entry" data-search="cfg attribute #[cfg(...)] compiles an item only when a condition holds, such as test, a feature, or target_os = &quot;windows&quot;. code that is configured out is not compiled at all.">
+        <dt id="term-cfg-attribute">cfg attribute</dt>
+        <dd><code>#[cfg(...)]</code> compiles an item only when a condition holds, such as <code>test</code>, a feature, or <code>target_os = "windows"</code>. Code that is configured out is not compiled at all. <a class="gl-module" href="../modules/m10-crate-design.html">M10 Visibility, Features &amp; Crate Design</a></dd>
+      </div>
+      <div class="gl-entry" data-search="clippy rust&#x27;s official linter, run with pixi run cargo clippy. pixi treats every warning as an error (-d warnings) and configures it in clippy.toml.">
+        <dt id="term-clippy">Clippy</dt>
+        <dd>Rust's official linter, run with <code>pixi run cargo clippy</code>. Pixi treats every warning as an error (<code>-D warnings</code>) and configures it in <code>clippy.toml</code>. <a class="gl-module" href="../modules/m11-testing.html">M11 Testing Like Pixi Does</a></dd>
+      </div>
+      <div class="gl-entry" data-search="clone the trait for making an explicit, possibly expensive, copy of a value with .clone(). cloning is how you keep using a value after giving a copy away.">
+        <dt id="term-clone">Clone</dt>
+        <dd>The trait for making an explicit, possibly expensive, copy of a value with <code>.clone()</code>. Cloning is how you keep using a value after giving a copy away. <a class="gl-module" href="../modules/m03-ownership-borrowing.html">M03 Ownership &amp; Borrowing</a></dd>
+      </div>
+      <div class="gl-entry" data-search="closure an anonymous function that can capture variables from its surroundings, written |x| x + 1. how it captures decides whether it implements fn, fnmut, or fnonce.">
+        <dt id="term-closure">Closure</dt>
+        <dd>An anonymous function that can capture variables from its surroundings, written <code>|x| x + 1</code>. How it captures decides whether it implements <code>Fn</code>, <code>FnMut</code>, or <code>FnOnce</code>. <a class="gl-module" href="../modules/m09-closures-iterators.html">M09 Closures &amp; Iterator Chains</a></dd>
+      </div>
+      <div class="gl-entry" data-search="collect the iterator consumer that builds a collection from an iterator. the target type (vec, hashmap, string, even result&lt;vec&lt;_&gt;, e&gt;) comes from the annotation.">
+        <dt id="term-collect">collect</dt>
+        <dd>The iterator consumer that builds a collection from an iterator. The target type (<code>Vec</code>, <code>HashMap</code>, <code>String</code>, even <code>Result&lt;Vec&lt;_&gt;, E&gt;</code>) comes from the annotation. <a class="gl-module" href="../modules/m05-collections-iterators.html">M05 Collections &amp; Iterators</a></dd>
+      </div>
+      <div class="gl-entry" data-search="command dispatcher pixi&#x27;s commanddispatcher (crate pixi_command_dispatcher): a handle for running a graph of interdependent operations, such as solves, source checkouts, and builds, concurrently without repeating work.">
+        <dt id="term-command-dispatcher">Command dispatcher</dt>
+        <dd>Pixi's <code>CommandDispatcher</code> (crate <code>pixi_command_dispatcher</code>): a handle for running a graph of interdependent operations, such as solves, source checkouts, and builds, concurrently without repeating work. <a class="gl-module" href="pixi-codebase-map.html">Pixi Codebase Map</a></dd>
+      </div>
+      <div class="gl-entry" data-search="compute engine pixi&#x27;s pixi_compute_engine crate: a generic engine where each unit of work is a key; it deduplicates concurrent requests, caches results, and detects cycles.">
+        <dt id="term-compute-engine">Compute engine</dt>
+        <dd>Pixi's <code>pixi_compute_engine</code> crate: a generic engine where each unit of work is a <code>Key</code>; it deduplicates concurrent requests, caches results, and detects cycles. <a class="gl-module" href="pixi-codebase-map.html">Pixi Codebase Map</a></dd>
+      </div>
+      <div class="gl-entry" data-search="copy a marker trait for types whose values are duplicated by a plain bit copy, such as integers, bool, and char. assigning a copy value copies it instead of moving it.">
+        <dt id="term-copy">Copy</dt>
+        <dd>A marker trait for types whose values are duplicated by a plain bit copy, such as integers, <code>bool</code>, and <code>char</code>. Assigning a <code>Copy</code> value copies it instead of moving it. <a class="gl-module" href="../modules/m03-ownership-borrowing.html">M03 Ownership &amp; Borrowing</a></dd>
+      </div>
+      <div class="gl-entry" data-search="crate the unit of compilation in rust, built from one root file and its modules: a library crate (src/lib.rs) or a binary crate with main (src/main.rs). a package contains one or more crates.">
+        <dt id="term-crate">Crate</dt>
+        <dd>The unit of compilation in Rust, built from one root file and its modules: a library crate (<code>src/lib.rs</code>) or a binary crate with <code>main</code> (<code>src/main.rs</code>). A package contains one or more crates. <a class="gl-module" href="../modules/m01-cargo-crates-modules.html">M01 Cargo, Crates &amp; Modules</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-d" class="gl-letter">D</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="debug the formatting trait used by {:?}, meant for developers. you almost always derive it.">
+        <dt id="term-debug">Debug</dt>
+        <dd>The formatting trait used by <code>{:?}</code>, meant for developers. You almost always derive it. <a class="gl-module" href="../modules/m06-traits-generics.html">M06 Traits &amp; Generics</a></dd>
+      </div>
+      <div class="gl-entry" data-search="derive #[derive(...)] asks the compiler to generate trait implementations, such as debug, clone, and partialeq, from a type&#x27;s fields. it is rust&#x27;s answer to @dataclass.">
+        <dt id="term-derive">Derive</dt>
+        <dd><code>#[derive(...)]</code> asks the compiler to generate trait implementations, such as <code>Debug</code>, <code>Clone</code>, and <code>PartialEq</code>, from a type's fields. It is Rust's answer to <code>@dataclass</code>. <a class="gl-module" href="../modules/m02-types-structs-enums.html">M02 Types, Structs &amp; Enums</a></dd>
+      </div>
+      <div class="gl-entry" data-search="display the formatting trait used by {} and .to_string(), meant for users. you implement it by hand.">
+        <dt id="term-display">Display</dt>
+        <dd>The formatting trait used by <code>{}</code> and <code>.to_string()</code>, meant for users. You implement it by hand. <a class="gl-module" href="../modules/m06-traits-generics.html">M06 Traits &amp; Generics</a></dd>
+      </div>
+      <div class="gl-entry" data-search="doc comment a comment that becomes documentation: /// documents the next item and //! documents the enclosing module or crate. cargo doc renders them.">
+        <dt id="term-doc-comment">Doc comment</dt>
+        <dd>A comment that becomes documentation: <code>///</code> documents the next item and <code>//!</code> documents the enclosing module or crate. <code>cargo doc</code> renders them. <a class="gl-module" href="../modules/m10-crate-design.html">M10 Visibility, Features &amp; Crate Design</a></dd>
+      </div>
+      <div class="gl-entry" data-search="drop the trait whose drop method runs when a value goes out of scope. it is how files close and locks release without a with block.">
+        <dt id="term-drop">Drop</dt>
+        <dd>The trait whose <code>drop</code> method runs when a value goes out of scope. It is how files close and locks release without a <code>with</code> block. <a class="gl-module" href="../modules/m03-ownership-borrowing.html">M03 Ownership &amp; Borrowing</a></dd>
+      </div>
+      <div class="gl-entry" data-search="dyn trait a trait object type: a value of some type that implements the trait, chosen at runtime and called through a vtable. it must sit behind a pointer such as &amp;dyn trait or box&lt;dyn trait&gt;.">
+        <dt id="term-dyn-trait">dyn Trait</dt>
+        <dd>A trait object type: a value of some type that implements the trait, chosen at runtime and called through a vtable. It must sit behind a pointer such as <code>&amp;dyn Trait</code> or <code>Box&lt;dyn Trait&gt;</code>. <a class="gl-module" href="../modules/m06-traits-generics.html">M06 Traits &amp; Generics</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-e" class="gl-letter">E</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="edition a set of language changes a crate opts into in cargo.toml (edition = &quot;2024&quot;). crates of different editions work together; the course and pixi use edition 2024.">
+        <dt id="term-edition">Edition</dt>
+        <dd>A set of language changes a crate opts into in <code>Cargo.toml</code> (<code>edition = "2024"</code>). Crates of different editions work together; the course and Pixi use edition 2024. <a class="gl-module" href="../modules/m01-cargo-crates-modules.html">M01 Cargo, Crates &amp; Modules</a></dd>
+      </div>
+      <div class="gl-entry" data-search="enum a type whose value is one of several variants, each of which can carry its own data. combined with match, it replaces class hierarchies and tagged unions.">
+        <dt id="term-enum">Enum</dt>
+        <dd>A type whose value is one of several variants, each of which can carry its own data. Combined with <code>match</code>, it replaces class hierarchies and tagged unions. <a class="gl-module" href="../modules/m02-types-structs-enums.html">M02 Types, Structs &amp; Enums</a></dd>
+      </div>
+      <div class="gl-entry" data-search="error code every compiler error has a code such as e0382 (use of moved value) or e0502 (conflicting borrows). rustc --explain e0382 prints a full explanation.">
+        <dt id="term-error-code">Error code</dt>
+        <dd>Every compiler error has a code such as <code>E0382</code> (use of moved value) or <code>E0502</code> (conflicting borrows). <code>rustc --explain E0382</code> prints a full explanation. <a class="gl-module" href="../modules/m00-orientation.html">M00 How This Practicum Works</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-f" class="gl-letter">F</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="fn, fnmut, fnonce the three closure traits: fn can be called many times through a shared reference, fnmut needs mutable access, and fnonce may be called only once because it consumes what it captured.">
+        <dt id="term-fn-fnmut-fnonce">Fn, FnMut, FnOnce</dt>
+        <dd>The three closure traits: <code>Fn</code> can be called many times through a shared reference, <code>FnMut</code> needs mutable access, and <code>FnOnce</code> may be called only once because it consumes what it captured. <a class="gl-module" href="../modules/m09-closures-iterators.html">M09 Closures &amp; Iterator Chains</a></dd>
+      </div>
+      <div class="gl-entry" data-search="from / into conversion traits: implementing from&lt;a&gt; for b gives b::from(a) and a.into(). the ? operator uses from to convert error types.">
+        <dt id="term-from-into">From / Into</dt>
+        <dd>Conversion traits: implementing <code>From&lt;A&gt; for B</code> gives <code>B::from(a)</code> and <code>a.into()</code>. The <code>?</code> operator uses <code>From</code> to convert error types. <a class="gl-module" href="../modules/m06-traits-generics.html">M06 Traits &amp; Generics</a></dd>
+      </div>
+      <div class="gl-entry" data-search="frozen snapshot the single pixi commit, 451aa959, that every course permalink and quoted excerpt points at, so line numbers never drift.">
+        <dt id="term-frozen-snapshot">Frozen snapshot</dt>
+        <dd>The single Pixi commit, <code>451aa959</code>, that every course permalink and quoted excerpt points at, so line numbers never drift. <a class="gl-module" href="../modules/m00-orientation.html">M00 How This Practicum Works</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-g" class="gl-letter">G</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="generic code with type parameters, such as fn largest&lt;t: partialord&gt;(items: &amp;[t]), checked once and compiled for each concrete type used.">
+        <dt id="term-generic">Generic</dt>
+        <dd>Code with type parameters, such as <code>fn largest&lt;T: PartialOrd&gt;(items: &amp;[T])</code>, checked once and compiled for each concrete type used. <a class="gl-module" href="../modules/m06-traits-generics.html">M06 Traits &amp; Generics</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-h" class="gl-letter">H</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="hashmap a hash table from keys to values. its iteration order is unspecified and changes between runs, so sort first or use btreemap, which keeps keys sorted.">
+        <dt id="term-hashmap">HashMap</dt>
+        <dd>A hash table from keys to values. Its iteration order is unspecified and changes between runs, so sort first or use <code>BTreeMap</code>, which keeps keys sorted. <a class="gl-module" href="../modules/m05-collections-iterators.html">M05 Collections &amp; Iterators</a></dd>
+      </div>
+      <div class="gl-entry" data-search="heap memory for values whose size is not known at compile time or that must outlive a function call, such as the buffer of a string or vec. it is freed when the owner is dropped.">
+        <dt id="term-heap">Heap</dt>
+        <dd>Memory for values whose size is not known at compile time or that must outlive a function call, such as the buffer of a <code>String</code> or <code>Vec</code>. It is freed when the owner is dropped. <a class="gl-module" href="../modules/m03-ownership-borrowing.html">M03 Ownership &amp; Borrowing</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-i" class="gl-letter">I</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="if let matches one pattern and runs a block only if it fits: if let some(x) = maybe { ... }. edition 2024 also allows let chains such as if let some(x) = a &amp;&amp; x &gt; 3.">
+        <dt id="term-if-let">if let</dt>
+        <dd>Matches one pattern and runs a block only if it fits: <code>if let Some(x) = maybe { ... }</code>. Edition 2024 also allows <code>let</code> chains such as <code>if let Some(x) = a &amp;&amp; x &gt; 3</code>. <a class="gl-module" href="../modules/m04-option-result.html">M04 Option, Result &amp; ?</a></dd>
+      </div>
+      <div class="gl-entry" data-search="impl block a block that adds methods and associated functions to a type (impl workspace { ... }) or implements a trait for it (impl display for workspace { ... }).">
+        <dt id="term-impl-block">impl block</dt>
+        <dd>A block that adds methods and associated functions to a type (<code>impl Workspace { ... }</code>) or implements a trait for it (<code>impl Display for Workspace { ... }</code>). <a class="gl-module" href="../modules/m02-types-structs-enums.html">M02 Types, Structs &amp; Enums</a></dd>
+      </div>
+      <div class="gl-entry" data-search="impl trait in argument position, shorthand for a generic parameter with a bound; in return position, &quot;some type that implements this trait&quot; without naming it. dispatch is static either way.">
+        <dt id="term-impl-trait">impl Trait</dt>
+        <dd>In argument position, shorthand for a generic parameter with a bound; in return position, "some type that implements this trait" without naming it. Dispatch is static either way. <a class="gl-module" href="../modules/m06-traits-generics.html">M06 Traits &amp; Generics</a></dd>
+      </div>
+      <div class="gl-entry" data-search="indexmap a map from the indexmap crate that keeps insertion order, like a python dict. pixi uses it so manifests keep the order you wrote.">
+        <dt id="term-indexmap">IndexMap</dt>
+        <dd>A map from the <code>indexmap</code> crate that keeps insertion order, like a Python dict. Pixi uses it so manifests keep the order you wrote. <a class="gl-module" href="../modules/m05-collections-iterators.html">M05 Collections &amp; Iterators</a></dd>
+      </div>
+      <div class="gl-entry" data-search="insta snapshot a test that records output to a .snap file with insta::assert_snapshot! and fails when it changes. you accept or reject changes with cargo insta review; pixi has thousands.">
+        <dt id="term-insta-snapshot">insta snapshot</dt>
+        <dd>A test that records output to a <code>.snap</code> file with <code>insta::assert_snapshot!</code> and fails when it changes. You accept or reject changes with <code>cargo insta review</code>; Pixi has thousands. <a class="gl-module" href="../modules/m11-testing.html">M11 Testing Like Pixi Does</a></dd>
+      </div>
+      <div class="gl-entry" data-search="interior mutability changing data through a shared reference, made safe by a type that checks access at runtime: cell, refcell, mutex, or rwlock.">
+        <dt id="term-interior-mutability">Interior mutability</dt>
+        <dd>Changing data through a shared reference, made safe by a type that checks access at runtime: <code>Cell</code>, <code>RefCell</code>, <code>Mutex</code>, or <code>RwLock</code>. <a class="gl-module" href="../modules/m08-smart-pointers.html">M08 Smart Pointers &amp; Shared State</a></dd>
+      </div>
+      <div class="gl-entry" data-search="iterator the trait with one required method, next(&amp;mut self) -&gt; option&lt;self::item&gt;. every adapter (map, filter) and consumer (collect, sum) is built on it.">
+        <dt id="term-iterator">Iterator</dt>
+        <dd>The trait with one required method, <code>next(&amp;mut self) -&gt; Option&lt;Self::Item&gt;</code>. Every adapter (<code>map</code>, <code>filter</code>) and consumer (<code>collect</code>, <code>sum</code>) is built on it. <a class="gl-module" href="../modules/m09-closures-iterators.html">M09 Closures &amp; Iterator Chains</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-l" class="gl-letter">L</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="lefthook the git hooks runner pixi uses. lefthook.yaml lists the checks (cargo-fmt, clippy, typos, and more) and pixi run lint runs them all.">
+        <dt id="term-lefthook">lefthook</dt>
+        <dd>The Git hooks runner Pixi uses. <code>lefthook.yaml</code> lists the checks (cargo-fmt, clippy, typos, and more) and <code>pixi run lint</code> runs them all. <a class="gl-module" href="pixi-codebase-map.html">Pixi Codebase Map</a></dd>
+      </div>
+      <div class="gl-entry" data-search="let-else let some(x) = maybe else { return ...; }; binds on a match and requires the else block to leave the scope otherwise. it keeps the happy path unindented.">
+        <dt id="term-let-else">let-else</dt>
+        <dd><code>let Some(x) = maybe else { return ...; };</code> binds on a match and requires the <code>else</code> block to leave the scope otherwise. It keeps the happy path unindented. <a class="gl-module" href="../modules/m04-option-result.html">M04 Option, Result &amp; ?</a></dd>
+      </div>
+      <div class="gl-entry" data-search="lifetime the region of code during which a reference is valid. annotations like &#x27;a describe relationships between lifetimes (&quot;the result lives as long as the input&quot;), not durations.">
+        <dt id="term-lifetime">Lifetime</dt>
+        <dd>The region of code during which a reference is valid. Annotations like <code>'a</code> describe relationships between lifetimes ("the result lives as long as the input"), not durations. <a class="gl-module" href="../modules/m07-lifetimes.html">M07 Lifetimes in Practice</a></dd>
+      </div>
+      <div class="gl-entry" data-search="lifetime elision the rules that let you omit lifetime annotations in common cases, such as a function with one reference parameter returning a reference.">
+        <dt id="term-lifetime-elision">Lifetime elision</dt>
+        <dd>The rules that let you omit lifetime annotations in common cases, such as a function with one reference parameter returning a reference. <a class="gl-module" href="../modules/m07-lifetimes.html">M07 Lifetimes in Practice</a></dd>
+      </div>
+      <div class="gl-entry" data-search="lock file in pixi, pixi.lock: the exact packages solved for every environment and platform. pixi reads and writes it with the rattler_lock crate.">
+        <dt id="term-lock-file">Lock file</dt>
+        <dd>In Pixi, <code>pixi.lock</code>: the exact packages solved for every environment and platform. Pixi reads and writes it with the <code>rattler_lock</code> crate. <a class="gl-module" href="roadmap.html#stage-6">Roadmap: Stage 6 (planned)</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-m" class="gl-letter">M</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="macro code that writes code at compile time, called with !: println!, vec!, format!. attribute and derive macros such as #[derive(debug)] are macros too.">
+        <dt id="term-macro">Macro</dt>
+        <dd>Code that writes code at compile time, called with <code>!</code>: <code>println!</code>, <code>vec!</code>, <code>format!</code>. Attribute and derive macros such as <code>#[derive(Debug)]</code> are macros too. <a class="gl-module" href="../modules/m00-orientation.html">M00 How This Practicum Works</a></dd>
+      </div>
+      <div class="gl-entry" data-search="match rust&#x27;s pattern-matching expression: it compares a value against patterns in order, binds the parts, and must be exhaustive.">
+        <dt id="term-match">match</dt>
+        <dd>Rust's pattern-matching expression: it compares a value against patterns in order, binds the parts, and must be exhaustive. <a class="gl-module" href="../modules/m02-types-structs-enums.html">M02 Types, Structs &amp; Enums</a></dd>
+      </div>
+      <div class="gl-entry" data-search="matchspec the conda syntax for a package requirement, such as numpy &gt;=2,&lt;3 or conda-forge::python 3.14.*, and the type that represents it in rattler_conda_types.">
+        <dt id="term-matchspec">MatchSpec</dt>
+        <dd>The conda syntax for a package requirement, such as <code>numpy &gt;=2,&lt;3</code> or <code>conda-forge::python 3.14.*</code>, and the type that represents it in <code>rattler_conda_types</code>. <a class="gl-module" href="roadmap.html#stage-6">Roadmap: Stage 6 (planned)</a></dd>
+      </div>
+      <div class="gl-entry" data-search="miette a crate for user-facing diagnostics with codes, labeled source spans, and help text. most pixi functions return miette::result.">
+        <dt id="term-miette">miette</dt>
+        <dd>A crate for user-facing diagnostics with codes, labeled source spans, and help text. Most Pixi functions return <code>miette::Result</code>. <a class="gl-module" href="../modules/m04-option-result.html">M04 Option, Result &amp; ?</a></dd>
+      </div>
+      <div class="gl-entry" data-search="module a namespace inside a crate declared with mod, usually one file. items are private to their module unless marked pub.">
+        <dt id="term-module">Module</dt>
+        <dd>A namespace inside a crate declared with <code>mod</code>, usually one file. Items are private to their module unless marked <code>pub</code>. <a class="gl-module" href="../modules/m01-cargo-crates-modules.html">M01 Cargo, Crates &amp; Modules</a></dd>
+      </div>
+      <div class="gl-entry" data-search="monomorphization how generics compile: the compiler makes a separate copy of a generic function for each concrete type it is used with. it makes generics as fast as hand-written code, at the cost of compile time and binary size.">
+        <dt id="term-monomorphization">Monomorphization</dt>
+        <dd>How generics compile: the compiler makes a separate copy of a generic function for each concrete type it is used with. It makes generics as fast as hand-written code, at the cost of compile time and binary size. <a class="gl-module" href="../modules/m06-traits-generics.html">M06 Traits &amp; Generics</a></dd>
+      </div>
+      <div class="gl-entry" data-search="move transferring ownership of a value, by assignment, passing it to a function, or returning it. the old name can no longer be used (error e0382).">
+        <dt id="term-move">Move</dt>
+        <dd>Transferring ownership of a value, by assignment, passing it to a function, or returning it. The old name can no longer be used (error E0382). <a class="gl-module" href="../modules/m03-ownership-borrowing.html">M03 Ownership &amp; Borrowing</a></dd>
+      </div>
+      <div class="gl-entry" data-search="move closure a closure written move || ... that takes ownership of what it captures, needed when it outlives the current scope, as in thread::spawn.">
+        <dt id="term-move-closure">move closure</dt>
+        <dd>A closure written <code>move || ...</code> that takes ownership of what it captures, needed when it outlives the current scope, as in <code>thread::spawn</code>. <a class="gl-module" href="../modules/m09-closures-iterators.html">M09 Closures &amp; Iterator Chains</a></dd>
+      </div>
+      <div class="gl-entry" data-search="msrv minimum supported rust version: the oldest compiler a crate promises to build with, set by rust-version in cargo.toml. pixi&#x27;s is 1.90 while it builds with 1.95.">
+        <dt id="term-msrv">MSRV</dt>
+        <dd>Minimum supported Rust version: the oldest compiler a crate promises to build with, set by <code>rust-version</code> in <code>Cargo.toml</code>. Pixi's is 1.90 while it builds with 1.95. <a class="gl-module" href="../modules/m10-crate-design.html">M10 Visibility, Features &amp; Crate Design</a></dd>
+      </div>
+      <div class="gl-entry" data-search="mutex mutex&lt;t&gt; gives one thread at a time mutable access to t; lock() returns a guard that unlocks when dropped. arc&lt;mutex&lt;t&gt;&gt; is the usual way to share mutable state.">
+        <dt id="term-mutex">Mutex</dt>
+        <dd><code>Mutex&lt;T&gt;</code> gives one thread at a time mutable access to <code>T</code>; <code>lock()</code> returns a guard that unlocks when dropped. <code>Arc&lt;Mutex&lt;T&gt;&gt;</code> is the usual way to share mutable state. <a class="gl-module" href="../modules/m08-smart-pointers.html">M08 Smart Pointers &amp; Shared State</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-n" class="gl-letter">N</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="nextest cargo nextest, a faster test runner that runs each test in its own process. pixi&#x27;s test-fast task uses it.">
+        <dt id="term-nextest">nextest</dt>
+        <dd><code>cargo nextest</code>, a faster test runner that runs each test in its own process. Pixi's <code>test-fast</code> task uses it. <a class="gl-module" href="../modules/m11-testing.html">M11 Testing Like Pixi Does</a></dd>
+      </div>
+      <div class="gl-entry" data-search="non-lexical lifetimes the borrow checker&#x27;s rule that a borrow ends at its last use, not at the end of its block, which accepts much more correct code.">
+        <dt id="term-non-lexical-lifetimes">Non-lexical lifetimes</dt>
+        <dd>The borrow checker's rule that a borrow ends at its last use, not at the end of its block, which accepts much more correct code. <a class="gl-module" href="../modules/m03-ownership-borrowing.html">M03 Ownership &amp; Borrowing</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-o" class="gl-letter">O</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="oncelock / lazylock standard types for values initialized once, on first use, and then shared: oncelock is set explicitly, lazylock runs a closure. they replace once_cell and lazy_static.">
+        <dt id="term-oncelock-lazylock">OnceLock / LazyLock</dt>
+        <dd>Standard types for values initialized once, on first use, and then shared: <code>OnceLock</code> is set explicitly, <code>LazyLock</code> runs a closure. They replace <code>once_cell</code> and <code>lazy_static</code>. <a class="gl-module" href="../modules/m08-smart-pointers.html">M08 Smart Pointers &amp; Shared State</a></dd>
+      </div>
+      <div class="gl-entry" data-search="option option&lt;t&gt; is either some(value) or none. it replaces none-able values, and the compiler makes you handle the none case.">
+        <dt id="term-option">Option</dt>
+        <dd><code>Option&lt;T&gt;</code> is either <code>Some(value)</code> or <code>None</code>. It replaces <code>None</code>-able values, and the compiler makes you handle the <code>None</code> case. <a class="gl-module" href="../modules/m04-option-result.html">M04 Option, Result &amp; ?</a></dd>
+      </div>
+      <div class="gl-entry" data-search="orphan rule you may implement a trait for a type only if your crate defines the trait or the type. it keeps two crates from writing conflicting implementations.">
+        <dt id="term-orphan-rule">Orphan rule</dt>
+        <dd>You may implement a trait for a type only if your crate defines the trait or the type. It keeps two crates from writing conflicting implementations. <a class="gl-module" href="../modules/m06-traits-generics.html">M06 Traits &amp; Generics</a></dd>
+      </div>
+      <div class="gl-entry" data-search="ownership rust&#x27;s memory model: every value has exactly one owner, ownership can move, and the value is dropped when its owner goes out of scope. it gives memory safety without a garbage collector.">
+        <dt id="term-ownership">Ownership</dt>
+        <dd>Rust's memory model: every value has exactly one owner, ownership can move, and the value is dropped when its owner goes out of scope. It gives memory safety without a garbage collector. <a class="gl-module" href="../modules/m03-ownership-borrowing.html">M03 Ownership &amp; Borrowing</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-p" class="gl-letter">P</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="package what a cargo.toml with a [package] table describes: a named, versioned bundle of one or more crates.">
+        <dt id="term-package">Package</dt>
+        <dd>What a <code>Cargo.toml</code> with a <code>[package]</code> table describes: a named, versioned bundle of one or more crates. <a class="gl-module" href="../modules/m01-cargo-crates-modules.html">M01 Cargo, Crates &amp; Modules</a></dd>
+      </div>
+      <div class="gl-entry" data-search="panic an unrecoverable error that unwinds the current thread, from panic!, unwrap on none, or an out-of-bounds index. use it for bugs, and result for failures callers should handle.">
+        <dt id="term-panic">Panic</dt>
+        <dd>An unrecoverable error that unwinds the current thread, from <code>panic!</code>, <code>unwrap</code> on <code>None</code>, or an out-of-bounds index. Use it for bugs, and <code>Result</code> for failures callers should handle. <a class="gl-module" href="../modules/m04-option-result.html">M04 Option, Result &amp; ?</a></dd>
+      </div>
+      <div class="gl-entry" data-search="pub(crate) visibility that makes an item usable anywhere in the current crate but not outside it. pub(super) limits it to the parent module.">
+        <dt id="term-pub-crate">pub(crate)</dt>
+        <dd>Visibility that makes an item usable anywhere in the current crate but not outside it. <code>pub(super)</code> limits it to the parent module. <a class="gl-module" href="../modules/m10-crate-design.html">M10 Visibility, Features &amp; Crate Design</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-q" class="gl-letter">Q</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="question-mark operator ? after a result or option: unwrap the success value, or return the error (converted with from) from the current function.">
+        <dt id="term-question-mark-operator">Question-mark operator</dt>
+        <dd><code>?</code> after a <code>Result</code> or <code>Option</code>: unwrap the success value, or return the error (converted with <code>From</code>) from the current function. <a class="gl-module" href="../modules/m04-option-result.html">M04 Option, Result &amp; ?</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-r" class="gl-letter">R</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="raii resource acquisition is initialization: tying a resource (memory, a file, a lock) to a value&#x27;s lifetime, so it is released when the value is dropped.">
+        <dt id="term-raii">RAII</dt>
+        <dd>Resource acquisition is initialization: tying a resource (memory, a file, a lock) to a value's lifetime, so it is released when the value is dropped. <a class="gl-module" href="../modules/m03-ownership-borrowing.html">M03 Ownership &amp; Borrowing</a></dd>
+      </div>
+      <div class="gl-entry" data-search="rattler the family of rust crates, also by prefix.dev, that implement conda: types, repodata fetching, solving, installing, and lock files. pixi builds on them.">
+        <dt id="term-rattler">rattler</dt>
+        <dd>The family of Rust crates, also by prefix.dev, that implement conda: types, repodata fetching, solving, installing, and lock files. Pixi builds on them. <a class="gl-module" href="roadmap.html#stage-6">Roadmap: Stage 6 (planned)</a></dd>
+      </div>
+      <div class="gl-entry" data-search="rc rc&lt;t&gt; (reference-counted) gives shared ownership within one thread. it is not send; use arc across threads.">
+        <dt id="term-rc">Rc</dt>
+        <dd><code>Rc&lt;T&gt;</code> (reference-counted) gives shared ownership within one thread. It is not <code>Send</code>; use <code>Arc</code> across threads. <a class="gl-module" href="../modules/m08-smart-pointers.html">M08 Smart Pointers &amp; Shared State</a></dd>
+      </div>
+      <div class="gl-entry" data-search="refcell refcell&lt;t&gt; moves the borrowing rules to runtime, allowing mutation through a shared reference within one thread; breaking the rules panics.">
+        <dt id="term-refcell">RefCell</dt>
+        <dd><code>RefCell&lt;T&gt;</code> moves the borrowing rules to runtime, allowing mutation through a shared reference within one thread; breaking the rules panics. <a class="gl-module" href="../modules/m08-smart-pointers.html">M08 Smart Pointers &amp; Shared State</a></dd>
+      </div>
+      <div class="gl-entry" data-search="reference a pointer that borrows a value: &amp;t for shared, read-only access and &amp;mut t for exclusive, mutable access. references never dangle.">
+        <dt id="term-reference">Reference</dt>
+        <dd>A pointer that borrows a value: <code>&amp;T</code> for shared, read-only access and <code>&amp;mut T</code> for exclusive, mutable access. References never dangle. <a class="gl-module" href="../modules/m03-ownership-borrowing.html">M03 Ownership &amp; Borrowing</a></dd>
+      </div>
+      <div class="gl-entry" data-search="repodata the index of a conda channel for one platform: every package file with its name, version, build, and dependencies. solvers read it to choose packages.">
+        <dt id="term-repodata">Repodata</dt>
+        <dd>The index of a conda channel for one platform: every package file with its name, version, build, and dependencies. Solvers read it to choose packages. <a class="gl-module" href="roadmap.html#stage-6">Roadmap: Stage 6 (planned)</a></dd>
+      </div>
+      <div class="gl-entry" data-search="result result&lt;t, e&gt; is either ok(value) or err(error). rust uses it, not exceptions, for operations that can fail.">
+        <dt id="term-result">Result</dt>
+        <dd><code>Result&lt;T, E&gt;</code> is either <code>Ok(value)</code> or <code>Err(error)</code>. Rust uses it, not exceptions, for operations that can fail. <a class="gl-module" href="../modules/m04-option-result.html">M04 Option, Result &amp; ?</a></dd>
+      </div>
+      <div class="gl-entry" data-search="rust-toolchain a file at a project&#x27;s root naming the exact rust version to build with. pixi&#x27;s says 1.95.0.">
+        <dt id="term-rust-toolchain">rust-toolchain</dt>
+        <dd>A file at a project's root naming the exact Rust version to build with. Pixi's says <code>1.95.0</code>. <a class="gl-module" href="../modules/m00-orientation.html">M00 How This Practicum Works</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-s" class="gl-letter">S</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="send a marker trait for types that are safe to move to another thread. the compiler implements it automatically; rc is a common type that is not send.">
+        <dt id="term-send">Send</dt>
+        <dd>A marker trait for types that are safe to move to another thread. The compiler implements it automatically; <code>Rc</code> is a common type that is not <code>Send</code>. <a class="gl-module" href="../modules/m08-smart-pointers.html">M08 Smart Pointers &amp; Shared State</a></dd>
+      </div>
+      <div class="gl-entry" data-search="shadowing declaring a new variable with the same name as an earlier one (let x = x.trim();). the new binding can have a different type.">
+        <dt id="term-shadowing">Shadowing</dt>
+        <dd>Declaring a new variable with the same name as an earlier one (<code>let x = x.trim();</code>). The new binding can have a different type. <a class="gl-module" href="../modules/m02-types-structs-enums.html">M02 Types, Structs &amp; Enums</a></dd>
+      </div>
+      <div class="gl-entry" data-search="slice a borrowed view into a contiguous sequence: &amp;[t] into a vec or array, and &amp;str into a string. functions take slices so callers keep ownership.">
+        <dt id="term-slice">Slice</dt>
+        <dd>A borrowed view into a contiguous sequence: <code>&amp;[T]</code> into a <code>Vec</code> or array, and <code>&amp;str</code> into a <code>String</code>. Functions take slices so callers keep ownership. <a class="gl-module" href="../modules/m03-ownership-borrowing.html">M03 Ownership &amp; Borrowing</a></dd>
+      </div>
+      <div class="gl-entry" data-search="stack memory for a function&#x27;s local values of known size, freed automatically when the function returns. moving a string copies its small stack part, not its heap buffer.">
+        <dt id="term-stack">Stack</dt>
+        <dd>Memory for a function's local values of known size, freed automatically when the function returns. Moving a <code>String</code> copies its small stack part, not its heap buffer. <a class="gl-module" href="../modules/m03-ownership-borrowing.html">M03 Ownership &amp; Borrowing</a></dd>
+      </div>
+      <div class="gl-entry" data-search="&#x27;static the lifetime of the whole program. &amp;&#x27;static str is a string literal; the bound t: &#x27;static means t holds no short-lived references.">
+        <dt id="term-static">'static</dt>
+        <dd>The lifetime of the whole program. <code>&amp;'static str</code> is a string literal; the bound <code>T: 'static</code> means <code>T</code> holds no short-lived references. <a class="gl-module" href="../modules/m07-lifetimes.html">M07 Lifetimes in Practice</a></dd>
+      </div>
+      <div class="gl-entry" data-search="string / &amp;str string is an owned, growable utf-8 buffer; &amp;str is a borrowed slice of utf-8 text. take &amp;str in parameters and return string.">
+        <dt id="term-string-str">String / &amp;str</dt>
+        <dd><code>String</code> is an owned, growable UTF-8 buffer; <code>&amp;str</code> is a borrowed slice of UTF-8 text. Take <code>&amp;str</code> in parameters and return <code>String</code>. <a class="gl-module" href="../modules/m02-types-structs-enums.html">M02 Types, Structs &amp; Enums</a></dd>
+      </div>
+      <div class="gl-entry" data-search="sync a marker trait for types that are safe to share by reference between threads: t is sync if &amp;t is send.">
+        <dt id="term-sync">Sync</dt>
+        <dd>A marker trait for types that are safe to share by reference between threads: <code>T</code> is <code>Sync</code> if <code>&amp;T</code> is <code>Send</code>. <a class="gl-module" href="../modules/m08-smart-pointers.html">M08 Smart Pointers &amp; Shared State</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-t" class="gl-letter">T</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="thiserror a crate whose derive macro generates display, error, and from implementations for error enums. pixi defines most of its error types with it.">
+        <dt id="term-thiserror">thiserror</dt>
+        <dd>A crate whose derive macro generates <code>Display</code>, <code>Error</code>, and <code>From</code> implementations for error enums. Pixi defines most of its error types with it. <a class="gl-module" href="../modules/m04-option-result.html">M04 Option, Result &amp; ?</a></dd>
+      </div>
+      <div class="gl-entry" data-search="tokio the async runtime pixi uses: it schedules futures on a pool of threads and provides async i/o, timers, and channels. #[tokio::test] runs an async test.">
+        <dt id="term-tokio">tokio</dt>
+        <dd>The async runtime Pixi uses: it schedules futures on a pool of threads and provides async I/O, timers, and channels. <code>#[tokio::test]</code> runs an async test. <a class="gl-module" href="roadmap.html#stage-5">Roadmap: Stage 5 (planned)</a></dd>
+      </div>
+      <div class="gl-entry" data-search="toml_edit a toml crate that edits a document while keeping its comments, order, and formatting. pixi add uses it, through pixi_toml_edit, to change pixi.toml.">
+        <dt id="term-toml-edit">toml_edit</dt>
+        <dd>A TOML crate that edits a document while keeping its comments, order, and formatting. <code>pixi add</code> uses it, through <code>pixi_toml_edit</code>, to change <code>pixi.toml</code>. <a class="gl-module" href="roadmap.html#stage-4">Roadmap: Stage 4 (planned)</a></dd>
+      </div>
+      <div class="gl-entry" data-search="trait a named set of methods that types can implement, like an interface or a protocol that is checked at compile time. traits can have default methods and associated types.">
+        <dt id="term-trait">Trait</dt>
+        <dd>A named set of methods that types can implement, like an interface or a Protocol that is checked at compile time. Traits can have default methods and associated types. <a class="gl-module" href="../modules/m06-traits-generics.html">M06 Traits &amp; Generics</a></dd>
+      </div>
+      <div class="gl-entry" data-search="trait bound a requirement on a generic parameter, such as t: display + clone, written inline or, when it gets long, in a where clause after the signature.">
+        <dt id="term-trait-bound">Trait bound</dt>
+        <dd>A requirement on a generic parameter, such as <code>T: Display + Clone</code>, written inline or, when it gets long, in a <code>where</code> clause after the signature. <a class="gl-module" href="../modules/m06-traits-generics.html">M06 Traits &amp; Generics</a></dd>
+      </div>
+      <div class="gl-entry" data-search="trait object a value of type dyn trait behind a pointer, whose methods are found at runtime through a vtable. it allows collections of different types that share a trait.">
+        <dt id="term-trait-object">Trait object</dt>
+        <dd>A value of type <code>dyn Trait</code> behind a pointer, whose methods are found at runtime through a vtable. It allows collections of different types that share a trait. <a class="gl-module" href="../modules/m06-traits-generics.html">M06 Traits &amp; Generics</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-u" class="gl-letter">U</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="unwrap / expect methods that take the value out of an option or result and panic otherwise; expect adds a message. acceptable in tests and for true invariants.">
+        <dt id="term-unwrap-expect">unwrap / expect</dt>
+        <dd>Methods that take the value out of an <code>Option</code> or <code>Result</code> and panic otherwise; <code>expect</code> adds a message. Acceptable in tests and for true invariants. <a class="gl-module" href="../modules/m04-option-result.html">M04 Option, Result &amp; ?</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-v" class="gl-letter">V</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="vec vec&lt;t&gt;, a growable array on the heap holding values of one type. it is rust&#x27;s list.">
+        <dt id="term-vec">Vec</dt>
+        <dd><code>Vec&lt;T&gt;</code>, a growable array on the heap holding values of one type. It is Rust's <code>list</code>. <a class="gl-module" href="../modules/m05-collections-iterators.html">M05 Collections &amp; Iterators</a></dd>
+      </div>
+    </dl>
+    <h3 id="letter-w" class="gl-letter">W</h3>
+    <dl class="gl-list">
+      <div class="gl-entry" data-search="workspace a set of packages built together with one cargo.lock and target/ directory. pixi&#x27;s workspace has every crate under crates/ and pins shared versions once in [workspace.dependencies].">
+        <dt id="term-workspace">Workspace</dt>
+        <dd>A set of packages built together with one <code>Cargo.lock</code> and <code>target/</code> directory. Pixi's workspace has every crate under <code>crates/</code> and pins shared versions once in <code>[workspace.dependencies]</code>. <a class="gl-module" href="../modules/m01-cargo-crates-modules.html">M01 Cargo, Crates &amp; Modules</a></dd>
+      </div>
+    </dl>
+  </section>
+
+  <section class="lesson-section" id="see-also">
+    <h2>See also</h2>
+    <ul>
+      <li><a href="python-to-rust.html">Python to Rust cheat sheet</a>: side-by-side translations of everyday code</li>
+      <li><a href="pixi-codebase-map.html">Pixi codebase map</a>: the crates behind the Pixi terms here</li>
+      <li><a href="roadmap.html">Roadmap</a>: where the planned levels teach the remaining terms</li>
+      <li><a href="https://doc.rust-lang.org/reference/glossary.html">The Rust Reference glossary</a></li>
+    </ul>
+  </section>
+</main>
+<script>
+(function () {
+  var input = document.getElementById("gl-filter");
+  if (!input) return;
+  input.addEventListener("input", function () {
+    var q = input.value.trim().toLowerCase();
+    var shown = 0;
+    document.querySelectorAll(".gl-list").forEach(function (list) {
+      var any = false;
+      list.querySelectorAll(".gl-entry").forEach(function (entry) {
+        var hit = !q || entry.getAttribute("data-search").indexOf(q) !== -1;
+        entry.hidden = !hit;
+        if (hit) { any = true; shown += 1; }
+      });
+      list.hidden = !any;
+      var heading = list.previousElementSibling;
+      if (heading && heading.classList.contains("gl-letter")) heading.hidden = !any;
+    });
+    document.getElementById("gl-empty").hidden = shown !== 0;
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+# A simplified pixi.toml for a small data project. Every form the capstone supports appears at least once.
+
+[workspace]
+name = "weather-station"
+version = "0.3.0"
+description = "Collect and plot readings from a backyard weather station"
+channels = ["conda-forge", "bioconda"]
+platforms = ["linux-64", "osx-arm64", "win-64"]
+
+[dependencies]
+python = "3.13.*"
+numpy = ">=2,<3"
+pandas = { version = ">=2.2", channel = "conda-forge" }
+
+[tasks]
+fetch = "python -m station.fetch"
+clean = { cmd = "python -m station.clean", depends-on = "fetch" }
+plot = { cmd = "python -m station.plot", depends-on = ["clean"] }
+report = { cmd = "python -m station.report", depends-on = ["plot", "clean"] }
+all = { depends-on = ["report", "fetch"] }
+
+[feature.test.dependencies]
+pytest = ">=8"
+numpy = "2.1.*"
+
+[feature.test.tasks]
+test = { cmd = "pytest", depends-on = ["fetch"] }
+
+[feature.lint.dependencies]
+ruff = "*"
+
+[feature.py312.dependencies]
+python = { version = "3.12.*", build = "*_cpython" }
+
+[environments]
+test = ["test"]
+lint = { features = ["lint"], solve-group = "default" }
+ci = ["test", "lint", "py312"]

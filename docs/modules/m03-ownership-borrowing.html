@@ -1,0 +1,1456 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M03 · Ownership &amp; Borrowing · Rust Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-rust.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-module="m03">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Stage 1 · The Core Language · Module 03</p>
+    <h1>Ownership &amp; Borrowing</h1>
+    <p class="lede">Every value in Rust has exactly one owner, and every reference is checked before the program
+      runs. This is the idea that makes Rust different from Python, and it is the idea you will use on every line of
+      Pixi you read. This module builds it from the ground up: where values live, what <code>let b = a;</code>
+      really does, how borrowing works, and how to read the compiler when it says no.</p>
+    <div class="lesson-meta"><span>⏱ ~3 hours</span><span>Prerequisites: <a href="m02-types-structs-enums.html">M02 Types, Structs &amp; Enums</a></span></div>
+    <ul class="objectives">
+      <li>Explain the difference between a Python name bound to an object and a Rust owner of a value</li>
+      <li>Describe what lives on the stack and what lives on the heap for <code>i32</code>, <code>String</code>, and <code>Vec&lt;T&gt;</code></li>
+      <li>Predict when a value is moved, copied, cloned, and dropped</li>
+      <li>Use <code>&amp;T</code> and <code>&amp;mut T</code>, state the borrowing rules, and explain why they exist</li>
+      <li>Write functions that take <code>&amp;str</code> and <code>&amp;[T]</code> instead of owned values, and know when to take ownership</li>
+      <li>Read and fix E0382, E0499, E0502, E0505, and E0507 without guessing</li>
+      <li>Read a Pixi function and say who owns each value and who only borrows it</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="python-names">
+    <h2>Names in Python, owners in Rust</h2>
+    <p>Start from something you already know well. In Python, a variable is a <strong>name</strong> that refers to an
+      object. Assignment never copies the object; it adds another name for it.</p>
+    <pre data-label="Python"><code class="language-python">deps = ["python", "numpy"]
+alias = deps            # a second name for the same list
+alias.append("pandas")  # mutate through one name...
+print(deps)             # ...and the other name sees it
+# ['python', 'numpy', 'pandas']</code></pre>
+    <p>Python keeps the list alive as long as <em>any</em> name refers to it. It does that with a reference count on
+      every object (plus a cycle collector for the cases counting misses). When the count reaches zero, the object is
+      freed. This design is convenient: you never think about who frees what. It has two costs. First, the runtime
+      does bookkeeping on every assignment. Second, and more important for correctness, any part of the program that
+      holds a name can change the object behind every other name's back. That is how a function that "only reads"
+      a list you passed it ends up appending to it, and how a default argument <code>def f(x=[])</code> leaks state
+      between calls.</p>
+    <p>Rust takes a different deal. Each value has exactly one <strong>owner</strong>: the variable (or struct
+      field, or collection slot) responsible for it. When the owner goes out of scope, the value is freed, right
+      there, with no reference count and no garbage collector. Other code can <strong>borrow</strong> the value
+      through a reference, but the compiler checks every borrow against two rules you will learn below. The result:
+      no use-after-free, no double free, and no data changing behind your back, all proven before the program runs.</p>
+    <p>Here is the same assignment in Rust. Press Compile and read what the compiler says.</p>
+    <div class="runnable" data-title="b = a in Rust" data-compile-fail>
+<textarea>
+fn main() {
+    let deps = vec![String::from("python"), String::from("numpy")];
+    let alias = deps;
+    println!("{deps:?}");
+    println!("{alias:?}");
+}
+</textarea>
+    </div>
+    <p>The error is E0382, "borrow of moved value: <code>deps</code>". <code>let alias = deps;</code> did not make
+      a second name for the vector. It <strong>moved</strong> the vector: <code>alias</code> is now the owner, and
+      <code>deps</code> can no longer be used. The compiler points at three places: where <code>deps</code> was
+      declared (and notes its type, <code>Vec&lt;String&gt;</code>, "which does not implement the
+      <code>Copy</code> trait"), where the value moved, and where you tried to use it afterwards. It even suggests a
+      fix: <code>help: consider cloning the value if the performance cost is acceptable</code>.</p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">a = [1, 2, 3]
+b = a          # two names, one list
+b.append(4)
+print(a)       # [1, 2, 3, 4]
+
+c = list(a)    # an explicit copy
+c.append(5)
+print(a)       # [1, 2, 3, 4]</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">let a = vec![1, 2, 3];
+let mut b = a;      // a moves into b; a is gone
+b.push(4);
+// println!("{a:?}"); // E0382
+
+let mut c = b.clone(); // an explicit copy
+c.push(5);
+println!("{b:?}");     // [1, 2, 3, 4]</code></pre></div>
+    </div>
+    <p>Step through the move below. Watch the arrow from <code>a</code> to the heap buffer: after line 3 it belongs
+      to <code>b</code>, and <code>a</code> is greyed out. Nothing on the heap is copied.</p>
+    <div class="viz" data-viz="ownership" data-config='{"scenario": "move"}'></div>
+    <aside class="callout think"><p>Python would print <code>['python', 'numpy']</code> twice. Why can Rust not
+      allow two owners of one <code>Vec</code>? Think about what happens at the end of <code>main</code> if both
+      <code>deps</code> and <code>alias</code> tried to free the same buffer.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> in Python, assignment adds a name. In Rust, assignment
+      of a non-<code>Copy</code> value transfers ownership, and the old name stops working. One owner means one
+      free, at a point you can see in the source.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="stack-heap">
+    <h2>The stack and the heap</h2>
+    <p>To understand why moves exist, you need a picture of where values live. A running Rust program uses two
+      regions of memory.</p>
+    <ul>
+      <li>The <strong>stack</strong> holds each function call's local variables in a <em>frame</em>. A frame is
+        pushed when the function is called and popped when it returns. Everything on the stack has a size known at
+        compile time. Pushing and popping is just moving a pointer, so it is extremely fast.</li>
+      <li>The <strong>heap</strong> holds data whose size is decided at run time, such as the characters of a string
+        read from a file. You ask the allocator for a block, get back a pointer, and must give the block back
+        exactly once.</li>
+    </ul>
+    <p>An <code>i32</code> is four bytes and lives entirely on the stack. A <code>String</code> is split in two: a
+      small fixed-size header on the stack with three words (a pointer to the bytes, the length in use, and the
+      capacity allocated), and the bytes themselves on the heap. <code>Vec&lt;T&gt;</code> has the same shape.</p>
+    <figure class="figure">
+      <svg class="diagram" viewBox="0 0 620 210" role="img" aria-label="A String on the stack points to its bytes on the heap">
+        <text x="20" y="24" font-size="14" font-weight="600">stack (frame of main)</text>
+        <text x="380" y="24" font-size="14" font-weight="600">heap</text>
+        <rect x="20" y="40" width="80" height="34" rx="4" fill="none" stroke="var(--fg-muted)"/>
+        <text x="30" y="62" font-size="13" class="mono">n: i32</text>
+        <rect x="110" y="40" width="90" height="34" rx="4" fill="var(--viz-2)" fill-opacity="0.18" stroke="var(--fg-muted)"/>
+        <text x="140" y="62" font-size="13" class="mono">42</text>
+        <text x="20" y="112" font-size="13" class="mono">s: String</text>
+        <rect x="20" y="122" width="90" height="34" rx="4" fill="var(--viz-1)" fill-opacity="0.18" stroke="var(--fg-muted)"/>
+        <text x="32" y="144" font-size="13" class="mono">ptr</text>
+        <rect x="110" y="122" width="90" height="34" rx="4" fill="var(--viz-1)" fill-opacity="0.18" stroke="var(--fg-muted)"/>
+        <text x="122" y="144" font-size="13" class="mono">len 4</text>
+        <rect x="200" y="122" width="90" height="34" rx="4" fill="var(--viz-1)" fill-opacity="0.18" stroke="var(--fg-muted)"/>
+        <text x="212" y="144" font-size="13" class="mono">cap 4</text>
+        <rect x="380" y="122" width="44" height="34" rx="4" fill="var(--viz-3)" fill-opacity="0.18" stroke="var(--fg-muted)"/>
+        <text x="396" y="144" font-size="13" class="mono">p</text>
+        <rect x="424" y="122" width="44" height="34" rx="4" fill="var(--viz-3)" fill-opacity="0.18" stroke="var(--fg-muted)"/>
+        <text x="441" y="144" font-size="13" class="mono">i</text>
+        <rect x="468" y="122" width="44" height="34" rx="4" fill="var(--viz-3)" fill-opacity="0.18" stroke="var(--fg-muted)"/>
+        <text x="484" y="144" font-size="13" class="mono">x</text>
+        <rect x="512" y="122" width="44" height="34" rx="4" fill="var(--viz-3)" fill-opacity="0.18" stroke="var(--fg-muted)"/>
+        <text x="529" y="144" font-size="13" class="mono">i</text>
+        <path d="M65 156 C 65 196, 370 196, 395 158" fill="none" stroke="var(--fg-muted)" stroke-width="1.5"/>
+        <path d="M389 162 L395 158 L396 165" fill="none" stroke="var(--fg-muted)" stroke-width="1.5"/>
+      </svg>
+      <figcaption><code>let n = 42;</code> is four bytes on the stack. <code>let s = String::from("pixi");</code> is
+        a 24-byte header on the stack (on a 64-bit machine) that owns four bytes on the heap.</figcaption>
+    </figure>
+    <p>You can ask the compiler how big each stack part is. Predict the four numbers before you run this. The
+      Playground runs on 64-bit Linux, where a pointer and a <code>usize</code> are 8 bytes each.</p>
+    <div class="runnable" data-title="How big is the stack part?" data-predict>
+<textarea>
+use std::mem::size_of;
+
+fn main() {
+    println!("{}", size_of::<i32>());
+    println!("{}", size_of::<String>());
+    println!("{}", size_of::<Vec<u64>>());
+    println!("{}", size_of::<&String>());
+}
+</textarea>
+    </div>
+    <p>The answers are 4, 24, 24, and 8. A <code>String</code> holding a megabyte of text still has a 24-byte stack
+      part; the megabyte is on the heap. The element type of a <code>Vec</code> does not change its header size
+      either. A reference, <code>&amp;String</code>, is one pointer.</p>
+    <p>Now the reason moves exist. When you write <code>let b = a;</code> for a <code>String</code>, Rust copies the
+      24-byte header from <code>a</code>'s slot to <code>b</code>'s slot. That is cheap. But now two headers point at
+      the same heap bytes. If both were still valid owners, both would free the buffer at the end of the scope (a
+      <em>double free</em>, a classic memory-corruption bug in C), and a change through one would surprise the
+      other. Rust resolves this by declaring the old header dead: the value <em>moved</em>. Python avoids the same
+      problem with reference counting; Rust avoids it with a compile-time rule, so there is no run-time cost at all.</p>
+    <aside class="callout note"><p>Python has a stack and a heap too, but you never see the difference: every Python
+      object, even the integer <code>42</code>, is a heap object, and a variable is always a pointer to one. Rust
+      lets you choose, and puts small fixed-size values directly in the stack frame.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> types like <code>String</code> and <code>Vec</code> are
+      a small stack header that owns a heap buffer. A move copies the header and invalidates the old one, so the
+      buffer still has exactly one owner.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="moves">
+    <h2>Where moves happen</h2>
+    <p>A move is not only <code>let b = a;</code>. Any time a non-<code>Copy</code> value is used <em>by value</em>,
+      it moves. The common places:</p>
+    <table>
+      <thead><tr><th>Code</th><th>What moves</th></tr></thead>
+      <tbody>
+        <tr><td><code>let b = a;</code></td><td><code>a</code> into <code>b</code></td></tr>
+        <tr><td><code>consume(a)</code> where <code>fn consume(s: String)</code></td><td><code>a</code> into the parameter <code>s</code></td></tr>
+        <tr><td><code>return s;</code> or a tail expression <code>s</code></td><td><code>s</code> out to the caller</td></tr>
+        <tr><td><code>v.push(a)</code></td><td><code>a</code> into the vector, which now owns it</td></tr>
+        <tr><td><code>Package { name: a, .. }</code></td><td><code>a</code> into the struct field</td></tr>
+        <tr><td><code>for x in v</code></td><td>the whole vector into the loop; each element into <code>x</code> in turn</td></tr>
+        <tr><td><code>let n = pkg.name;</code></td><td>just the field out of <code>pkg</code> (a <em>partial move</em>)</td></tr>
+      </tbody>
+    </table>
+    <p>Function calls are the move you will hit most often. Passing a <code>String</code> to a function that takes
+      <code>String</code> gives the function ownership; when the function returns, its parameter goes out of scope and
+      the string is freed. The visualizer shows the two stack frames.</p>
+    <div class="viz" data-viz="ownership" data-config='{"scenario": "fn-move"}'></div>
+    <p>Here is the error you get when you forget that, and use a value after you gave it away.</p>
+    <div class="runnable" data-title="Use after passing by value" data-compile-fail>
+<textarea>
+fn install(spec: String) {
+    println!("installing {spec}");
+}
+
+fn main() {
+    let spec = String::from("numpy >=2");
+    install(spec);
+    println!("installed {spec}");
+}
+</textarea>
+    </div>
+    <p>How to read it: E0382 again, "borrow of moved value: <code>spec</code>". The label "value moved here" sits under
+      <code>install(spec)</code>, and a note points at the parameter: "consider changing this parameter type in
+      function <code>install</code> to borrow instead if owning the value isn't necessary". That note is almost
+      always the right fix. <code>install</code> only reads the spec, so it should borrow it:
+      <code>fn install(spec: &amp;str)</code> and call <code>install(&amp;spec)</code>. You will learn exactly why
+      <code>&amp;str</code> and not <code>&amp;String</code> in the slices section.</p>
+    <p>A <code>for</code> loop over a vector by value is the move Python developers trip on most, because in Python
+      iterating never consumes the list.</p>
+    <div class="runnable" data-title="A for loop that eats the vector" data-compile-fail>
+<textarea>
+fn main() {
+    let channels = vec![String::from("conda-forge"), String::from("bioconda")];
+    for channel in channels {
+        println!("channel: {channel}");
+    }
+    println!("{} channels", channels.len());
+}
+</textarea>
+    </div>
+    <p>The error says <code>channels</code> was moved by "<code>channels</code> moved due to this implicit call to
+      <code>.into_iter()</code>". A <code>for</code> loop calls <code>IntoIterator::into_iter</code> on what you give
+      it, and on a <code>Vec</code> by value that hands each <code>String</code> to the loop body, leaving nothing
+      behind. The <code>help:</code> line gives the fix: "consider iterating over a slice of the
+      <code>Vec&lt;String&gt;</code>'s content to avoid moving into the <code>for</code> loop": write
+      <code>for channel in &amp;channels</code>. Then <code>channel</code> is a <code>&amp;String</code> and the vector
+      survives the loop. (<a href="m05-collections-iterators.html">M05</a> covers <code>iter</code>,
+      <code>iter_mut</code>, and <code>into_iter</code> in depth.)</p>
+    <p>Moves go the other way too: a function can hand ownership <em>back</em> by returning a value. This is how
+      constructors and builders work.</p>
+    <div class="runnable" data-title="Ownership in and out" data-predict>
+<textarea>
+fn with_channel(mut spec: String, channel: &str) -> String {
+    spec.insert_str(0, "::");
+    spec.insert_str(0, channel);
+    spec
+}
+
+fn main() {
+    let spec = String::from("numpy");
+    let spec = with_channel(spec, "conda-forge");
+    println!("{spec}");
+}
+</textarea>
+    </div>
+    <p><code>with_channel</code> takes the string by value, changes it, and returns it, so no new allocation is
+      needed for a copy. The caller rebinds the result to the same name with shadowing (from
+      <a href="m02-types-structs-enums.html">M02</a>). Notice <code>mut spec</code> in the parameter list: once the
+      function owns the value, it can decide to make its binding mutable. Ownership, not the original
+      <code>let</code>, decides who may change a value.</p>
+    <aside class="callout warn"><p>A move is checked at compile time and costs nothing at run time beyond copying the
+      stack header. It is not a deep copy. Python developers sometimes avoid moves because they "feel expensive".
+      They are the cheapest way to pass a <code>String</code> to someone who needs to keep it.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> using a non-<code>Copy</code> value by value moves it:
+      assignment, passing to a function, returning, pushing into a collection, putting in a struct, and
+      <code>for x in v</code>. After a move, the old name is unusable until you assign it a new value.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="copy-clone">
+    <h2>Copy and Clone</h2>
+    <p>Some types do not move. Run this and notice that <code>a</code> is still usable after
+      <code>let b = a;</code>.</p>
+    <div class="runnable" data-title="Integers are copied">
+<textarea>
+fn main() {
+    let a: u32 = 3;
+    let b = a;
+    let point = (1.5_f64, true);
+    let other = point;
+    println!("{a} {b} {point:?} {other:?}");
+}
+</textarea>
+    </div>
+    <p>These types implement the <strong><code>Copy</code></strong> trait. A trait is a named set of behaviour a type
+      can have (<a href="m06-traits-generics.html">M06</a> covers traits fully). <code>Copy</code> means "a bitwise
+      copy of the stack bytes is a complete, independent copy of the value". That is true for a <code>u32</code>: the
+      four bytes <em>are</em> the number. It is false for a <code>String</code>: copying the header would leave two
+      owners of one heap buffer. So for <code>Copy</code> types, using a value by value copies it and the original
+      stays valid; for every other type, it moves.</p>
+    <div class="two-col">
+      <div class="card"><h4>Copy</h4><p>All integers and floats, <code>bool</code>, <code>char</code>, shared
+        references <code>&amp;T</code>, and tuples and arrays made only of <code>Copy</code> types. Also your own
+        small structs if you <code>#[derive(Clone, Copy)]</code> and every field is <code>Copy</code>.</p></div>
+      <div class="card"><h4>Not Copy</h4><p><code>String</code>, <code>Vec&lt;T&gt;</code>,
+        <code>HashMap</code>, <code>Box&lt;T&gt;</code>, <code>&amp;mut T</code>, any type with a destructor, and any
+        struct containing one of these. Using them by value moves them.</p></div>
+    </div>
+    <p><strong><code>Clone</code></strong> is the explicit, possibly expensive copy. Calling <code>.clone()</code> on
+      a <code>String</code> allocates a new heap buffer and copies the bytes into it, giving you a second, independent
+      owner. It is the Rust equivalent of Python's <code>list(a)</code> or <code>copy.deepcopy(a)</code> (for nested
+      owned data, <code>clone</code> is deep: cloning a <code>Vec&lt;String&gt;</code> clones every string).</p>
+    <div class="viz" data-viz="ownership" data-config='{"scenario": "clone"}'></div>
+    <p>Why does Rust make you write <code>.clone()</code> instead of copying silently? Because the cost is real and
+      should be visible in code review. A <code>.clone()</code> inside a loop over ten thousand packages is ten
+      thousand allocations. When you see one in Pixi, it is a deliberate choice, and reviewers sometimes ask "can this
+      borrow instead?"</p>
+    <p>You can opt your own types into <code>Copy</code>, but only if every field is <code>Copy</code>. Try it with a
+      field that is not.</p>
+    <div class="runnable" data-title="Copy on a struct with a String" data-compile-fail>
+<textarea>
+#[derive(Debug, Clone, Copy)]
+struct Pin {
+    name: String,
+    major: u32,
+}
+
+fn main() {
+    let p = Pin { name: String::from("python"), major: 3 };
+    let q = p;
+    println!("{p:?} {q:?}");
+}
+</textarea>
+    </div>
+    <p>This is E0204, "the trait <code>Copy</code> cannot be implemented for this type". The span underlines
+      <code>Copy</code> in the derive and labels the culprit field: "this field does not implement
+      <code>Copy</code>". The fix depends on what you want. Remove <code>Copy</code> and keep <code>Clone</code>, then
+      call <code>p.clone()</code> when you need a second value. Or, if the struct really is small plain data, change
+      the field to a <code>Copy</code> type. (Note that <code>Copy</code> also requires <code>Clone</code>; every
+      <code>Copy</code> type is also <code>Clone</code>, where <code>clone</code> just does the bitwise copy.)</p>
+    <div class="runnable" data-title="Copy for plain data, Clone for owned data" data-predict>
+<textarea>
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Version {
+    major: u32,
+    minor: u32,
+}
+
+#[derive(Debug, Clone)]
+struct Package {
+    name: String,
+    version: Version,
+}
+
+fn main() {
+    let v = Version { major: 2, minor: 1 };
+    let w = v;
+    let numpy = Package { name: String::from("numpy"), version: w };
+    let mut fork = numpy.clone();
+    fork.name.push_str("-fork");
+    fork.version.minor += 1;
+    println!("{} {}.{}", numpy.name, numpy.version.major, numpy.version.minor);
+    println!("{} {}.{}", fork.name, fork.version.major, fork.version.minor);
+    println!("{}", v == w);
+}
+</textarea>
+    </div>
+    <aside class="callout pixi"><p>In Pixi you will see <code>.clone()</code> on values of type
+      <code>Arc&lt;T&gt;</code> all over the place. That clone does <em>not</em> copy the data: it bumps a reference
+      count, Python style, and gives you a second handle to the same shared value. That is a deliberate, opt-in use of
+      shared ownership, covered in <a href="m08-smart-pointers.html">M08</a>. For now, read <code>.clone()</code> on a
+      <code>String</code>, <code>Vec</code>, or plain struct as "a full copy".</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>Copy</code> types are duplicated implicitly and
+      never move; they are small, fixed-size, and own nothing on the heap. Everything else moves, and
+      <code>.clone()</code> is how you ask for an explicit, independent copy, at a cost you can see.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="drop">
+    <h2>Drop: cleanup at a known point</h2>
+    <p>When an owner goes out of scope, Rust <strong>drops</strong> its value: it runs the type's cleanup code (its
+      destructor), then frees the memory. For a <code>String</code>, cleanup frees the heap buffer. For a file, it
+      closes the file descriptor. For a lock guard, it releases the lock. The rule is simple and fully
+      deterministic:</p>
+    <ul>
+      <li>A value is dropped when its owner goes out of scope, at the closing <code>}</code>.</li>
+      <li>Locals are dropped in <strong>reverse order of declaration</strong> (last declared, first dropped), so a
+        value never outlives something declared before it that it might depend on.</li>
+      <li>A value that was moved out of a variable is not dropped there; its new owner drops it.</li>
+      <li>You can drop early with <code>drop(value)</code>, which is just a function that takes ownership and does
+        nothing, so the value dies at the end of <code>drop</code>.</li>
+    </ul>
+    <p>You can watch this happen by implementing the <code>Drop</code> trait yourself. Predict the order of the four
+      lines before running.</p>
+    <div class="runnable" data-title="Watch the drops" data-predict>
+<textarea>
+struct Noisy(&'static str);
+
+impl Drop for Noisy {
+    fn drop(&mut self) {
+        println!("drop {}", self.0);
+    }
+}
+
+fn main() {
+    let _a = Noisy("a");
+    let b = Noisy("b");
+    let _c = Noisy("c");
+    drop(b);
+    println!("end of main");
+}
+</textarea>
+    </div>
+    <p><code>b</code> is dropped first because <code>drop(b)</code> moves it into the <code>drop</code> function. Then
+      <code>main</code> prints, then the remaining locals drop in reverse order: <code>c</code>, then <code>a</code>.
+      (The leading underscore in <code>_a</code> tells the compiler the variable is intentionally unused, without
+      dropping it early. A bare <code>let _ = Noisy("x");</code> would drop immediately, because <code>_</code> does not
+      bind at all.)</p>
+    <div class="tabs">
+      <div class="tab" data-label="Python"><pre><code class="language-python">with open("pixi.toml") as f:
+    text = f.read()
+# f is closed here because of `with`.
+
+f2 = open("pixi.lock")
+# f2 is closed... eventually, when the
+# reference count hits zero. __del__ timing
+# is an implementation detail.</code></pre></div>
+      <div class="tab" data-label="Rust"><pre><code class="language-rust">{
+    let text = std::fs::read_to_string("pixi.toml")?;
+    let f2 = std::fs::File::open("pixi.lock")?;
+    // use f2...
+} // f2 is closed here, every time: it is dropped
+  // at the end of its scope. No `with` needed.</code></pre></div>
+    </div>
+    <p>This pattern, where a value's lifetime controls a resource, is called RAII ("resource acquisition is
+      initialization"). It is why Rust has no <code>with</code> statement and no <code>finally</code>: the scope is
+      the <code>with</code> block, for every value, automatically.</p>
+    <aside class="callout pixi"><p>Pixi uses <code>Drop</code> to report progress. A <code>ScopedTask</code> marks a
+      task finished when it goes out of scope, so the progress bar is correct even if the code returns early with an
+      error (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_progress/src/lib.rs#L197-L205">crates/pixi_progress/src/lib.rs</a>):</p>
+    <pre><code class="language-rust">impl Drop for ScopedTask {
+    fn drop(&amp;mut self) {
+        if let Some(state) = self.state.take() {
+            state
+                .lock()
+                .notify(Operation::Finished(std::mem::take(&amp;mut self.name)));
+        }
+    }
+}</code></pre>
+    <p><code>drop</code> receives <code>&amp;mut self</code>, not <code>self</code>, so it cannot move
+      <code>self.name</code> out directly. <code>std::mem::take</code> swaps an empty <code>String</code> in and hands
+      back the old one, which is the standard trick for that. You will meet it again in the error section.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> values drop at the end of their owner's scope, in
+      reverse declaration order, or earlier with <code>drop(x)</code>. Moved-out values are dropped by their new
+      owner. Cleanup is deterministic, so files, locks, and progress bars are released exactly where the scope
+      ends.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="references">
+    <h2>Shared references: <code>&amp;T</code></h2>
+    <p>If every function call moved its arguments, you would spend your life returning values back to callers.
+      Instead, you <strong>borrow</strong>. <code>&amp;value</code> creates a <strong>shared reference</strong>: a
+      pointer that lets you read the value without owning it. The owner keeps ownership; when the reference is no
+      longer used, nothing is freed.</p>
+    <div class="runnable" data-title="Borrow to read">
+<textarea>
+fn describe(name: &String) -> String {
+    format!("{name} ({} bytes)", name.len())
+}
+
+fn main() {
+    let name = String::from("rattler");
+    let summary = describe(&name);
+    println!("{summary}");
+    println!("{name} is still mine");
+}
+</textarea>
+    </div>
+    <p>Two things to see. The type <code>&amp;String</code> in the signature says "I borrow a <code>String</code>; I
+      do not own it". And the caller writes <code>&amp;name</code> at the call site, so a reader of
+      <code>main</code> can see that <code>describe</code> cannot keep or free the string. That visibility is a big
+      part of why reviewing Rust is easier than reviewing Python: the signature tells you what a function can do
+      to its arguments.</p>
+    <div class="viz" data-viz="ownership" data-config='{"scenario": "borrow"}'></div>
+    <p>A few mechanics you will use constantly:</p>
+    <ul>
+      <li><strong>Any number of shared references can exist at once.</strong> Reading from many places at the same
+        time is always safe.</li>
+      <li><strong>Shared references are <code>Copy</code>.</strong> Passing <code>r</code> to a function copies the
+        pointer; you still have <code>r</code>.</li>
+      <li><strong>Method calls borrow automatically.</strong> <code>name.len()</code> is really
+        <code>String::len(&amp;name)</code>. The method's first parameter, <code>&amp;self</code>, tells the compiler to
+        borrow, so you do not write the <code>&amp;</code>. This is called <em>auto-referencing</em>.</li>
+      <li><strong><code>*r</code> dereferences.</strong> It means "the value <code>r</code> points to". You need it
+        for operators on <code>Copy</code> values (<code>*count + 1</code>); for method calls and field access, Rust
+        dereferences for you.</li>
+      <li><strong>A reference cannot outlive its owner.</strong> The compiler rejects any reference that would still
+        be used after the owner is dropped. Python cannot have a dangling reference because the reference keeps the
+        object alive; Rust cannot because the compiler refuses to compile one.</li>
+    </ul>
+    <div class="runnable" data-title="Dereferencing and auto-referencing" data-predict>
+<textarea>
+fn bigger(a: &u32, b: &u32) -> u32 {
+    if *a > *b { *a } else { *b }
+}
+
+fn main() {
+    let x = 7;
+    let y = 12;
+    let rx = &x;
+    let rx2 = rx;
+    println!("{}", bigger(rx, &y));
+    println!("{}", *rx2 + 1);
+    let word = String::from("pixi");
+    let r = &word;
+    println!("{} {}", r.len(), r.to_uppercase());
+}
+</textarea>
+    </div>
+    <p>A shared reference is read-only. Trying to change the value through it fails with E0596.</p>
+    <div class="runnable" data-title="Writing through a shared reference" data-compile-fail>
+<textarea>
+fn add_channel(channels: &Vec<String>) {
+    channels.push(String::from("conda-forge"));
+}
+
+fn main() {
+    let channels = Vec::new();
+    add_channel(&channels);
+    println!("{channels:?}");
+}
+</textarea>
+    </div>
+    <p>E0596 reads "cannot borrow <code>*channels</code> as mutable, as it is behind a <code>&amp;</code> reference".
+      <code>push</code> needs <code>&amp;mut self</code>, and you only have <code>&amp;</code>. The
+      <code>help:</code> line proposes the fix: "consider changing this to be a mutable reference:
+      <code>&amp;mut Vec&lt;String&gt;</code>". That leads to the next section.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>&amp;T</code> borrows for reading. The owner keeps
+      ownership, many shared borrows may coexist, and the borrow can never outlive the owner. The <code>&amp;</code> at
+      the call site tells readers the callee cannot keep or change the value.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="mut-references">
+    <h2>Mutable references: <code>&amp;mut T</code></h2>
+    <p>To change a value you do not own, you need a <strong>mutable reference</strong>, <code>&amp;mut T</code>. It
+      comes with a stronger promise: while it is in use, it is the <em>only</em> way to reach that value. Nobody
+      else may read or write it. For that reason it is often called an <em>exclusive</em> reference, which is a
+      better name than "mutable".</p>
+    <div class="runnable" data-title="Lend for writing" data-predict>
+<textarea>
+fn add_channel(channels: &mut Vec<String>, name: &str) {
+    if !channels.iter().any(|c| c == name) {
+        channels.push(name.to_string());
+    }
+}
+
+fn main() {
+    let mut channels = vec![String::from("conda-forge")];
+    add_channel(&mut channels, "bioconda");
+    add_channel(&mut channels, "conda-forge");
+    println!("{channels:?}");
+}
+</textarea>
+    </div>
+    <p>Three places say "mutable" here, and each is required. <code>let mut channels</code> makes the binding
+      mutable, which is needed before anyone can borrow it mutably. <code>&amp;mut Vec&lt;String&gt;</code> in the
+      signature declares that the function may change its argument. And <code>&amp;mut channels</code> at the call
+      site makes the caller say so too. Compare a Python function: <code>def add_channel(channels, name)</code>
+      gives you no way to tell, from the call, whether <code>channels</code> will be changed.</p>
+    <div class="viz" data-viz="ownership" data-config='{"scenario": "mut-borrow"}'></div>
+    <p>If you forget <code>let mut</code>, the compiler tells you exactly where to add it.</p>
+    <div class="runnable" data-title="Borrowing an immutable binding mutably" data-compile-fail>
+<textarea>
+fn main() {
+    let deps = vec![String::from("python")];
+    let w = &mut deps;
+    w.push(String::from("numpy"));
+    println!("{deps:?}");
+}
+</textarea>
+    </div>
+    <p>E0596 again, this time "cannot borrow <code>deps</code> as mutable, as it is not declared as mutable", with
+      <code>help: consider changing this to be mutable: mut deps</code>. In Rust, immutability is the default and
+      mutation is something you opt in to at each level.</p>
+    <p>A mutable reference can also replace the whole value, using <code>*</code> to assign through it:</p>
+    <div class="runnable" data-title="Assigning through &amp;mut" data-predict>
+<textarea>
+fn reset(count: &mut u32, label: &mut String) {
+    *count = 0;
+    *label = String::from("fresh");
+}
+
+fn main() {
+    let mut count = 41;
+    let mut label = String::from("stale");
+    count += 1;
+    reset(&mut count, &mut label);
+    println!("{count} {label}");
+}
+</textarea>
+    </div>
+    <p><code>*label = String::from("fresh");</code> drops the old string (<code>"stale"</code>) and moves the new one
+      into the caller's variable. The caller still owns <code>label</code>; the function only changed what it
+      holds.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> <code>&amp;mut T</code> is an exclusive loan. It needs a
+      <code>mut</code> binding, it shows up in both the signature and the call, and while it is live it is the only
+      access path to the value.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="rules">
+    <h2>The borrowing rules, and why they exist</h2>
+    <p>Everything so far comes down to two rules that the compiler's <strong>borrow checker</strong> enforces:</p>
+    <ol>
+      <li>At any moment, a value may have <strong>either</strong> any number of shared references (<code>&amp;T</code>)
+        <strong>or</strong> exactly one mutable reference (<code>&amp;mut T</code>). Never both.</li>
+      <li>Every reference must be valid for as long as it is used: it cannot outlive the value it points to.</li>
+    </ol>
+    <p>The short form is <strong>aliasing XOR mutation</strong>: data can be shared, or it can be changed, but not both
+      at once. To see why, take the bug that Python lets you write.</p>
+    <pre data-label="Python"><code class="language-python">deps = ["python", "numpy", "numpy-base"]
+for d in deps:
+    if d.startswith("numpy"):
+        deps.remove(d)     # mutating the list while iterating it
+print(deps)
+# ['python', 'numpy-base']  -- "numpy-base" was skipped</code></pre>
+    <p>The loop holds a position in the list while the body changes the list underneath it. Python gives you a wrong
+      answer silently (for a dict, a <code>RuntimeError: dictionary changed size during iteration</code> at run time).
+      In Rust the stakes are higher: <code>Vec::push</code> may need more capacity, so it allocates a bigger buffer,
+      copies the elements over, and frees the old one. Any reference into the old buffer would then point at freed
+      memory. Here is the smallest version.</p>
+    <div class="runnable" data-title="A reference into a Vec, then a push" data-compile-fail>
+<textarea>
+fn main() {
+    let mut deps = vec![String::from("python")];
+    let first = &deps[0];
+    deps.push(String::from("numpy"));
+    println!("first is {first}");
+}
+</textarea>
+    </div>
+    <p>This is E0502, "cannot borrow <code>deps</code> as mutable because it is also borrowed as immutable". Read the
+      three labels in order: (1) "immutable borrow occurs here" under <code>&amp;deps[0]</code>, (2) "mutable borrow
+      occurs here" under <code>deps.push(...)</code> (because <code>push</code> takes <code>&amp;mut self</code>), and
+      (3) "immutable borrow later used here" under the <code>println!</code>. Label 3 is the key: the shared borrow is
+      still <em>needed</em> after the push, so the two overlap. Step through what would go wrong if Rust allowed it:</p>
+    <div class="viz" data-viz="ownership" data-config='{
+      "title": "Why E0502 exists: a push can move the buffer",
+      "code": [
+        "fn main() {",
+        "    let mut deps = vec![String::from(\"python\")];",
+        "    let first = &amp;deps[0];",
+        "    deps.push(String::from(\"numpy\")); // E0502",
+        "    println!(\"first is {first}\");",
+        "}"
+      ],
+      "steps": [
+        {"line": 2, "note": "<code>deps</code> owns a heap buffer with room for exactly one element (capacity 1).", "stack": [{"name": "deps", "type": "Vec<String>", "owns": "h1", "mut": true}], "heap": [{"id": "h1", "value": "[\"python\"] cap 1"}]},
+        {"line": 3, "note": "<code>first</code> is a shared reference pointing <em>into</em> that buffer, at element 0.", "stack": [{"name": "deps", "type": "Vec<String>", "owns": "h1", "mut": true}, {"name": "first", "type": "&amp;String", "ref": "deps"}], "heap": [{"id": "h1", "value": "[\"python\"] cap 1"}]},
+        {"line": 4, "note": "Suppose the push were allowed. The buffer is full, so <code>push</code> allocates a bigger one, moves the elements across, and frees the old one. <code>deps</code> now owns the new buffer.", "stack": [{"name": "deps", "type": "Vec<String>", "owns": "h2", "mut": true}, {"name": "first", "type": "&amp;String", "ref": "deps"}], "heap": [{"id": "h1", "value": "(freed)"}, {"id": "h2", "value": "[\"python\", \"numpy\"] cap 4"}]},
+        {"line": 5, "note": "<code>first</code> still holds the address of the old, freed buffer. Reading it here would be a use-after-free: in C, a crash or silent garbage. The borrow checker rejects line 4 so that this step can never happen.", "stack": [{"name": "deps", "type": "Vec<String>", "owns": "h2", "mut": true}, {"name": "first", "type": "&amp;String", "ref": "deps", "state": "moved"}], "heap": [{"id": "h1", "value": "(freed)"}, {"id": "h2", "value": "[\"python\", \"numpy\"] cap 4"}]},
+        {"line": 6, "note": "The real fix: finish using <code>first</code> before the push, or copy what you need out of it first (<code>let first = deps[0].clone();</code>).", "stack": [{"name": "deps", "type": "Vec<String>", "state": "dropped"}, {"name": "first", "type": "&amp;String", "state": "dropped"}], "heap": []}
+      ]
+    }'></div>
+    <p>Two fixes, depending on what you need. If you only need <code>first</code> before the push, move the
+      <code>println!</code> up. If you need it after, take an owned copy: <code>let first = deps[0].clone();</code>.
+      Then <code>first</code> owns its own string and is not a borrow of <code>deps</code> at all.</p>
+    <h3>Two mutable borrows: E0499</h3>
+    <p>Rule 1 also forbids two <code>&amp;mut</code> to the same value at once, even if neither is a "reader".</p>
+    <div class="runnable" data-title="Two writers" data-compile-fail>
+<textarea>
+fn main() {
+    let mut name = String::from("pixi");
+    let a = &mut name;
+    let b = &mut name;
+    a.push_str("-build");
+    b.push_str("-cli");
+    println!("{name}");
+}
+</textarea>
+    </div>
+    <p>E0499, "cannot borrow <code>name</code> as mutable more than once at a time". Again three labels: first mutable
+      borrow, second mutable borrow, and "first borrow later used here". The fix is to let the first borrow end
+      before the second starts: do all the work through <code>a</code>, then take <code>b</code>. In real code this
+      error usually shows up as "I called a <code>&amp;mut self</code> method while holding a <code>&amp;mut</code> to
+      one of my fields"; the fix is the same: shorten one of the borrows, or split the work so each borrow is used and
+      finished in turn.</p>
+    <h3>Borrows end at their last use</h3>
+    <p>A borrow does not last until the closing brace. It lasts from where it is created to where it is
+      <strong>last used</strong>. This is called <strong>non-lexical lifetimes</strong> (NLL), and it is why the
+      following compiles even though <code>first</code> is still "in scope" when <code>push</code> runs.</p>
+    <div class="runnable" data-title="Non-lexical lifetimes" data-predict>
+<textarea>
+fn main() {
+    let mut deps = vec![String::from("python")];
+    let first = &deps[0];
+    println!("first is {first}");
+    deps.push(String::from("numpy"));
+    let count = &mut deps;
+    count.push(String::from("pandas"));
+    println!("{}", deps.len());
+}
+</textarea>
+    </div>
+    <p><code>first</code> is last used on line 4, so its borrow is over before the push on line 5. <code>count</code>
+      is last used on line 7, so by line 8 <code>deps</code> can be read again. When you get a borrow error, the
+      question to ask is not "which variables are in scope?" but "which borrows are still going to be used?". The
+      compiler's "later used here" label answers it for you.</p>
+    <aside class="callout think"><p>Python's list mutation during iteration and C's use-after-free are the same bug at
+      different levels: a reader and a writer touching the same data at once. Rust forbids that combination
+      everywhere, at compile time. The same rule is what makes Rust's threads safe: a value that two threads can
+      read cannot be written by either, unless you use a type designed for it (<a href="m08-smart-pointers.html">M08</a>).</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> many <code>&amp;T</code> or one <code>&amp;mut T</code>,
+      never both, and no reference outlives its owner. A borrow lasts until its last use. When the checker complains,
+      find the "later used here" label: that is the use that keeps the conflicting borrow alive.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="slices">
+    <h2>Slices: <code>&amp;str</code> and <code>&amp;[T]</code></h2>
+    <p>A <strong>slice</strong> is a borrowed view of a contiguous run of elements owned by something else. It is a
+      reference with two words instead of one: a pointer to the first element and a length. Rust has two slice types
+      you will use daily:</p>
+    <ul>
+      <li><code>&amp;str</code>, a <strong>string slice</strong>: a view of UTF-8 bytes. It can point into a
+        <code>String</code>'s heap buffer, or into the program's read-only data (every string literal like
+        <code>"pixi"</code> is a <code>&amp;'static str</code>, a slice that lives for the whole program).</li>
+      <li><code>&amp;[T]</code>, a <strong>slice of T</strong>: a view of some elements of a <code>Vec&lt;T&gt;</code>,
+        an array <code>[T; N]</code>, or another slice.</li>
+    </ul>
+    <p>You make slices with range indexing. Like Python, the end is exclusive; unlike Python, there are no negative
+      indexes, and indexes are <strong>byte</strong> offsets for strings.</p>
+    <div class="runnable" data-title="Slicing strings and vectors" data-predict>
+<textarea>
+fn main() {
+    let spec = String::from("numpy>=2.1");
+    let name: &str = &spec[0..5];
+    let constraint: &str = &spec[5..];
+    println!("{name} | {constraint}");
+
+    let platforms = vec!["linux-64", "osx-arm64", "win-64", "osx-64"];
+    let unix: &[&str] = &platforms[..2];
+    println!("{unix:?} {}", unix.len());
+    println!("{}", std::mem::size_of::<&str>());
+}
+</textarea>
+    </div>
+    <p>The last line prints 16: a slice reference is two words, the pointer and the length. Python's
+      <code>spec[0:5]</code> <em>copies</em> the characters into a new string; Rust's <code>&amp;spec[0..5]</code>
+      copies nothing, it points into <code>spec</code>. That is why slices are borrows, and why the borrow rules
+      apply to them: while <code>name</code> is in use, <code>spec</code> cannot be changed.</p>
+    <aside class="callout warn"><p>String slice indexes are byte offsets and must fall on character boundaries.
+      <code>&amp;"café"[0..4]</code> panics at run time with "byte index 4 is not a char boundary", because
+      <code>é</code> takes two bytes. Prefer methods that find boundaries for you: <code>split_once</code>,
+      <code>find</code>, <code>strip_prefix</code>, <code>trim</code>, <code>split</code>. Most of them return
+      <code>&amp;str</code> slices of the original, with no allocation.</p></aside>
+    <h3>Take <code>&amp;str</code>, not <code>&amp;String</code></h3>
+    <p>Earlier, <code>describe</code> took <code>&amp;String</code>. That works but is too strict: a caller holding a
+      string literal, or a slice of a bigger string, cannot call it without allocating a <code>String</code> first.
+      Take <code>&amp;str</code> instead. A <code>&amp;String</code> converts to <code>&amp;str</code> automatically
+      at the call site (this is <strong>deref coercion</strong>: <code>String</code> knows how to present itself as a
+      <code>str</code>), so you lose nothing.</p>
+    <div class="runnable" data-title="One &amp;str function, three kinds of caller" data-predict>
+<textarea>
+fn is_conda_forge(channel: &str) -> bool {
+    channel == "conda-forge" || channel.ends_with("/conda-forge")
+}
+
+fn count_matching(channels: &[String]) -> usize {
+    let mut n = 0;
+    for c in channels {
+        if is_conda_forge(c) {
+            n += 1;
+        }
+    }
+    n
+}
+
+fn main() {
+    let owned = String::from("https://prefix.dev/conda-forge");
+    println!("{}", is_conda_forge(&owned));
+    println!("{}", is_conda_forge("bioconda"));
+    println!("{}", is_conda_forge(&owned[8..]));
+    let all = vec![owned.clone(), String::from("conda-forge"), String::from("pytorch")];
+    println!("{}", count_matching(&all));
+}
+</textarea>
+    </div>
+    <p>The same rule applies to sequences: take <code>&amp;[T]</code> instead of <code>&amp;Vec&lt;T&gt;</code>. A
+      <code>&amp;Vec&lt;T&gt;</code> coerces to <code>&amp;[T]</code>, and arrays and sub-slices work too. Clippy, the
+      Rust linter, flags <code>&amp;String</code> and <code>&amp;Vec&lt;T&gt;</code> parameters with its
+      <code>ptr_arg</code> lint, and Pixi runs clippy with warnings as errors.</p>
+    <h3>When to take ownership instead</h3>
+    <p>Borrowing is the default, but not always right. Use this table when you design a signature:</p>
+    <table>
+      <thead><tr><th>The function...</th><th>Parameter type</th><th>Example</th></tr></thead>
+      <tbody>
+        <tr><td>only reads the text</td><td><code>&amp;str</code></td><td><code>fn is_direct_url(url_scheme: &amp;str) -&gt; bool</code></td></tr>
+        <tr><td>only reads the elements</td><td><code>&amp;[T]</code></td><td><code>fn total(sizes: &amp;[u64]) -&gt; u64</code></td></tr>
+        <tr><td>changes the caller's value in place</td><td><code>&amp;mut T</code> / <code>&amp;mut Vec&lt;T&gt;</code></td><td><code>fn dedup_matches(results: &amp;mut Vec&lt;Match&gt;)</code></td></tr>
+        <tr><td>stores the value (in a struct, a collection, a thread)</td><td><code>String</code> / <code>Vec&lt;T&gt;</code></td><td><code>fn new(name: String) -&gt; Self</code></td></tr>
+        <tr><td>transforms and returns it</td><td>owned in, owned out</td><td><code>fn with_channel(spec: String, ..) -&gt; String</code></td></tr>
+      </tbody>
+    </table>
+    <p>If a function will store a string, taking <code>String</code> is better than taking <code>&amp;str</code> and
+      calling <code>.to_string()</code> inside: the caller may already have a <code>String</code> it no longer needs,
+      and can move it in for free. Taking ownership makes the cost visible to the caller instead of hiding an
+      allocation.</p>
+    <aside class="callout pixi"><p>Pixi's reporter wraps long notice lines without copying them, by repeatedly
+      re-slicing a <code>&amp;str</code> (<a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_reporters/src/repodata_reporter.rs#L472-L495">crates/pixi_reporters/src/repodata_reporter.rs</a>,
+      trimmed):</p>
+    <pre><code class="language-rust">fn push_wrapped_notice_line(rendered: &amp;mut String, line: &amp;str, width: usize) {
+    let mut remainder = line;
+    loop {
+        // ...
+        rendered.push_str("  │ ");
+        rendered.push_str(remainder[..split].trim_end());
+        rendered.push('\n');
+        remainder = remainder[split..].trim_start();
+        // ...
+    }
+}</code></pre>
+    <p>The output buffer is borrowed mutably (<code>&amp;mut String</code>) because the function appends to the
+      caller's string. The input is borrowed shared (<code>&amp;str</code>). <code>remainder</code> is a
+      <code>&amp;str</code> that starts as the whole line and is re-pointed at smaller and smaller tails of it. No
+      allocation happens except the appends to <code>rendered</code>.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> a slice is a borrowed (pointer, length) view into data
+      owned elsewhere. Take <code>&amp;str</code> and <code>&amp;[T]</code> for read-only parameters; take owned
+      <code>String</code>/<code>Vec</code> when the function keeps the value.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="reading-errors">
+    <h2>Reading borrow-checker errors</h2>
+    <p>Borrow errors look intimidating at first, but they all have the same shape, and once you can read the shape
+      you can fix most of them in seconds. Every one has:</p>
+    <ol>
+      <li>An <strong>error code</strong> in brackets, like <code>error[E0505]</code>. Run
+        <code>pixi run rustc --explain E0505</code> for a full explanation with examples.</li>
+      <li>A <strong>headline</strong> that names the variable and the conflict.</li>
+      <li><strong>Labelled spans</strong>, usually three: where the first thing happened (a borrow or a move), where
+        the conflicting thing happened, and where the first thing is <em>later used</em>. Read them in source order.</li>
+      <li><strong><code>help:</code> and <code>note:</code> lines</strong>, often with a concrete suggested edit.</li>
+    </ol>
+    <p>You have already met E0382, E0499, E0502, and E0596. Two more are common in real code.</p>
+    <h3>E0505: moving out while borrowed</h3>
+    <div class="runnable" data-title="Move while a borrow is live" data-compile-fail>
+<textarea>
+fn archive(name: String) {
+    println!("archived {name}");
+}
+
+fn main() {
+    let name = String::from("old-env");
+    let r = &name;
+    archive(name);
+    println!("{r}");
+}
+</textarea>
+    </div>
+    <p>E0505, "cannot move out of <code>name</code> because it is borrowed". The labels: "borrow of <code>name</code>
+      occurs here" (line 7), "move out of <code>name</code> occurs here" (line 8), "borrow later used here" (line 9).
+      Moving <code>name</code> into <code>archive</code> would free it when <code>archive</code> returns, and then
+      <code>r</code> would dangle. Fixes: use <code>r</code> before the move; pass a clone
+      (<code>archive(name.clone())</code>); or, best, make <code>archive</code> borrow (<code>&amp;str</code>) if it
+      does not need to own.</p>
+    <h3>E0507: moving out of a borrow</h3>
+    <p>You cannot take ownership of something you only borrowed, or of an element inside a collection, by plain
+      assignment. The owner would be left with a hole.</p>
+    <div class="runnable" data-title="Taking a String out of a Vec" data-compile-fail>
+<textarea>
+fn first_owned(names: &Vec<String>) -> String {
+    let first = names[0];
+    first
+}
+
+fn main() {
+    let names = vec![String::from("pixi")];
+    println!("{}", first_owned(&names));
+}
+</textarea>
+    </div>
+    <p>E0507, "cannot move out of index of <code>Vec&lt;String&gt;</code>", with "move occurs because value has type
+      <code>String</code>, which does not implement the <code>Copy</code> trait". <code>names[0]</code> is a place
+      inside a vector you only borrowed. The <code>help:</code> line offers two fixes: borrow it
+      (<code>let first = &amp;names[0];</code>, then return <code>&amp;str</code> or clone at the end) or clone it
+      (<code>names[0].clone()</code>). If you <em>own</em> the vector and really want to take the element out, the
+      standard tools are:</p>
+    <ul>
+      <li><code>v.remove(i)</code> or <code>v.swap_remove(i)</code>: take the element out, shrinking the vector.</li>
+      <li><code>std::mem::take(&amp;mut v[i])</code>: take the value and leave its type's default (an empty
+        <code>String</code>) in its place. Works through any <code>&amp;mut</code>, which is why Pixi's
+        <code>Drop</code> impl above uses it.</li>
+      <li><code>std::mem::replace(&amp;mut v[i], new_value)</code>: same, with a replacement you choose.</li>
+      <li><code>opt.take()</code> on an <code>Option</code>: take the value and leave <code>None</code> (more in
+        <a href="m04-option-result.html">M04</a>).</li>
+    </ul>
+    <div class="runnable" data-title="mem::take and mem::replace" data-predict>
+<textarea>
+use std::mem;
+
+fn main() {
+    let mut names = vec![String::from("python"), String::from("numpy")];
+    let taken = mem::take(&mut names[0]);
+    let old = mem::replace(&mut names[1], String::from("pandas"));
+    println!("{taken} {old} {names:?}");
+}
+</textarea>
+    </div>
+    <h3>A fix strategy that works</h3>
+    <p>When you hit a borrow error, try these in order. Each step costs a little more than the one before it.</p>
+    <ol>
+      <li><strong>Reorder.</strong> Finish using the first borrow before the conflicting action (NLL does the rest).</li>
+      <li><strong>Borrow instead of move.</strong> Change a parameter from <code>String</code> to <code>&amp;str</code>
+        or from <code>Vec&lt;T&gt;</code> to <code>&amp;[T]</code>; iterate with <code>for x in &amp;v</code>.</li>
+      <li><strong>Shrink the borrow.</strong> Copy out the small thing you need (<code>let n = v.len();</code>, or an
+        index instead of a reference) and drop the reference.</li>
+      <li><strong>Take with a placeholder.</strong> <code>mem::take</code>, <code>mem::replace</code>,
+        <code>Option::take</code>.</li>
+      <li><strong>Clone.</strong> It is a fine answer for small values or code that is not hot. Measure before you
+        worry.</li>
+      <li><strong>Restructure ownership.</strong> Shared ownership (<code>Rc</code>/<code>Arc</code>) or interior
+        mutability (<code>RefCell</code>/<code>Mutex</code>), covered in <a href="m08-smart-pointers.html">M08</a>.
+        Reach for these when the data really is shared, not to silence the checker.</li>
+    </ol>
+    <table>
+      <thead><tr><th>Code</th><th>Headline</th><th>Usual fix</th></tr></thead>
+      <tbody>
+        <tr><td>E0382</td><td>use (or borrow) of moved value</td><td>borrow instead of moving, or clone</td></tr>
+        <tr><td>E0499</td><td>cannot borrow as mutable more than once at a time</td><td>finish with one <code>&amp;mut</code> before taking another</td></tr>
+        <tr><td>E0502</td><td>cannot borrow as mutable because it is also borrowed as immutable (or the reverse)</td><td>reorder, or copy out what you need</td></tr>
+        <tr><td>E0505</td><td>cannot move out of <code>x</code> because it is borrowed</td><td>use the borrow first, or borrow in the callee</td></tr>
+        <tr><td>E0507</td><td>cannot move out of a borrow / index</td><td>borrow, clone, or <code>mem::take</code></td></tr>
+        <tr><td>E0596</td><td>cannot borrow as mutable</td><td>add <code>mut</code> to the binding, or take <code>&amp;mut</code></td></tr>
+      </tbody>
+    </table>
+    <p>Practise on one more. Read the error, decide which strategy applies, then fix it in the cell and run it.</p>
+    <div class="runnable" data-title="Fix me: print every dependency, then clear the list" data-compile-fail>
+<textarea>
+fn main() {
+    let mut deps = vec![String::from("python"), String::from("numpy")];
+    for d in &deps {
+        if d == "numpy" {
+            deps.clear();
+        }
+        println!("{d}");
+    }
+    println!("{}", deps.len());
+}
+</textarea>
+    </div>
+    <details class="reveal"><summary>Reveal a fix</summary>
+      <p>E0502: the loop holds a shared borrow of <code>deps</code> (from <code>&amp;deps</code>) for its whole body,
+        and <code>clear</code> needs <code>&amp;mut</code>. This is exactly the Python "mutate while iterating" bug.
+        Strategy 3: record what you need during the loop, act after it.</p>
+      <pre><code class="language-rust">let mut saw_numpy = false;
+for d in &amp;deps {
+    if d == "numpy" {
+        saw_numpy = true;
+    }
+    println!("{d}");
+}
+if saw_numpy {
+    deps.clear();
+}</code></pre>
+    </details>
+    <aside class="callout pro"><p>Maintainers read borrow errors from the bottom label up: "later used here" tells you
+      which use keeps the first borrow alive, and that is almost always the line you need to move or change. Do not
+      sprinkle <code>.clone()</code> until the error goes away without reading it; reviewers on Pixi will ask why each
+      clone is there.</p></aside>
+    <aside class="callout tip"><p><strong>Remember:</strong> code, headline, labelled spans, help. Find the two
+      conflicting actions and the "later used" line, then reorder, borrow, shrink, take, or clone, in that
+      order.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="pixi-reading">
+    <h2>Reading Pixi</h2>
+    <p>Two short functions from the frozen snapshot show the ideas of this module in real code. Both deal with
+      <em>virtual packages</em>: entries like <code>__glibc</code> or <code>__cuda</code> that describe the machine,
+      which the solver treats as installed packages.</p>
+    <h3>Borrow a slice, return an owned copy</h3>
+    <p>From <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pypi_modifiers/src/pypi_tags.rs#L103-L109">crates/pypi_modifiers/src/pypi_tags.rs</a>:</p>
+    <pre><code class="language-rust">/// Look up an exact-name declaration on `declared`.
+fn declared_version(declared: &amp;[GenericVirtualPackage], name: &amp;str) -&gt; Option&lt;Version&gt; {
+    declared
+        .iter()
+        .find(|virtual_package| virtual_package.name.as_normalized() == name)
+        .map(|virtual_package| virtual_package.version.clone())
+}</code></pre>
+    <ul>
+      <li><code>declared: &amp;[GenericVirtualPackage]</code>: the function reads a list of packages it does not own.
+        It takes a slice, not <code>&amp;Vec</code>, so callers can pass any contiguous list.</li>
+      <li><code>name: &amp;str</code>: the name to look for is only compared, so it is borrowed.</li>
+      <li><code>-&gt; Option&lt;Version&gt;</code>: the result is <em>owned</em>. Either there is a matching package,
+        and you get its version, or there is none (<code>Option</code> is <a href="m04-option-result.html">M04</a>).</li>
+      <li><code>.iter()</code> walks the slice by shared reference; <code>.find(...)</code> returns a reference to the
+        first match. Both are borrows of <code>declared</code>.</li>
+      <li><code>.map(|virtual_package| virtual_package.version.clone())</code>: the found item is a
+        <code>&amp;GenericVirtualPackage</code>. Returning <code>virtual_package.version</code> directly would be
+        moving a field out of a borrow (E0507). So the function clones the version, giving the caller an independent
+        value that does not borrow <code>declared</code>.</li>
+    </ul>
+    <h3>Mutate through <code>&amp;mut Vec</code>, with borrows that end in time</h3>
+    <p>From <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/platform.rs#L1035-L1053">crates/pixi_manifest/src/platform.rs</a>:</p>
+    <pre><code class="language-rust">/// Insert any subdir default that is not already present in `declared` (by
+/// virtual-package name). Entries already in `declared` win, so a user-set
+/// `__linux = "5.10"` is preserved untouched. ...
+pub(crate) fn merge_subdir_defaults(declared: &amp;mut Vec&lt;GenericVirtualPackage&gt;, subdir: Platform) {
+    let has_libc = declared
+        .iter()
+        .any(|gvp| matches!(gvp.name.as_normalized(), "__glibc" | "__musl" | "__eglibc"));
+    for default in subdir_default_virtual_packages(subdir) {
+        if default.name.as_normalized() == "__glibc" &amp;&amp; has_libc {
+            continue;
+        }
+        if declared.iter().any(|gvp| gvp.name == default.name) {
+            continue;
+        }
+        declared.push(default);
+    }
+}</code></pre>
+    <ul>
+      <li><code>declared: &amp;mut Vec&lt;GenericVirtualPackage&gt;</code>: the function adds to the caller's list, so it
+        needs an exclusive borrow. It takes <code>&amp;mut Vec</code>, not <code>&amp;mut [T]</code>, because a slice
+        cannot grow: <code>push</code> is a <code>Vec</code> method.</li>
+      <li><code>subdir: Platform</code> is taken by value. <code>Platform</code> is a small <code>Copy</code> enum, so
+        "by value" just copies it.</li>
+      <li><code>let has_libc = declared.iter().any(...)</code> borrows <code>declared</code> shared, but only for that
+        expression. The result is a plain <code>bool</code>, which does not borrow anything, so by the next line the
+        shared borrow is over.</li>
+      <li><code>for default in subdir_default_virtual_packages(subdir)</code>: the function returns owned packages and
+        the loop consumes them, so each <code>default</code> is owned by the loop body.</li>
+      <li><code>declared.iter().any(|gvp| gvp.name == default.name)</code> is another short shared borrow that ends
+        when <code>any</code> returns, so the following <code>declared.push(default)</code> may take
+        <code>&amp;mut</code>. That push also <em>moves</em> <code>default</code> into the vector.</li>
+    </ul>
+    <details class="reveal"><summary>Why does <code>declared_version</code> return <code>Option&lt;Version&gt;</code> instead of <code>Option&lt;&amp;Version&gt;</code>?</summary>
+      <p>Returning a reference would also work (the reference would borrow <code>declared</code>, which the compiler
+        allows via lifetime elision, <a href="m07-lifetimes.html">M07</a>). But the caller then could not change the
+        list while holding the result. Cloning a version is cheap and frees the caller from that constraint. Owning
+        the result is often the simplest API.</p>
+    </details>
+    <details class="reveal"><summary>What would go wrong if <code>has_libc</code> were computed inside the loop, after a <code>push</code>?</summary>
+      <p>It would still compile (each borrow is short), but the meaning would change: after pushing a default
+        <code>__glibc</code>, the check would see it and skip later libc entries. Computing it once, before any push,
+        captures the user's original declarations. Borrow rules keep the code memory-safe; you still have to think
+        about the order of reads and writes for correctness.</p>
+    </details>
+    <details class="reveal"><summary>Could the second check be written as <code>let exists = declared.iter().find(...); declared.push(default);</code> with <code>exists</code> used after the push?</summary>
+      <p>No. <code>find</code> returns <code>Option&lt;&amp;GenericVirtualPackage&gt;</code>, a borrow into
+        <code>declared</code>. Using it after <code>push</code> keeps the shared borrow alive across a mutable one:
+        E0502, for exactly the reallocation reason shown in the visualizer. <code>any</code> returns a
+        <code>bool</code>, which is why Pixi's version is fine.</p>
+    </details>
+  </section>
+
+  <section class="lesson-section" id="practice">
+    <h2>Practice</h2>
+    <p>Each exercise is checked by <code>cargo test</code>. Press Check to run the tests against your code.</p>
+
+    <div class="exercise" data-id="m03-e1" data-title="Return a slice: first_word">
+      <div class="exercise-prompt">
+        <p>Write <code>first_word(s: &amp;str) -&gt; &amp;str</code> that returns the part of <code>s</code> before the
+          first space, or all of <code>s</code> if there is no space. Return a slice of the input; do not allocate a
+          <code>String</code>. Leading spaces are not trimmed: <code>first_word(" x")</code> is <code>""</code>.</p>
+      </div>
+<textarea class="starter">
+fn first_word(s: &str) -> &str {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn stops_at_first_space() {
+    assert_eq!(first_word("pixi run test"), "pixi", "the text before the first space");
+}
+
+#[test]
+fn whole_string_without_space() {
+    assert_eq!(first_word("rattler"), "rattler", "no space means the whole input");
+    assert_eq!(first_word(""), "", "the empty string has an empty first word");
+}
+
+#[test]
+fn leading_space_gives_empty() {
+    assert_eq!(first_word(" x"), "", "a leading space means the first word is empty");
+}
+
+#[test]
+fn returns_a_view_into_the_input() {
+    let owned = String::from("conda forge");
+    let w = first_word(&owned);
+    assert_eq!(w.as_ptr(), owned.as_ptr(), "the result should point into the input, not be a new allocation");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>s.find(' ')</code> gives you the byte index of the first
+        space, if any. Then slice with <code>&amp;s[..i]</code>. Or use <code>s.split(' ').next()</code>, which
+        always has at least one item.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn first_word(s: &amp;str) -&gt; &amp;str {
+    match s.find(' ') {
+        Some(i) =&gt; &amp;s[..i],
+        None =&gt; s,
+    }
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m03-e2" data-title="Borrow instead of move">
+      <div class="exercise-prompt">
+        <p><code>count_pinned</code> counts the specs that contain <code>"=="</code> (an exact pin). As written, it
+          takes the vector by value, so the caller loses it. Change the signature so it borrows a slice,
+          <code>count_pinned(specs: &amp;[String]) -&gt; usize</code>, and write the body.</p>
+        <p>The tests call <code>count_pinned(&amp;specs)</code> and then use <code>specs</code> again, so the starter
+          will not compile against them: the first Check shows a type error (E0308, expected
+          <code>Vec&lt;String&gt;</code>, found <code>&amp;Vec&lt;String&gt;</code>). That is your clue.</p>
+      </div>
+<textarea class="starter">
+fn count_pinned(specs: Vec<String>) -> usize {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+fn specs() -> Vec<String> {
+    vec![
+        String::from("python==3.13"),
+        String::from("numpy>=2"),
+        String::from("pandas==2.2.3"),
+    ]
+}
+
+#[test]
+fn counts_exact_pins() {
+    let specs = specs();
+    assert_eq!(count_pinned(&specs), 2, "python==3.13 and pandas==2.2.3 are pinned");
+}
+
+#[test]
+fn caller_keeps_the_vector() {
+    let specs = specs();
+    let first = count_pinned(&specs);
+    let second = count_pinned(&specs);
+    assert_eq!(first, second, "borrowing twice gives the same answer");
+    assert_eq!(specs.len(), 3, "the caller still owns all three specs");
+}
+
+#[test]
+fn works_on_a_sub_slice() {
+    let specs = specs();
+    assert_eq!(count_pinned(&specs[1..]), 1, "only pandas==2.2.3 is pinned in the last two");
+    assert_eq!(count_pinned(&[]), 0, "an empty slice has no pins");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Loop with <code>for s in specs</code> (on a slice, each
+        <code>s</code> is a <code>&amp;String</code>) and test <code>s.contains("==")</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn count_pinned(specs: &amp;[String]) -&gt; usize {
+    let mut n = 0;
+    for s in specs {
+        if s.contains("==") {
+            n += 1;
+        }
+    }
+    n
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m03-e3" data-title="Change the caller's list: ensure_channel">
+      <div class="exercise-prompt">
+        <p>Write <code>ensure_channel(channels: &amp;mut Vec&lt;String&gt;, name: &amp;str) -&gt; bool</code>. If
+          <code>name</code> is not already in <code>channels</code>, append it and return <code>true</code>. If it is
+          already there, leave the list alone and return <code>false</code>. Calling it twice with the same name must
+          not create a duplicate.</p>
+      </div>
+<textarea class="starter">
+fn ensure_channel(channels: &mut Vec<String>, name: &str) -> bool {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn appends_missing_channel() {
+    let mut channels = vec![String::from("conda-forge")];
+    assert!(ensure_channel(&mut channels, "bioconda"), "bioconda was missing, so it is added and true is returned");
+    assert_eq!(channels, vec!["conda-forge", "bioconda"], "the new channel goes at the end");
+}
+
+#[test]
+fn leaves_existing_channel() {
+    let mut channels = vec![String::from("conda-forge"), String::from("bioconda")];
+    assert!(!ensure_channel(&mut channels, "conda-forge"), "conda-forge is already present, so false is returned");
+    assert_eq!(channels.len(), 2, "nothing is added for an existing channel");
+}
+
+#[test]
+fn idempotent() {
+    let mut channels = Vec::new();
+    ensure_channel(&mut channels, "pytorch");
+    ensure_channel(&mut channels, "pytorch");
+    assert_eq!(channels, vec!["pytorch"], "calling twice must not duplicate");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Check first with a short shared borrow
+        (<code>channels.iter().any(|c| c == name)</code>, which gives a plain <code>bool</code>), then push
+        <code>name.to_string()</code>. That is the same shape as Pixi's <code>merge_subdir_defaults</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn ensure_channel(channels: &amp;mut Vec&lt;String&gt;, name: &amp;str) -&gt; bool {
+    if channels.iter().any(|c| c == name) {
+        return false;
+    }
+    channels.push(name.to_string());
+    true
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m03-e4" data-title="Two slices from one string: split_spec">
+      <div class="exercise-prompt">
+        <p>A dependency spec looks like <code>"numpy &gt;=2.1"</code>: a name, optional spaces, then an optional
+          constraint. Write <code>split_spec(spec: &amp;str) -&gt; (&amp;str, &amp;str)</code> returning the name and
+          the constraint, both trimmed of surrounding spaces. The name ends at the first space or at the first of
+          the characters <code>&lt;</code>, <code>&gt;</code>, <code>=</code>, <code>!</code>, <code>~</code>. If there
+          is no constraint, the second part is <code>""</code>. Both parts must be slices of the input.</p>
+      </div>
+<textarea class="starter">
+fn split_spec(spec: &str) -> (&str, &str) {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+#[test]
+fn name_and_constraint_with_space() {
+    assert_eq!(split_spec("numpy >=2.1"), ("numpy", ">=2.1"), "split at the space");
+}
+
+#[test]
+fn name_and_constraint_without_space() {
+    assert_eq!(split_spec("python==3.13"), ("python", "==3.13"), "split where the operator starts");
+    assert_eq!(split_spec("pandas<3"), ("pandas", "<3"), "< also starts a constraint");
+}
+
+#[test]
+fn name_only() {
+    assert_eq!(split_spec("rattler"), ("rattler", ""), "no constraint gives an empty second part");
+    assert_eq!(split_spec("  pixi  "), ("pixi", ""), "surrounding spaces are trimmed");
+}
+
+#[test]
+fn extra_spaces_trimmed() {
+    assert_eq!(split_spec("numpy   >=2 ,<3 "), ("numpy", ">=2 ,<3"), "trim both parts but keep inner spaces");
+}
+
+#[test]
+fn parts_borrow_the_input() {
+    let owned = String::from("numpy >=2");
+    let (name, constraint) = split_spec(&owned);
+    assert_eq!(name.as_ptr(), owned.as_ptr(), "the name should be a slice of the input");
+    assert_eq!(constraint.as_ptr(), owned[6..].as_ptr(), "the constraint should be a slice of the input");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Trim first: <code>let spec = spec.trim();</code> (that is also a
+        slice). Then find the split point with
+        <code>spec.find(|c: char| c == ' ' || "&lt;&gt;=!~".contains(c))</code>. Slice before and after it, and trim
+        the second part.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">fn split_spec(spec: &amp;str) -&gt; (&amp;str, &amp;str) {
+    let spec = spec.trim();
+    match spec.find(|c: char| c == ' ' || "&lt;&gt;=!~".contains(c)) {
+        Some(i) =&gt; (&amp;spec[..i], spec[i..].trim()),
+        None =&gt; (spec, ""),
+    }
+}</code></pre>
+      </details>
+    </div>
+
+    <div class="exercise" data-id="m03-e5" data-title="Take without cloning: drain_names">
+      <div class="exercise-prompt">
+        <p>You are given a mutable slice of packages. Write
+          <code>drain_names(pkgs: &amp;mut [Package]) -&gt; Vec&lt;String&gt;</code> that moves every package's
+          <code>name</code> out into the returned vector, in order, and leaves an empty string in each package's
+          <code>name</code>. Versions are untouched. Do not clone: the tests check that the returned strings are the
+          original allocations.</p>
+        <p>The naive <code>names.push(p.name)</code> fails with E0507 ("cannot move out of <code>p.name</code> which
+          is behind a mutable reference"). Use the tool from the error section that takes a value and leaves a
+          placeholder.</p>
+      </div>
+<textarea class="starter">
+#[derive(Debug, PartialEq)]
+struct Package {
+    name: String,
+    version: String,
+}
+
+fn drain_names(pkgs: &mut [Package]) -> Vec<String> {
+    todo!()
+}
+</textarea>
+      <script type="text/x-rust" class="tests">
+fn sample() -> Vec<Package> {
+    vec![
+        Package { name: String::from("python"), version: String::from("3.13") },
+        Package { name: String::from("numpy"), version: String::from("2.1") },
+    ]
+}
+
+#[test]
+fn returns_names_in_order() {
+    let mut pkgs = sample();
+    assert_eq!(drain_names(&mut pkgs), vec!["python", "numpy"], "names come out in slice order");
+}
+
+#[test]
+fn leaves_empty_names_and_keeps_versions() {
+    let mut pkgs = sample();
+    drain_names(&mut pkgs);
+    assert_eq!(pkgs[0].name, "", "each name is replaced by an empty string");
+    assert_eq!(pkgs[1].name, "", "each name is replaced by an empty string");
+    assert_eq!(pkgs[0].version, "3.13", "versions are not touched");
+    assert_eq!(pkgs[1].version, "2.1", "versions are not touched");
+}
+
+#[test]
+fn moves_rather_than_clones() {
+    let mut pkgs = sample();
+    let before = pkgs[1].name.as_ptr();
+    let names = drain_names(&mut pkgs);
+    assert_eq!(names[1].as_ptr(), before, "the returned String should be the original allocation, not a clone");
+}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Loop with <code>for p in pkgs.iter_mut()</code> (or
+        <code>for p in pkgs</code>, which on a <code>&amp;mut [T]</code> gives <code>&amp;mut T</code>) and push
+        <code>std::mem::take(&amp;mut p.name)</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary>
+<pre><code class="language-rust">#[derive(Debug, PartialEq)]
+struct Package {
+    name: String,
+    version: String,
+}
+
+fn drain_names(pkgs: &amp;mut [Package]) -&gt; Vec&lt;String&gt; {
+    let mut names = Vec::with_capacity(pkgs.len());
+    for p in pkgs {
+        names.push(std::mem::take(&amp;mut p.name));
+    }
+    names
+}</code></pre>
+      </details>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="mini-project">
+    <h2>Mini-project</h2>
+    <div class="project-box">
+      <div class="widget-head"><span class="w-kind">Mini-project</span><span class="w-title">A dependency list that owns its specs</span></div>
+      <div class="widget-body">
+        <p>Build a small library type that stores dependency specs and hands out borrows of them, the way a manifest
+          type in Pixi owns its data and lends it to the rest of the program. The point is to design each method's
+          signature deliberately: who owns, who borrows, who mutates.</p>
+        <p>Set up the project with Pixi:</p>
+        <pre data-label="Terminal"><code class="language-bash">pixi init deplist &amp;&amp; cd deplist
+pixi add rust
+pixi run cargo init --lib --name deplist
+pixi run cargo test</code></pre>
+        <p>In <code>src/lib.rs</code>, write:</p>
+        <ul>
+          <li><code>pub struct DepList { specs: Vec&lt;String&gt; }</code> with <code>pub fn new() -&gt; Self</code>.</li>
+          <li><code>pub fn add(&amp;mut self, spec: String) -&gt; bool</code>: stores the spec unless one with the same
+            name (the part before the first space or operator, as in exercise 4) is already present; returns whether
+            it was added. It takes <code>String</code> because it keeps the value.</li>
+          <li><code>pub fn get(&amp;self, name: &amp;str) -&gt; Option&lt;&amp;str&gt;</code>: the stored spec for a
+            name, borrowed. (You can write the body with a <code>for</code> loop and <code>return Some(s)</code>;
+            <code>None</code> means not found. <a href="m04-option-result.html">M04</a> covers <code>Option</code>.)</li>
+          <li><code>pub fn names(&amp;self) -&gt; Vec&lt;&amp;str&gt;</code>: every name, as slices of the stored specs.</li>
+          <li><code>pub fn remove(&amp;mut self, name: &amp;str) -&gt; Option&lt;String&gt;</code>: takes the spec out and
+            gives ownership to the caller.</li>
+          <li><code>pub fn into_specs(self) -&gt; Vec&lt;String&gt;</code>: consumes the list and returns its contents.</li>
+        </ul>
+        <p>Write tests in a <code>#[cfg(test)] mod tests</code> block at the bottom of <code>lib.rs</code> (you will
+          see this layout properly in <a href="m11-testing.html">M11</a>).</p>
+        <h4>Acceptance criteria</h4>
+        <ul class="checklist" data-id="m03-mini">
+          <li><code>pixi run cargo test</code> passes with at least six tests, one per method plus a duplicate-name test</li>
+          <li>No method clones a spec except where you can explain why in a comment</li>
+          <li>A test shows that after <code>let n = list.names();</code> you cannot call <code>list.add(...)</code> while
+            <code>n</code> is still used (write it, see the E0502, then comment it out with a note)</li>
+          <li>A test shows <code>into_specs</code> consumes the list (using <code>list</code> afterwards is E0382; again
+            comment it out with a note)</li>
+          <li><code>pixi run cargo clippy --all-targets -- -D warnings</code> is clean</li>
+        </ul>
+        <h4>Stretch goals</h4>
+        <ul>
+          <li>Add <code>pub fn rename(&amp;mut self, old: &amp;str, new: &amp;str) -&gt; bool</code> that edits the stored
+            spec in place without removing and re-adding it.</li>
+          <li>Add <code>pub fn constraints(&amp;self) -&gt; Vec&lt;(&amp;str, &amp;str)&gt;</code> returning
+            (name, constraint) pairs that borrow the stored data.</li>
+          <li>Implement <code>Drop</code> for <code>DepList</code> that prints how many specs were dropped, and write a
+            small <code>main</code> in <code>examples/</code> that shows when it runs.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="quiz">
+    <h2>Quiz</h2>
+    <div class="quiz" data-id="m03-quiz">
+<script type="application/json">
+{"title": "Ownership and borrowing", "passScore": 0.7, "questions": [
+  {"type": "single", "prompt": "Does this compile?", "code": "fn main() {\n    let a = String::from(\"pixi\");\n    let b = a;\n    println!(\"{a}\");\n}", "options": ["Yes, it prints pixi", "No: E0382, a was moved into b", "No: E0502, a is borrowed by b", "Yes, but b is a copy of a"], "answer": 1, "explanation": "<p><code>String</code> is not <code>Copy</code>, so <code>let b = a;</code> moves ownership. Using <code>a</code> afterwards is E0382 (borrow of moved value).</p>"},
+  {"type": "single", "prompt": "Does this compile?", "code": "fn main() {\n    let a = 5_u64;\n    let b = a;\n    println!(\"{a} {b}\");\n}", "options": ["Yes, it prints 5 5", "No: E0382, a was moved"], "answer": 0, "explanation": "<p><code>u64</code> is <code>Copy</code>: the assignment copies the eight bytes and both names stay valid.</p>"},
+  {"type": "multi", "prompt": "Which of these types are <code>Copy</code>?", "options": ["<code>i64</code>", "<code>String</code>", "<code>&amp;str</code>", "<code>Vec&lt;u8&gt;</code>", "<code>(u8, bool)</code>", "<code>&amp;mut String</code>"], "answer": [0, 2, 4], "explanation": "<p>Scalars, shared references, and tuples of <code>Copy</code> types are <code>Copy</code>. <code>String</code> and <code>Vec</code> own heap memory. <code>&amp;mut T</code> is not <code>Copy</code>, because copying it would create two exclusive references.</p>"},
+  {"type": "output", "prompt": "What does this print?", "code": "struct D(u8);\nimpl Drop for D {\n    fn drop(&mut self) { println!(\"{}\", self.0); }\n}\nfn main() {\n    let _x = D(1);\n    let _y = D(2);\n    {\n        let _z = D(3);\n    }\n    println!(\"4\");\n}", "answer": "3\n4\n2\n1", "explanation": "<p><code>_z</code> drops at the end of the inner block. After <code>4</code> is printed, the remaining locals drop in reverse declaration order: <code>_y</code> then <code>_x</code>.</p>"},
+  {"type": "single", "prompt": "Does this compile?", "code": "fn main() {\n    let mut v = vec![1, 2, 3];\n    let first = &v[0];\n    v.push(4);\n    println!(\"{first}\");\n}", "options": ["Yes", "No: E0502, first is still used after the mutable borrow by push", "No: E0499, two mutable borrows", "No: E0382, v was moved"], "answer": 1, "explanation": "<p><code>first</code> is a shared borrow of <code>v</code> that is used after <code>push</code>, which needs <code>&amp;mut v</code>. A push may reallocate and leave <code>first</code> dangling, so this is E0502.</p>"},
+  {"type": "single", "prompt": "Does this compile?", "code": "fn main() {\n    let mut v = vec![1, 2, 3];\n    let first = &v[0];\n    println!(\"{first}\");\n    v.push(4);\n}", "options": ["Yes, because the borrow ends at its last use", "No: E0502"], "answer": 0, "explanation": "<p>Non-lexical lifetimes: <code>first</code> is last used on the <code>println!</code> line, so the shared borrow is over before <code>push</code>.</p>"},
+  {"type": "text", "prompt": "Which error code means \"cannot borrow as mutable more than once at a time\"?", "answer": ["E0499"], "explanation": "<p>E0499 is two overlapping <code>&amp;mut</code> borrows of the same value. Finish with one before taking the other.</p>"},
+  {"type": "text", "prompt": "Which error code means \"cannot move out of <code>x</code> because it is borrowed\"?", "answer": ["E0505"], "explanation": "<p>E0505: a move would end the value's life while a borrow of it is still going to be used.</p>"},
+  {"type": "single", "prompt": "A function only needs to read a list of package names. Which parameter type is best?", "options": ["<code>Vec&lt;String&gt;</code>", "<code>&amp;Vec&lt;String&gt;</code>", "<code>&amp;[String]</code>", "<code>&amp;mut Vec&lt;String&gt;</code>"], "answer": 2, "explanation": "<p><code>&amp;[String]</code> borrows read-only and accepts a <code>Vec</code>, an array, or a sub-slice. <code>&amp;Vec</code> works but is needlessly narrow (clippy's <code>ptr_arg</code>). <code>Vec</code> would take ownership away from the caller.</p>"},
+  {"type": "output", "prompt": "What does this print?", "code": "fn main() {\n    let s = String::from(\"conda-forge\");\n    let t = &s[6..];\n    println!(\"{} {}\", t, t.len());\n}", "answer": "forge 5", "explanation": "<p><code>&amp;s[6..]</code> is a slice from byte 6 to the end: <code>forge</code>, five bytes. No new string is allocated.</p>"},
+  {"type": "single", "prompt": "Why does this fail? <code>fn first(v: &amp;Vec&lt;String&gt;) -&gt; String { v[0] }</code>", "options": ["E0507: you cannot move a String out of a vector you only borrow", "E0382: v was moved", "E0596: v is not mutable", "It compiles"], "answer": 0, "explanation": "<p><code>v[0]</code> is a place inside a borrowed vector. Returning it by value would move it out and leave a hole. Return <code>v[0].clone()</code>, or return <code>&amp;str</code>.</p>"},
+  {"type": "multi", "prompt": "Which of these move <code>s</code> (a <code>String</code>)?", "options": ["<code>let t = s;</code>", "<code>let n = s.len();</code>", "<code>v.push(s);</code>", "<code>takes_str(&amp;s);</code>", "<code>for c in s.chars() {}</code>", "<code>let p = Pkg { name: s };</code>"], "answer": [0, 2, 5], "explanation": "<p>Assignment, pushing into a collection, and storing in a struct field all move. <code>len</code> and <code>chars</code> borrow through <code>&amp;self</code>, and <code>&amp;s</code> is an explicit borrow.</p>"},
+  {"type": "single", "prompt": "What does <code>std::mem::take(&amp;mut pkg.name)</code> do, if <code>name</code> is a <code>String</code>?", "options": ["Clones the name", "Returns the old name and leaves an empty String in its place", "Drops the name", "Moves pkg"], "answer": 1, "explanation": "<p><code>mem::take</code> swaps in the type's <code>Default</code> value and returns the original, so you can move a value out from behind a <code>&amp;mut</code> without cloning.</p>"}
+]}
+</script>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="recap">
+    <h2>Recap</h2>
+    <ul>
+      <li>Python names share one object; Rust values have exactly one owner, which frees the value when it goes out of
+        scope.</li>
+      <li><code>String</code> and <code>Vec</code> are a stack header (pointer, length, capacity) owning a heap buffer.
+        A move copies the header and invalidates the old name.</li>
+      <li>Values move on assignment, function calls, returns, pushes, struct construction, and
+        <code>for x in v</code>. <code>Copy</code> types (scalars, <code>&amp;T</code>, tuples of them) are copied
+        instead.</li>
+      <li><code>.clone()</code> is an explicit, visible copy. On <code>Arc</code> it is a cheap reference-count bump.</li>
+      <li>Values drop at the end of scope, in reverse declaration order, or early with <code>drop(x)</code>.</li>
+      <li><code>&amp;T</code> is a shared, read-only borrow; <code>&amp;mut T</code> is an exclusive borrow. Many
+        readers or one writer, never both, and never past the owner's life. Borrows end at their last use.</li>
+      <li>Slices (<code>&amp;str</code>, <code>&amp;[T]</code>) are borrowed (pointer, length) views. Take them as
+        parameters for read-only data; take owned values when you store them.</li>
+      <li>Read errors by code, headline, the three labels, and <code>help:</code>. Fix by reordering, borrowing,
+        shrinking, <code>mem::take</code>, or cloning, in that order.</li>
+    </ul>
+    <div class="flashcards" data-title="Ownership and borrowing">
+      <script type="application/json">
+      [{"front": "What does <code>let b = a;</code> do when <code>a</code> is a <code>String</code>?", "back": "Moves ownership: copies the 24-byte header into <code>b</code>; <code>a</code> becomes unusable. The heap bytes are not copied."},
+       {"front": "<code>Copy</code> vs <code>Clone</code>", "back": "<code>Copy</code>: implicit bitwise copy, for small types that own nothing on the heap. <code>Clone</code>: explicit <code>.clone()</code>, may allocate."},
+       {"front": "When is a value dropped?", "back": "When its owner goes out of scope (reverse declaration order), or when passed to <code>drop()</code>. Moved-out values are dropped by their new owner."},
+       {"front": "The two borrowing rules", "back": "Many <code>&amp;T</code> or one <code>&amp;mut T</code>, never both at once; and no reference outlives its owner."},
+       {"front": "How long does a borrow last?", "back": "From where it is created to its last use (non-lexical lifetimes), not to the closing brace."},
+       {"front": "E0382", "back": "Use (or borrow) of a moved value. Borrow instead of moving, or clone."},
+       {"front": "E0502", "back": "A mutable and a shared borrow overlap. Reorder, or copy out what you need."},
+       {"front": "E0505", "back": "Moving a value while a borrow of it is still going to be used."},
+       {"front": "E0507", "back": "Moving out of a borrow or an index. Borrow, clone, or <code>std::mem::take</code>."},
+       {"front": "Why take <code>&amp;str</code> instead of <code>&amp;String</code>?", "back": "<code>&amp;String</code> coerces to <code>&amp;str</code>, and literals and sub-slices work too. Clippy's <code>ptr_arg</code> flags <code>&amp;String</code>."},
+       {"front": "What is a slice?", "back": "A borrowed view of contiguous data: a pointer and a length (16 bytes on 64-bit). It copies nothing."}]
+      </script>
+    </div>
+    <h3>Going further</h3>
+    <ul>
+      <li><a href="https://doc.rust-lang.org/book/ch04-00-understanding-ownership.html">The Rust Book, chapter 4: Understanding Ownership</a></li>
+      <li><a href="https://doc.rust-lang.org/rust-by-example/scope.html">Rust by Example: Scoping rules (RAII, ownership, borrowing)</a></li>
+      <li><a href="https://doc.rust-lang.org/std/marker/trait.Copy.html">std docs: the <code>Copy</code> trait</a> and <a href="https://doc.rust-lang.org/std/mem/fn.take.html"><code>std::mem::take</code></a></li>
+      <li><a href="https://doc.rust-lang.org/reference/destructors.html">The Rust Reference: Destructors (drop order)</a></li>
+      <li><a href="https://doc.rust-lang.org/error_codes/error-index.html">The Rust error code index</a> (the same text as <code>rustc --explain</code>)</li>
+      <li>Pixi: <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pixi_manifest/src/platform.rs#L1035-L1053"><code>merge_subdir_defaults</code></a> and <a href="https://github.com/prefix-dev/pixi/blob/451aa9596402530f1a4d8a50b5fe137570ad42a5/crates/pypi_modifiers/src/pypi_tags.rs#L88-L109"><code>declared_libc</code> / <code>declared_version</code></a></li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>
